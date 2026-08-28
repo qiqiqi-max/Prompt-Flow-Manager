@@ -1,0 +1,245 @@
+// tests/smoke.test.js - 冒烟测试
+// 运行：npm test          退出码 0 = 全过，非 0 = 有失败
+// 这里覆盖的都是真实出现过的故障，不是为了凑数：每条断言下面都注明了它防的是什么。
+// 界面能否真正渲染由 npm run test:ui（Electron 自检）负责，静态检查测不到那一层。
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { execSync } = require('child_process');
+
+const root = path.resolve(__dirname, '..');
+let failures = 0;
+function assert(cond, msg) {
+  if (cond) console.log('  ✓ ' + msg);
+  else { console.error('  ✗ ' + msg); failures++; }
+}
+function section(name) { console.log('--- ' + name + ' ---'); }
+
+const mainSrc = fs.readFileSync(path.join(root, 'electron-main.js'), 'utf8');
+const preloadSrc = fs.readFileSync(path.join(root, 'preload.js'), 'utf8');
+const rendererSrc = fs.readFileSync(path.join(root, 'src/renderer.js'), 'utf8');
+const htmlSrc = fs.readFileSync(path.join(root, 'src/index.html'), 'utf8');
+
+console.log('冒烟测试');
+
+section('关键文件存在性');
+const required = [
+  'electron-main.js', 'preload.js', 'lib/zip-import.js', 'scripts/sync-vendor.js',
+  'src/index.html', 'src/styles.css', 'src/renderer.js', 'src/i18n.js',
+  'src/vendor/marked.umd.js', 'src/vendor/purify.min.js', 'src/vendor/diff-match-patch.js',
+  'package.json', 'build/icon.png', 'prompt-flow-manager.ico', '.gitignore'
+];
+for (const f of required) assert(fs.existsSync(path.join(root, f)), '存在 ' + f);
+
+section('预置内容目录');
+function countMd(dir) {
+  let n = 0;
+  for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, ent.name);
+    if (ent.isDirectory()) n += countMd(p);
+    else if (ent.name.endsWith('.md')) n++;
+  }
+  return n;
+}
+for (const d of ['prompts', 'workflows', 'templates']) {
+  const full = path.join(root, d);
+  assert(fs.existsSync(full) && fs.statSync(full).isDirectory(), '目录存在 ' + d);
+  const count = countMd(full);
+  assert(count > 0, d + ' 下有 .md 文件（共 ' + count + ' 个）');
+}
+
+section('package.json 合法性');
+const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+assert(pkg.main === 'electron-main.js', 'main 指向 electron-main.js');
+assert(!!(pkg.scripts && pkg.scripts.start && pkg.scripts.dist && pkg.scripts.test), '有 start/dist/test 脚本');
+assert(!!(pkg.build && pkg.build.appId), 'build 配置有 appId');
+// 防回归：渲染进程用 vendor 副本，但 lib/zip-import.js 在主进程里 require yauzl，
+// 打进 asar 后必须能解析，所以 yauzl 只能是 dependencies。
+assert(!!(pkg.dependencies && pkg.dependencies.yauzl), 'yauzl 在 dependencies（主进程运行时需要）');
+assert(!!(pkg.dependencies && pkg.dependencies.archiver), 'archiver 在 dependencies');
+// 防回归：lib/ 曾漏在 build.files 之外会导致打包版启动即崩
+for (const p of ['lib/**/*', 'src/**/*', 'preload.js']) {
+  assert(pkg.build.files.includes(p), 'build.files 包含 ' + p);
+}
+
+section('JS 语法检查');
+const jsFiles = [
+  'electron-main.js', 'preload.js', 'lib/zip-import.js', 'scripts/sync-vendor.js',
+  'src/renderer.js', 'src/i18n.js', 'tests/smoke.test.js',
+  'src/vendor/marked.umd.js', 'src/vendor/purify.min.js', 'src/vendor/diff-match-patch.js'
+];
+for (const f of jsFiles) {
+  try {
+    execSync('node --check ' + JSON.stringify(path.join(root, f)), { stdio: 'pipe' });
+    assert(true, f + ' 语法正确');
+  } catch (e) {
+    assert(false, f + ' 语法错误: ' + (e.stderr ? e.stderr.toString().split('\n')[0] : e.message));
+  }
+}
+
+section('打包路径分离（曾导致打包版白屏）');
+// 故障回顾：APP_ROOT 打包后指向 userData，却又拿它去加载 preload.js / src/index.html，
+// 而这两个文件只存在于 asar 内，结果窗口一片空白。
+assert(/const CODE_ROOT = __dirname/.test(mainSrc), 'CODE_ROOT 用 __dirname 定位代码资源');
+assert(/app\.isPackaged \? app\.getPath\('userData'\) : __dirname/.test(mainSrc), 'DATA_ROOT 打包后指向 userData、开发时指向项目目录');
+// PFM_DATA_DIR 是给测试用的逃生口，只允许影响数据目录，不能影响代码目录
+assert(/PFM_DATA_DIR/.test(mainSrc), 'DATA_ROOT 支持 PFM_DATA_DIR 覆盖（供功能自检隔离数据）');
+assert(!/PFM_DATA_DIR[\s\S]{0,200}CODE_ROOT\s*=/.test(mainSrc), 'PFM_DATA_DIR 不影响 CODE_ROOT');
+assert(/preload: path\.join\(CODE_ROOT, 'preload\.js'\)/.test(mainSrc), 'preload 从 CODE_ROOT 加载');
+assert(/loadFile\(path\.join\(CODE_ROOT, 'src', 'index\.html'\)\)/.test(mainSrc), 'index.html 从 CODE_ROOT 加载');
+assert(!/path\.join\(DATA_ROOT, 'preload\.js'\)/.test(mainSrc), '未从数据目录加载 preload.js');
+assert(!/path\.join\(DATA_ROOT, 'src'/.test(mainSrc), '未从数据目录加载 src/');
+
+section('渲染进程隔离');
+assert(/contextIsolation: true/.test(mainSrc), 'contextIsolation 已开启');
+assert(/nodeIntegration: false/.test(mainSrc), 'nodeIntegration 已关闭');
+assert(/contextBridge\.exposeInMainWorld/.test(preloadSrc), 'preload 走 contextBridge');
+// 防回归：contextBridge 暴露的属性不可配置，若叫 'api' 会和 renderer.js 里
+// const api = ... 撞车，抛 "Identifier 'api' has already been declared"，整段脚本不执行。
+assert(!/exposeInMainWorld\('api'/.test(preloadSrc), "桥接名不叫 'api'（会与渲染进程的 const api 冲突)");
+assert(!/\brequire\s*\(/.test(rendererSrc), 'renderer.js 不再使用 require');
+// 防回归：i18n.js 已在全局声明 const I18N，renderer.js 再声明一次会让整个脚本不执行。
+assert(!/^\s*(const|let|var)\s+I18N\b/m.test(rendererSrc), 'renderer.js 未重复声明 I18N');
+const i18nDecls = (fs.readFileSync(path.join(root, 'src/i18n.js'), 'utf8').match(/^\s*(const|let|var)\s+I18N\b/gm) || []).length;
+assert(i18nDecls === 1, 'I18N 全局只声明一次');
+for (const v of ['vendor/marked.umd.js', 'vendor/purify.min.js', 'vendor/diff-match-patch.js', 'i18n.js', 'renderer.js']) {
+  assert(htmlSrc.includes('src="' + v + '"'), 'index.html 引入了 ' + v);
+}
+assert(/Content-Security-Policy/.test(htmlSrc), 'index.html 有 CSP');
+
+section('主进程符号完整性（曾出现调用不存在的函数）');
+// 故障回顾：import-single / import-zip / add-project-type / remove-project-type
+// 调用了从未定义的 createFile() 和 setConfig()，一点就 ReferenceError。
+assert(/async function createFileAt\(/.test(mainSrc), 'createFileAt 已定义');
+assert(/async function updateConfig\(/.test(mainSrc), 'updateConfig 已定义');
+assert(!/createFile\(null,/.test(mainSrc), '不再调用不存在的 createFile(null, ...)');
+assert(!/setConfig\(null,/.test(mainSrc), '不再调用不存在的 setConfig(null, ...)');
+// 粗查：所有被调用的本地函数都要有定义
+const defined = new Set();
+for (const m of mainSrc.matchAll(/(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/g)) defined.add(m[1]);
+for (const m of mainSrc.matchAll(/const\s+([A-Za-z_$][\w$]*)\s*=/g)) defined.add(m[1]);
+for (const m of mainSrc.matchAll(/let\s+([A-Za-z_$][\w$]*)/g)) defined.add(m[1]);
+const imported = new Set(['readZipMarkdownEntries', 'sanitizeTitle', 'uniqueRel']);
+const suspicious = ['createFile', 'setConfig', 'saveVersionFile', 'writeConfig'];
+for (const name of suspicious) {
+  const called = new RegExp('(?<![\\w.])' + name + '\\s*\\(').test(mainSrc);
+  assert(!called || defined.has(name) || imported.has(name), name + ' 未被当作不存在的函数调用');
+}
+
+section('ZIP 导入逻辑');
+const { readZipMarkdownEntries, sanitizeTitle, uniqueRel } = require('../lib/zip-import');
+// 防回归：原实现用 archiver（只能压缩）去"解压"，导入永远是空的却返回成功
+assert(!/require\('archiver'\)\('zip'/.test(mainSrc), '不再用 archiver 假装解压');
+assert(/zip-import/.test(mainSrc), '主进程使用 lib/zip-import');
+
+// uniqueRel 死循环回归：原代码 while 循环体不改变 rel
+const existing = new Set(['prompts/testing/a.md', 'prompts/testing/a-1.md']);
+const exists = (r) => existing.has(r);
+assert(uniqueRel('prompts/testing/b.md', exists) === 'prompts/testing/b.md', '无冲突时原样返回');
+assert(uniqueRel('prompts/testing/a.md', exists) === 'prompts/testing/a-2.md', '重名时递增到未占用的名字');
+let loopGuard = true;
+try {
+  // 全部占用时必须抛错而不是死循环
+  uniqueRel('x.md', () => true);
+  loopGuard = false;
+} catch (e) { loopGuard = /同名文件过多/.test(e.message); }
+assert(loopGuard, '候选名耗尽时抛错，不会死循环');
+
+// sanitizeTitle：frontmatter 的 title 会变成文件名，必须挡住路径穿越
+assert(sanitizeTitle('../../evil') === '_.._evil' || !sanitizeTitle('../../evil').includes('/'), 'title 中的路径分隔符被清除');
+assert(!sanitizeTitle('a\\b:c*d?e"f<g>h|i').match(/[\\/:*?"<>|]/), 'Windows 非法字符被清除');
+assert(sanitizeTitle('   ') === '未命名', '空标题回退为默认名');
+
+section('ZIP 真实往返（压缩 → 解压）');
+(async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pfm-zip-'));
+  const zipPath = path.join(tmp, 't.zip');
+  try {
+    const archiver = require('archiver');
+    await new Promise((resolve, reject) => {
+      const out = fs.createWriteStream(zipPath);
+      const ar = archiver('zip', { zlib: { level: 9 } });
+      out.on('close', resolve);
+      ar.on('error', reject);
+      ar.pipe(out);
+      ar.append('---\ntitle: 往返测试\nstage: testing\n---\n正文内容', { name: 'prompts/testing/往返测试.md' });
+      ar.append('---\ntitle: 第二个\n---\nbody2', { name: 'nested/dir/第二个.md' });
+      ar.append('not markdown', { name: 'readme.txt' });
+      ar.finalize();
+    });
+    const { entries, skipped } = await readZipMarkdownEntries(zipPath);
+    assert(entries.length === 2, '只读出 .md 条目（读到 ' + entries.length + ' 个，忽略 .txt）');
+    assert(skipped.length === 0, '无超限条目被跳过');
+    const roundTrip = entries.find(e => e.name === '往返测试.md');
+    assert(!!roundTrip, '条目名正确解析（含中文）');
+    assert(!!roundTrip && roundTrip.content.includes('正文内容'), '条目内容完整且为 UTF-8');
+    const oversize = await readZipMarkdownEntries(zipPath, { maxBytes: 5 });
+    assert(oversize.entries.length === 0 && oversize.skipped.length === 2, '超过大小上限的条目被跳过而非静默丢弃');
+  } catch (e) {
+    assert(false, 'ZIP 往返测试异常: ' + e.message);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
+  section('版本管理约定');
+  // 防回归：星标版本曾被算进 30 条上限，导致未星标版本被提前删掉
+  assert(/const unpinned = files\.filter\(f => !pinned\[f\]\)/.test(mainSrc), 'pruneVersions 只按未星标数量算配额');
+  assert(!/removed >= files\.length - MAX_UNPINNED_VERSIONS/.test(mainSrc), '不再用总数（含星标）算配额');
+  // 防回归：时间戳只到秒，同一秒内两次保存会互相覆盖
+  assert(/getMilliseconds\(\)/.test(mainSrc), '版本时间戳带毫秒，避免同秒覆盖');
+  // 防回归：versionDirFor 直接 path.join(rel)，可路径穿越
+  assert(/path\.relative\(VERSIONS_DIR, resolved\)\.startsWith\('\.\.'\)/.test(mainSrc), 'versionDirFor 做了越权校验');
+  assert(/VERSION_FILE_RE/.test(mainSrc), '版本文件名有白名单校验');
+  assert(!/path\.join\(versionDirFor\(rel\), file\)/.test(mainSrc), 'read-version 不再直接拼接未校验的 file');
+
+  section('锁定与配置');
+  // 防回归：锁定只存在渲染进程内存里，主进程照删不误
+  assert(/async function isLocked\(/.test(mainSrc), '主进程有 isLocked');
+  assert(/if \(await isLocked\(rel\)\) throw new Error/.test(mainSrc), 'trash 在主进程强制校验锁');
+  assert(/lockedFiles: \[\]/.test(mainSrc), 'loadConfig 默认值含 lockedFiles');
+  // 防回归：resize/move 每次触发都读写 config.json
+  assert(/setTimeout\(flushBounds/.test(mainSrc), '窗口尺寸保存做了防抖');
+  assert(!/win\.on\('resize', saveBounds\)/.test(mainSrc), '不再直接把未防抖的写盘挂到 resize');
+
+  section('测试防护');
+// 功能自检会增删文件，必须拒绝在没有 PFM_DATA_DIR 的情况下运行
+assert(/拒绝在真实数据目录上跑/.test(mainSrc), '功能自检未设 PFM_DATA_DIR 时会拒绝执行');
+assert(fs.existsSync(path.join(root, 'tests/ui-smoke.js')), '存在 tests/ui-smoke.js');
+assert(fs.existsSync(path.join(root, 'tests/functional-smoke.js')), '存在 tests/functional-smoke.js');
+assert(!!pkg.scripts['test:fn'] && !!pkg.scripts['test:ui'], '有 test:ui / test:fn 脚本');
+
+section('调试残留');
+  // 防回归：buildSubTree/listTree 每次调用都同步 appendFileSync，日志无限增长
+  assert(!/appendFileSync\(path\.join\(DATA_ROOT, 'debug\.log'\)/.test(mainSrc), '不再往数据目录写 debug.log');
+  assert(!mainSrc.includes('\uFFFD'), 'electron-main.js 无编码乱码字符');
+  for (const junk of ['.shot.ps1', '.screenshot.png', '.screenshot-v2.png', 'debug.log']) {
+    assert(!fs.existsSync(path.join(root, junk)), '开发残留已清理: ' + junk);
+  }
+
+  section('i18n 键完整性');
+  const I18N = require('../src/i18n.js');
+  const zhKeys = Object.keys(I18N.zh).sort();
+  const enKeys = Object.keys(I18N.en).sort();
+  assert(zhKeys.length > 20, 'zh 字典条目数 > 20');
+  assert(zhKeys.length === enKeys.length, 'en 与 zh 条目数一致 (' + zhKeys.length + ' vs ' + enKeys.length + ')');
+  assert(zhKeys.filter(k => !(k in I18N.en)).length === 0, 'en 无缺失键');
+  assert(enKeys.filter(k => !(k in I18N.zh)).length === 0, 'zh 无缺失键');
+
+  section('frontmatter 示例格式');
+  const sampleMd = fs.readFileSync(path.join(root, 'prompts/project-init/需求分析.md'), 'utf8');
+  assert(/^---\r?\n[\s\S]*?\r?\n---/.test(sampleMd), '示例提示词含 frontmatter');
+
+  section('图标');
+  const iconPng = fs.readFileSync(path.join(root, 'build/icon.png'));
+  assert(iconPng.length > 1000, 'icon.png 非空 (>1KB)');
+  assert(iconPng[0] === 0x89 && iconPng[1] === 0x50, 'icon.png 是 PNG 格式');
+
+  console.log('');
+  if (failures === 0) {
+    console.log('全部通过 ✓（界面能否真正渲染请另跑 npm run test:ui）');
+    process.exit(0);
+  } else {
+    console.error(failures + ' 项失败');
+    process.exit(1);
+  }
+})();

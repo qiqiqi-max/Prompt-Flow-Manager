@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:;">
+  <title>Prompt Flow Manager</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="theme-light">
+  <div id="app">
+    <!-- 顶部工具栏 -->
+    <header class="toolbar">
+      <div class="toolbar-left">
+        <button class="btn-icon" id="btn-new-prompt" data-i18n="btnNewPrompt">＋ 提示词</button>
+        <button class="btn-icon" id="btn-new-workflow" data-i18n="btnNewWorkflow">＋ 工作流</button>
+        <button class="btn-icon" id="btn-import" title="导入 (Ctrl+I)">📥</button>
+        <button class="btn-icon" id="btn-new-folder" data-i18n="btnNewFolder">＋ 目录</button>
+      </div>
+      <div class="toolbar-center">
+        <input type="text" id="search-box" data-i18n-placeholder="searchPlaceholder" placeholder="搜索提示词（标题/标签/内容）… Ctrl+Shift+F" autocomplete="off">
+        <button class="btn-link" id="btn-filter-toggle"><span data-i18n="advancedFilter">高级筛选</span> ▾</button>
+      </div>
+      <div class="toolbar-right">
+        <button class="btn-icon" id="btn-export" data-i18n="btnExport">导出</button>
+        <button class="btn-icon" id="btn-trash" data-i18n="btnTrash">回收站</button>
+        <button class="btn-icon" id="btn-settings" data-i18n="btnSettings">⚙</button>
+        <button class="btn-icon" id="btn-theme" data-i18n-title="btnTheme" title="切换主题 (Ctrl+Shift+L)">🌓</button>
+      </div>
+    </header>
+
+    <!-- 高级筛选面板 -->
+    <div id="filter-panel" class="filter-panel hidden">
+      <div class="filter-row">
+        <label data-i18n="stage">阶段</label>
+        <select id="filter-stage"><option value="" data-i18n="allStages">全部</option></select>
+      </div>
+      <div class="filter-row">
+        <label data-i18n="projectType">工程类型</label>
+        <select id="filter-type"><option value="" data-i18n="allTypes">全部</option></select>
+      </div>
+      <div class="filter-row">
+        <label data-i18n="tag">标签</label>
+        <input type="text" id="filter-tag" data-i18n-placeholder="tagPlaceholder" placeholder="输入标签关键词" list="tag-datalist" autocomplete="off">
+        <datalist id="tag-datalist"></datalist>
+      </div>
+      <div class="filter-actions">
+        <button class="btn-link" id="btn-filter-apply" data-i18n="apply">应用</button>
+        <button class="btn-link" id="btn-filter-clear" data-i18n="clear">清空</button>
+      </div>
+    </div>
+
+    <!-- 主体两栏 -->
+    <main class="main">
+      <!-- 左：文件树 -->
+      <aside class="sidebar">
+        <div class="sidebar-header" data-i18n="sidebarFiles">文件</div>
+        <div id="tree" class="tree"></div>
+        <div id="search-results" class="search-results hidden"></div>
+      </aside>
+
+      <!-- 分隔条 -->
+      <div class="resizer" id="resizer"></div>
+
+      <!-- 右：内容区 -->
+      <section class="content">
+        <!-- 状态栏 -->
+        <div id="status-bar" class="status-bar">
+          <span id="status-info" data-i18n="ready">就绪</span>
+          <span id="status-counts"></span>
+        </div>
+
+        <!-- 空状态 -->
+        <div id="empty-state" class="empty-state">
+          <div class="empty-icon">📝</div>
+          <h2 data-i18n="appTitle">提示词流程管理器</h2>
+          <p class="empty-desc" data-i18n="emptyDesc">从左侧选择一个提示词，或新建开始</p>
+          <div class="empty-actions">
+            <button class="btn-primary" id="empty-new-prompt" data-i18n="newPrompt">新建提示词</button>
+            <button class="btn-secondary" id="empty-new-workflow" data-i18n="newWorkflow">新建工作流</button>
+          </div>
+          <div id="stats-panel" class="stats-panel"></div>
+          <div id="recent-panel" class="recent-panel hidden">
+            <div class="recent-title" data-i18n="recent">最近打开</div>
+            <div id="recent-list" class="recent-list"></div>
+          </div>
+        </div>
+
+        <!-- 内容容器 -->
+        <div id="content-area" class="content-area hidden">
+          <!-- 多标签页栏 -->
+          <div id="tabs-bar" class="tabs-bar hidden"></div>
+          <!-- 面包屑 + 工具栏 -->
+          <div class="content-header">
+            <div class="breadcrumb" id="breadcrumb"></div>
+            <div class="content-actions">
+              <button class="btn-primary" id="btn-copy" data-i18n="copy">复制</button>
+              <button class="btn-secondary" id="btn-export-single" data-i18n="exportSingle">导出</button>
+              <button class="btn-secondary" id="btn-edit" data-i18n="edit">编辑</button>
+              <button class="btn-secondary" id="btn-history" data-i18n="history">历史</button>
+              <button class="btn-secondary" id="btn-rename" data-i18n="rename">重命名</button>
+              <button class="btn-secondary" id="btn-move" data-i18n="move">移动</button>
+              <button class="btn-danger" id="btn-delete" data-i18n="delete">删除</button>
+            </div>
+          </div>
+
+          <!-- 元信息条 -->
+          <div class="meta-bar" id="meta-bar"></div>
+
+          <!-- 预览区 -->
+          <div id="preview-wrap" class="preview-wrap">
+            <div id="preview" class="preview markdown-body"></div>
+          </div>
+
+          <!-- 编辑区（原地切换） -->
+          <div id="editor-wrap" class="editor-wrap hidden">
+            <textarea id="editor" class="editor" spellcheck="false" placeholder="在此编辑提示词内容…"></textarea>
+            <div class="editor-actions">
+              <button class="btn-primary" id="btn-save" data-i18n="save">保存 (Ctrl+S)</button>
+              <button class="btn-secondary" id="btn-cancel" data-i18n="cancel">取消</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- 历史抽屉 -->
+    <div id="history-drawer" class="drawer hidden">
+      <div class="drawer-header">
+        <span data-i18n="versionHistory">版本历史</span>
+        <button class="btn-icon" id="btn-history-close">✕</button>
+      </div>
+      <div id="version-list" class="version-list"></div>
+      <div id="version-detail" class="version-detail hidden">
+        <div class="version-detail-header">
+          <span id="version-detail-title"></span>
+          <button class="btn-link" id="btn-version-close-detail" data-i18n="returnToList">返回列表</button>
+        </div>
+        <div id="version-diff" class="version-diff"></div>
+      </div>
+    </div>
+
+    <!-- 回收站抽屉 -->
+    <div id="trash-drawer" class="drawer hidden">
+      <div class="drawer-header">
+        <span data-i18n="trash">回收站</span>
+        <div>
+          <button class="btn-link" id="btn-empty-trash" data-i18n="emptyTrash">清空</button>
+          <button class="btn-icon" id="btn-trash-close">✕</button>
+        </div>
+      </div>
+      <div id="trash-list" class="version-list"></div>
+    </div>
+
+    <!-- 设置抽屉 -->
+    <div id="settings-drawer" class="drawer hidden">
+      <div class="drawer-header">
+        <span data-i18n="settings">设置</span>
+        <button class="btn-icon" id="btn-settings-close">✕</button>
+      </div>
+      <div class="settings-body">
+        <div class="settings-section">
+          <h3 data-i18n="projectTypes">工程类型</h3>
+          <p class="settings-desc" data-i18n="projectTypesDesc">预设和自定义的类型，用于提示词元信息。</p>
+          <div class="types-list" id="types-list"></div>
+          <div class="types-actions">
+            <input type="text" id="new-type-input" data-i18n-placeholder="addTypePlaceholder" placeholder="输入新类型名称">
+            <button class="btn-primary" id="btn-add-type" data-i18n="addType">添加</button>
+          </div>
+        </div>
+        <div class="settings-section">
+          <h3 data-i18n="settingsLang">语言 / Language</h3>
+          <div class="lang-toggle">
+            <button class="btn-link" id="btn-lang-zh">中文</button>
+            <button class="btn-link" id="btn-lang-en">English</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 上下文菜单 -->
+  <div id="ctx-menu" class="ctx-menu hidden"></div>
+
+  <!-- 提示通知 -->
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- 第三方依赖：由 npm run sync-vendor 从 node_modules 同步到 src/vendor/。
+       contextIsolation 下渲染进程没有 require，必须以普通脚本加载。 -->
+  <script src="vendor/marked.umd.js"></script>
+  <script src="vendor/purify.min.js"></script>
+  <script src="vendor/diff-match-patch.js"></script>
+  <script src="i18n.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
