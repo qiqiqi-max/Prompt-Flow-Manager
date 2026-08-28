@@ -4,6 +4,47 @@ const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const fsp = require('fs/promises');
+// 统计读文件次数。搜索是唯一随库规模线性变差的操作，压测时用它量化 I/O。
+let fileReadCount = 0;
+function countedReadFile(fullPath) {
+  fileReadCount++;
+  return fsp.readFile(fullPath, 'utf8');
+}
+
+// ---------- 正文缓存 ----------
+// 搜索要遍历整库读正文。用户在搜索框里连打几个字，库没变却要重读所有文件。
+// 这里按 (mtime, size) 做缓存：每次仍然 stat（很便宜），只重读真正变过的文件。
+// 所以外部编辑器改的文件也能被发现，不会读到旧内容。
+// 已知边界：同一个 mtime 刻度内把文件改成同样大小会命中旧缓存，概率极低且两个
+// 维度同时相等才会发生，代价只是搜索结果延迟一次刷新。
+// 连 frontmatter 的解析结果一起缓存：getMetaList 每次都要对全库解析一遍，
+// 在 1000 条规模下这部分和 stat 一样构成主要耗时。
+const contentCache = new Map(); // fullPath -> { mtimeMs, size, content, meta }
+let cacheHits = 0;
+let cacheMisses = 0;
+
+const EMPTY_ENTRY = { content: '', meta: {} };
+
+async function readParsedCached(fullPath) {
+  let st;
+  try { st = await fsp.stat(fullPath); } catch { return EMPTY_ENTRY; }
+  const hit = contentCache.get(fullPath);
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
+    cacheHits++;
+    return hit;
+  }
+  cacheMisses++;
+  let content = '';
+  try { content = await countedReadFile(fullPath); } catch { return EMPTY_ENTRY; }
+  const entry = { mtimeMs: st.mtimeMs, size: st.size, content, meta: parseFrontmatter(content).meta };
+  contentCache.set(fullPath, entry);
+  return entry;
+}
+
+// 文件被删除/移动后清掉对应缓存，避免 Map 无限增长
+function dropFromCache(fullPath) {
+  contentCache.delete(fullPath);
+}
 const archiver = require('archiver'); // 仅用于压缩导出
 const { readZipMarkdownEntries, sanitizeTitle, uniqueRel } = require('./lib/zip-import');
 
@@ -90,17 +131,26 @@ const MAX_UNPINNED_VERSIONS = 30;
 
 let win = null;
 
+// ---------- 抛给渲染进程的错误 ----------
+// 渲染进程要把错误翻译成用户语言，所以必须能机器识别。
+// Electron 的 IPC 只把 Error.message 传过去（自定义属性会丢），
+// 因此错误码只能编进 message：`<CODE>|<细节>`。
+// 渲染侧用 describeError() 解析，未知码就原样显示。
+function appError(code, detail) {
+  return new Error(detail == null || detail === '' ? code : code + '|' + detail);
+}
+
 // ---------- 路径安全 ----------
 // 标准化根目录，避免因盘符大小写/分隔符差异导致 startsWith 误判。
 const DATA_ROOT_NORM = path.normalize(DATA_ROOT);
 function safeJoin(relPath) {
-  if (relPath == null) throw new Error('路径为空');
+  if (relPath == null) throw appError('E_PATH_EMPTY');
   const rel = String(relPath).replace(/\\/g, '/').replace(/^\/+/, '');
-  if (rel.includes('\0')) throw new Error('路径含非法字符');
+  if (rel.includes('\0')) throw appError('E_PATH_BAD_CHAR');
   const resolved = path.resolve(DATA_ROOT_NORM, rel);
   const rel2 = path.relative(DATA_ROOT_NORM, resolved);
   // 相对路径以 .. 开头说明逃逸出了根目录
-  if (rel2.startsWith('..')) throw new Error('路径越权: ' + relPath);
+  if (rel2.startsWith('..')) throw appError('E_PATH_ESCAPE', relPath);
   return resolved;
 }
 
@@ -170,10 +220,10 @@ function stripFrontmatter(content) {
 // 版本目录同样要做越权校验：relPath 来自渲染进程，不能直接拼进 path.join。
 function versionDirFor(relPath) {
   const rel = String(relPath == null ? '' : relPath).replace(/\\/g, '/').replace(/^\/+/, '');
-  if (!rel) throw new Error('路径为空');
-  if (rel.includes('\0')) throw new Error('路径含非法字符');
+  if (!rel) throw appError('E_PATH_EMPTY');
+  if (rel.includes('\0')) throw appError('E_PATH_BAD_CHAR');
   const resolved = path.resolve(VERSIONS_DIR, rel);
-  if (path.relative(VERSIONS_DIR, resolved).startsWith('..')) throw new Error('路径越权: ' + relPath);
+  if (path.relative(VERSIONS_DIR, resolved).startsWith('..')) throw appError('E_PATH_ESCAPE', relPath);
   return resolved;
 }
 
@@ -182,7 +232,7 @@ function versionDirFor(relPath) {
 const VERSION_FILE_RE = /^(?:restored-\d+-)?\d{8}-\d{6}(?:-\d{3})?\.md$/;
 function versionFilePath(relPath, file) {
   const name = String(file == null ? '' : file);
-  if (!VERSION_FILE_RE.test(name)) throw new Error('非法的版本文件名: ' + name);
+  if (!VERSION_FILE_RE.test(name)) throw appError('E_BAD_VERSION_FILE', name);
   return path.join(versionDirFor(relPath), name);
 }
 
@@ -305,7 +355,10 @@ async function listTree() {
 }
 
 // ---------- 元数据列表（用于筛选） ----------
-async function getMetaList() {
+// includeContent=true 时把已经读到的正文一并带出来。
+// 搜索需要正文，如果不带出去，searchAll 就得把每个文件再读一遍（2N 次 I/O）。
+// 默认不带：get-meta-list 的结果要经 IPC 序列化给渲染进程，正文会白白拷一份。
+async function getMetaList(includeContent = false) {
   const out = [];
   for (const top of ['prompts', 'workflows', 'templates']) {
     const rootDir = top === 'prompts' ? PROMPTS_DIR : top === 'workflows' ? WORKFLOWS_DIR : TEMPLATES_DIR;
@@ -317,15 +370,16 @@ async function getMetaList() {
         const rel = `${baseRel}/${e.name}`;
         if (e.isDirectory()) await walk(path.join(dir, e.name), rel);
         else if (e.name.toLowerCase().endsWith('.md')) {
-          let content = '';
-          try { content = await fsp.readFile(path.join(dir, e.name), 'utf8'); } catch {}
-          const { meta } = parseFrontmatter(content);
+          const entry = await readParsedCached(path.join(dir, e.name));
+          const meta = entry.meta;
           let stage = null;
           if (top === 'prompts') {
             const segs = rel.split('/');
             stage = segs.length > 2 ? segs[1] : null;
           }
-          out.push({ rel, name: e.name, meta, stage, top });
+          const item = { rel, name: e.name, meta, stage, top };
+          if (includeContent) item.content = entry.content;
+          out.push(item);
         }
       }
     };
@@ -338,11 +392,11 @@ async function getMetaList() {
 async function searchAll(query) {
   const q = String(query || '').trim().toLowerCase();
   if (!q) return [];
-  const meta = await getMetaList();
+  // 复用 getMetaList 已经读到的正文，不再逐个重读（原先是 2N 次 I/O）
+  const meta = await getMetaList(true);
   const results = [];
   for (const item of meta) {
-    let content = '';
-    try { content = await fsp.readFile(safeJoin(item.rel), 'utf8'); } catch {}
+    const content = item.content || '';
     const nameHit = (item.meta.title || item.name).toLowerCase().includes(q);
     const tagHit = Array.isArray(item.meta.tags) && item.meta.tags.some(t => String(t).toLowerCase().includes(q));
     const bodyRaw = stripFrontmatter(content);
@@ -386,15 +440,17 @@ ipcMain.handle('save-file', async (e, rel, content) => {
   const toWrite = bumpAutoFields(content, prev);
   await ensureDir(path.dirname(full));
   await fsp.writeFile(full, toWrite, 'utf8');
+  dropFromCache(full);
   return { content: toWrite, meta: parseFrontmatter(toWrite).meta };
 });
 
 async function createFileAt(rel, content) {
   const full = safeJoin(rel);
-  if (fs.existsSync(full)) throw new Error('文件已存在: ' + rel);
+  if (fs.existsSync(full)) throw appError('E_FILE_EXISTS', rel);
   await ensureDir(path.dirname(full));
   const toWrite = bumpAutoFields(content, null);
   await fsp.writeFile(full, toWrite, 'utf8');
+  dropFromCache(full);
   return { content: toWrite, meta: parseFrontmatter(toWrite).meta };
 }
 
@@ -403,9 +459,11 @@ ipcMain.handle('create-file', (e, rel, content) => createFileAt(rel, content));
 ipcMain.handle('rename', async (e, oldRel, newRel) => {
   const oldFull = safeJoin(oldRel);
   const newFull = safeJoin(newRel);
-  if (fs.existsSync(newFull)) throw new Error('目标已存在: ' + newRel);
+  if (fs.existsSync(newFull)) throw appError('E_TARGET_EXISTS', newRel);
   await ensureDir(path.dirname(newFull));
   await fsp.rename(oldFull, newFull);
+  dropFromCache(oldFull);
+  dropFromCache(newFull);
   // 版本目录跟随
   const oldV = versionDirFor(oldRel);
   const newV = versionDirFor(newRel);
@@ -430,7 +488,7 @@ async function isLocked(rel) {
 
 ipcMain.handle('trash', async (e, rel) => {
   const full = safeJoin(rel);
-  if (await isLocked(rel)) throw new Error('文件已锁定，无法删除: ' + rel);
+  if (await isLocked(rel)) throw appError('E_LOCKED', rel);
   if (!fs.existsSync(full)) return true;
   await ensureDir(TRASH_DIR);
   const id = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
@@ -442,6 +500,7 @@ ipcMain.handle('trash', async (e, rel) => {
   }
   const storePath = path.join(TRASH_DIR, storeName);
   await fsp.rename(full, storePath);
+  dropFromCache(full);
   const index = await readTrashIndex();
   // 版本目录一并移入回收站（若存在），恢复时一起还原
   let versionStore = null;
@@ -470,7 +529,7 @@ ipcMain.handle('list-trash', async () => readTrashIndex());
 ipcMain.handle('restore', async (e, id) => {
   const index = await readTrashIndex();
   const item = index.items.find(i => i.id === id);
-  if (!item) throw new Error('回收站项不存在');
+  if (!item) throw appError('E_TRASH_ITEM_MISSING');
   const storePath = path.join(TRASH_DIR, item.store);
   const targetFull = safeJoin(item.originalRel);
   await ensureDir(path.dirname(targetFull));
@@ -486,9 +545,11 @@ ipcMain.handle('restore', async (e, id) => {
       n++;
     }
     await fsp.rename(storePath, safeJoin(alt));
+    dropFromCache(safeJoin(alt));
     finalRel = alt;
   } else {
     await fsp.rename(storePath, targetFull);
+    dropFromCache(targetFull);
   }
   // 还原版本目录（若存在）。若目标版本目录已存在（同名文件被删后又重建过），
   // 不覆盖，而是并到新名字下保留两份历史。
@@ -568,6 +629,7 @@ ipcMain.handle('rollback-version', async (e, rel, file) => {
   // 回滚写入（作为新一次保存，bump 自动字段）
   const toWrite = bumpAutoFields(versionContent, prev);
   await fsp.writeFile(full, toWrite, 'utf8');
+  dropFromCache(full);
   return { content: toWrite, meta: parseFrontmatter(toWrite).meta };
 });
 
@@ -688,12 +750,12 @@ ipcMain.handle('import-zip', async () => {
 ipcMain.handle('get-stages', () => ({ stages: STAGES, labels: STAGE_LABELS }));
 
 ipcMain.handle('add-project-type', async (e, type) => {
-  if (!type || typeof type !== 'string') throw new Error('类型名称无效');
+  if (!type || typeof type !== 'string') throw appError('E_TYPE_INVALID');
   const t = String(type).trim();
-  if (!t) throw new Error('类型名称不能为空');
+  if (!t) throw appError('E_TYPE_EMPTY');
   const cfg = await loadConfig();
   const list = Array.isArray(cfg.projectTypes) ? [...cfg.projectTypes] : [...DEFAULT_PROJECT_TYPES];
-  if (list.includes(t)) throw new Error('类型已存在');
+  if (list.includes(t)) throw appError('E_TYPE_EXISTS', t);
   list.push(t);
   return await updateConfig({ projectTypes: list });
 });
@@ -701,7 +763,7 @@ ipcMain.handle('add-project-type', async (e, type) => {
 ipcMain.handle('remove-project-type', async (e, type) => {
   const cfg = await loadConfig();
   const list = Array.isArray(cfg.projectTypes) ? [...cfg.projectTypes] : [...DEFAULT_PROJECT_TYPES];
-  if (list.length <= 1) throw new Error('至少保留一个类型');
+  if (list.length <= 1) throw appError('E_TYPE_MIN_ONE');
   const idx = list.indexOf(type);
   if (idx === -1) return await updateConfig({});
   list.splice(idx, 1);
@@ -715,6 +777,60 @@ async function ensureDirs() {
   }
   // 确保阶段子目录存在
   for (const s of STAGES) await ensureDir(path.join(PROMPTS_DIR, s));
+}
+
+// ---------- 搜索压测（PFM_SELFTEST_BENCH=<条数>） ----------
+// 搜索会遍历整个库，是唯一随规模线性变差的操作。这里生成指定条数的提示词，
+// 量化耗时与读文件次数，避免"感觉快了"这种没有依据的结论。
+// 必须配 PFM_DATA_DIR，否则会往真实库里灌垃圾数据。
+async function runSearchBench(count) {
+  const stage = 'testing';
+  const dir = path.join(PROMPTS_DIR, stage);
+  await ensureDir(dir);
+  for (let i = 0; i < count; i++) {
+    const body = 'lorem ipsum '.repeat(40) + (i === count - 1 ? ' NEEDLE_AT_END ' : '') + 'dolor sit amet';
+    await fsp.writeFile(path.join(dir, `bench-${i}.md`),
+      `---\ntitle: Bench ${i}\nstage: ${stage}\ntags: [bench]\n---\n${body}`, 'utf8');
+  }
+  const time = async (label, fn) => {
+    fileReadCount = 0;
+    cacheHits = 0;
+    cacheMisses = 0;
+    const t0 = Date.now();
+    const r = await fn();
+    const ms = Date.now() - t0;
+    console.log(`[bench] ${label}: ${ms}ms, 读文件 ${fileReadCount} 次, 缓存命中 ${cacheHits}/${cacheHits + cacheMisses}, 结果 ${Array.isArray(r) ? r.length : '-'} 条`);
+    return { ms, reads: fileReadCount };
+  };
+  console.log(`[bench] 库规模: ${count} 条提示词`);
+  await time('getMetaList', () => getMetaList());
+  await time('search 命中正文末尾', () => searchAll('NEEDLE_AT_END'));
+  await time('search 命中标签', () => searchAll('bench'));
+  await time('search 无命中', () => searchAll('zzz_nothing_matches_zzz'));
+}
+
+// ---------- 自检用的系统对话框桩 ----------
+// 导出/导入四个流程都要弹系统对话框，正常跑不了自动化测试。
+// 这里在自检模式下把 dialog 换成"按队列返回预设结果"的桩，队列放在
+// PFM_SELFTEST_DIALOGS 指向的 JSON 文件里（每次取走一项，写回剩余项）。
+// 两个开关都不设时这段完全不生效，生产行为不受影响。
+function installSelfTestDialogStubs() {
+  const queuePath = process.env.PFM_SELFTEST_DIALOGS;
+  const takeNext = (fallback) => {
+    try {
+      const queue = JSON.parse(fs.readFileSync(queuePath, 'utf8'));
+      const item = queue.shift();
+      fs.writeFileSync(queuePath, JSON.stringify(queue), 'utf8');
+      if (item) console.log('[selftest] 对话框桩返回: ' + JSON.stringify(item));
+      return item || fallback;
+    } catch (e) {
+      console.error('[selftest] 读取对话框队列失败:', e.message);
+      return fallback;
+    }
+  };
+  dialog.showSaveDialog = async () => takeNext({ canceled: true });
+  dialog.showOpenDialog = async () => takeNext({ canceled: true, filePaths: [] });
+  console.log('[selftest] 已启用对话框桩，队列文件: ' + queuePath);
 }
 
 // ---------- 自检（PFM_SELFTEST=1） ----------
@@ -819,12 +935,41 @@ function attachSelfTest(targetWin) {
       // 8. 搜索与元数据
       const hits = await api.search('第一版正文');
       check('全文搜索命中正文', hits.some(h => h.rel === renamed), '命中 ' + hits.length + ' 条');
+
+      // 8b. 正文缓存的失效验证：改完内容立刻搜，必须搜到新的、搜不到旧的。
+      // 这是加缓存后最容易出的回归。
+      const cur = await api.readFile(renamed);
+      await api.saveFile(renamed, cur.content.replace('第一版正文', '缓存失效验证文本'));
+      const newHits = await api.search('缓存失效验证文本');
+      check('保存后立刻能搜到新内容（缓存已失效）', newHits.some(h => h.rel === renamed), '命中 ' + newHits.length + ' 条');
+      const oldHits = await api.search('第一版正文');
+      check('保存后搜不到旧内容（没有读到缓存旧值）', !oldHits.some(h => h.rel === renamed), '命中 ' + oldHits.length + ' 条');
+      // 恢复内容，后面的导出/导入断言依赖它
+      await api.saveFile(renamed, cur.content);
+      check('内容已还原', (await api.readFile(renamed)).content.includes('第一版正文'));
       const metas = await api.getMetaList();
       check('元数据列表包含该文件', metas.some(m => m.rel === renamed));
       const tree = await api.listTree();
       check('文件树包含 prompts/workflows/templates 三个根', tree.length === 3);
 
-      // 9. 越权防护
+      // 9. 越权防护 + 错误码本地化
+      // 主进程抛的是 E_XXX|detail，渲染进程要能翻成当前语言；翻不出来才回退原文。
+      const codeCheck = async (name, fn, expectCode) => {
+        try { await fn(); check(name, false, '本应抛错'); }
+        catch (e) {
+          const shown = describeError(e);
+          const stillRaw = new RegExp('\\b' + expectCode + '\\b').test(shown);
+          check(name, !stillRaw, stillRaw ? '未翻译，仍是: ' + shown : shown);
+        }
+      };
+      await codeCheck('E_PATH_ESCAPE 已本地化', () => api.readFile('../../../../Windows/win.ini'), 'E_PATH_ESCAPE');
+      await codeCheck('E_LOCKED 已本地化', async () => {
+        await api.setConfig({ lockedFiles: [renamed] });
+        try { await api.trash(renamed); } finally { await api.setConfig({ lockedFiles: [] }); }
+      }, 'E_LOCKED');
+      await codeCheck('E_FILE_EXISTS 已本地化', () => api.createFile(renamed, 'x'), 'E_FILE_EXISTS');
+      await codeCheck('E_BAD_VERSION_FILE 已本地化', () => api.readVersion(renamed, 'not-a-version.md'), 'E_BAD_VERSION_FILE');
+
       await expectThrow('拒绝读取库外文件（路径穿越）', () => api.readFile('../../../../Windows/win.ini'));
       await expectThrow('拒绝写入库外文件', () => api.saveFile('../../../evil.md', 'x'));
       await expectThrow('拒绝非法的版本文件名', () => api.readVersion(renamed, '../../../../Windows/win.ini'));
@@ -840,7 +985,34 @@ function attachSelfTest(targetWin) {
         await api.addProjectType('重复项');
       });
 
+      // 11. 导出 / 导入往返（依赖对话框桩，见 installSelfTestDialogStubs）
+      // 这四个流程原先只能人工点，现在把 dialog 换成桩后可以全自动验证。
+      if (window.__pfmDialogStubs) {
+        const paths = window.__pfmDialogStubs;
+        const single = await api.exportSingle(renamed);
+        check('导出单个提示词返回成功', single.ok === true, JSON.stringify(single));
+        const zip = await api.exportZip();
+        check('导出 ZIP 返回成功', zip.ok === true, JSON.stringify(zip));
+
+        const imp1 = await api.importSingle();
+        check('导入单个 .md 成功', imp1.ok === true && !!imp1.rel, JSON.stringify(imp1));
+        const impRead = await api.readFile(imp1.rel);
+        check('导入的内容可读且正确', impRead.content.includes('第一版正文'));
+        check('导入重名时自动改名而非覆盖', imp1.rel !== renamed, imp1.rel);
+
+        const imp2 = await api.importZip();
+        check('导入 ZIP 报告了真实导入数量', imp2.ok === true && imp2.imported > 0,
+          JSON.stringify({ ok: imp2.ok, imported: imp2.imported, failed: imp2.failed }));
+        check('导入 ZIP 无失败条目', Array.isArray(imp2.failed) && imp2.failed.length === 0,
+          JSON.stringify(imp2.failed));
+
+        const cancel = await api.exportZip();
+        check('用户取消导出时返回 ok:false', cancel.ok === false, JSON.stringify(cancel));
+      }
+
       // 清理
+      const leftovers = (await api.getMetaList()).filter(mm => mm.rel !== renamed && mm.top === 'prompts');
+      for (const mm of leftovers) { try { await api.trash(mm.rel); } catch (_) {} }
       await api.trash(renamed);
       await api.emptyTrash();
       check('清空回收站后为空', (await api.listTrash()).items.length === 0);
@@ -876,6 +1048,9 @@ function attachSelfTest(targetWin) {
           if (!process.env.PFM_DATA_DIR) {
             fail('功能自检必须设置 PFM_DATA_DIR，拒绝在真实数据目录上跑');
           } else {
+            // 告诉页面对话框桩是否可用（可用时才跑导出/导入往返）
+            await targetWin.webContents.executeJavaScript(
+              'window.__pfmDialogStubs = ' + JSON.stringify(process.env.PFM_SELFTEST_DIALOGS || null) + ';', true);
             const fnResults = await targetWin.webContents.executeJavaScript(functionalScript, true);
             for (const [name, ok, detail] of fnResults) {
               if (ok) console.log('[selftest:fn] PASS ' + name);
@@ -1056,6 +1231,20 @@ function buildMenu() {
 }
 
 app.whenReady().then(async () => {
+  if (process.env.PFM_SELFTEST_BENCH) {
+    if (!process.env.PFM_DATA_DIR) {
+      console.error('[bench] 必须设置 PFM_DATA_DIR，拒绝往真实库里写压测数据');
+      app.exit(1);
+      return;
+    }
+    await ensureDirs();
+    await runSearchBench(parseInt(process.env.PFM_SELFTEST_BENCH, 10) || 100);
+    app.exit(0);
+    return;
+  }
+  if (process.env.PFM_SELFTEST === '1' && process.env.PFM_SELFTEST_DIALOGS) {
+    installSelfTestDialogStubs();
+  }
   ensureSeedData();
   await ensureDirs();
   await createWindow();

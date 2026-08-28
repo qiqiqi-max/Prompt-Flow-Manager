@@ -21,6 +21,23 @@ try {
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pfm-fn-'));
 console.log('[test:fn] 临时数据目录: ' + dataDir);
 
+// 导出/导入要弹系统对话框，自动化跑不了。主进程在自检模式下会把 dialog 换成
+// 按队列返回结果的桩（见 installSelfTestDialogStubs），队列就是下面这个文件。
+// 顺序必须与 functionalScript 里的调用顺序严格一致。
+const outDir = path.join(dataDir, '__export');
+fs.mkdirSync(outDir, { recursive: true });
+const exportedMd = path.join(outDir, 'exported.md');
+const exportedZip = path.join(outDir, 'exported.zip');
+const dialogQueue = [
+  { canceled: false, filePath: exportedMd },                 // exportSingle
+  { canceled: false, filePath: exportedZip },                // exportZip
+  { canceled: false, filePaths: [exportedMd] },              // importSingle
+  { canceled: false, filePaths: [exportedZip] },             // importZip
+  { canceled: true }                                         // exportZip（验证取消分支）
+];
+const dialogQueuePath = path.join(dataDir, '__dialogs.json');
+fs.writeFileSync(dialogQueuePath, JSON.stringify(dialogQueue), 'utf8');
+
 const child = spawn(electronBin, [root], {
   cwd: root,
   env: {
@@ -29,6 +46,7 @@ const child = spawn(electronBin, [root], {
     PFM_SELFTEST_FUNCTIONAL: '1',
     PFM_DATA_DIR: dataDir,
     PFM_SELFTEST_LANG: 'en',
+    PFM_SELFTEST_DIALOGS: dialogQueuePath,
     ELECTRON_ENABLE_LOGGING: '1'
   },
   stdio: ['ignore', 'pipe', 'pipe']
@@ -49,11 +67,34 @@ const timeout = setTimeout(() => {
 
 child.on('exit', (code) => {
   clearTimeout(timeout);
+  // 落盘产物在清理前先校验：ZIP 必须是真 ZIP（PK 头），单文件导出必须有内容
+  const artifacts = [];
+  try {
+    if (fs.existsSync(exportedMd)) {
+      const md = fs.readFileSync(exportedMd, 'utf8');
+      artifacts.push(['导出的 .md 有内容且含 frontmatter', md.length > 20 && md.startsWith('---')]);
+    } else artifacts.push(['导出的 .md 已落盘', false]);
+    if (fs.existsSync(exportedZip)) {
+      const buf = fs.readFileSync(exportedZip);
+      artifacts.push(['导出的 ZIP 是合法 ZIP（PK 头）', buf.length > 100 && buf[0] === 0x50 && buf[1] === 0x4b]);
+    } else artifacts.push(['导出的 ZIP 已落盘', false]);
+    const rest = JSON.parse(fs.readFileSync(dialogQueuePath, 'utf8'));
+    artifacts.push(['对话框队列已被按序全部消费（剩 ' + rest.length + ' 项）', rest.length === 0]);
+  } catch (e) {
+    artifacts.push(['产物校验未抛异常: ' + e.message, false]);
+  }
+  let artifactsOk = true;
+  for (const [name, ok] of artifacts) {
+    console.log('[test:fn] ' + (ok ? 'PASS ' : 'FAIL ') + name);
+    if (!ok) artifactsOk = false;
+  }
   cleanup();
   const passed = code === 0
     && /\[selftest\] 全部通过/.test(out)
     && /切换到英文后界面外壳无残留中文/.test(out)
-    && !/FAIL/.test(out);
+    && /导出 ZIP 返回成功/.test(out)
+    && !/\[selftest[^\]]*\] FAIL/.test(out)
+    && artifactsOk;
   console.log('\n[test:fn] ' + (passed ? '通过' : '失败（exit=' + code + '）'));
   process.exit(passed ? 0 : 1);
 });

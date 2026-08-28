@@ -23,9 +23,23 @@ function t(key, params) {
 // 失败提示统一格式：<本地化前缀><分隔符><底层错误信息>
 // 说明：主进程抛出的 e.message 目前仍是中文，英文界面下这段会混中文，
 // 属已知限制（要彻底解决需要给主进程的异常加错误码）。
+// 主进程把错误码编进 message（`<CODE>|<细节>`），这里翻译成用户语言。
+// Electron 会把它包装成 "Error invoking remote method 'x': Error: E_LOCKED|a.md"，
+// 所以用搜索而不是从头匹配。认不出来的就原样显示，不吞掉信息。
+function describeError(e) {
+  const raw = e && e.message ? String(e.message) : String(e);
+  const m = raw.match(/\b(E_[A-Z0-9_]+)(?:\|([\s\S]*))?$/);
+  if (!m) return raw;
+  const key = 'err_' + m[1];
+  const detail = m[2] || '';
+  const lang = (state.config && state.config.lang) || 'zh';
+  const tbl = I18N[lang] || I18N.zh;
+  if (tbl[key] == null && I18N.zh[key] == null) return raw; // 未知错误码：原样显示
+  return t(key, { detail });
+}
+
 function tErr(key, e) {
-  const detail = e && e.message ? e.message : String(e);
-  return t(key) + t('sep') + detail;
+  return t(key) + t('sep') + describeError(e);
 }
 
 // 阶段/顶层目录的显示名：优先用 i18n，回落到主进程给的 STAGE_LABELS，最后用原始键。

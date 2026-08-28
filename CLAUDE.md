@@ -68,6 +68,41 @@ const DATA_ROOT = app.isPackaged ? app.getPath('userData') : __dirname;  // 用�
 - Markdown 预览经 DOMPurify 清洗；index.html 有 CSP（`script-src 'self'`）。
 - `sandbox: false` 与 `--no-sandbox` 是对缺运行库的 Windows 环境的妥协，隔离由 contextIsolation 承担。
 
+### 抛给渲染进程的错误必须带错误码
+
+渲染进程要把错误翻译成用户语言，所以不能直接抛中文。Electron 的 IPC 只传
+`Error.message`（自定义属性会丢），因此码编进 message：
+
+```js
+throw appError('E_LOCKED', rel);   // message = "E_LOCKED|prompts/a.md"
+```
+
+渲染侧 `describeError()` 解析出码，查 i18n 的 `err_<CODE>` 键，
+带 `{detail}` 占位符的会把细节填进去；**认不出的码原样显示，不吞信息**。
+
+加新错误码要同时做三件事，否则 `npm test` 会失败：
+1. `appError('E_NEW_CODE', detail)`
+2. `i18n.js` 的 zh 和 en 都加 `err_E_NEW_CODE`
+3. 若一种语言带 `{detail}`，另一种也要带（测试会校验占位符一致）
+
+### 正文缓存（搜索性能）
+
+搜索要遍历整库读正文，是唯一随提示词数量线性变差的操作。
+
+- `readParsedCached(fullPath)` 按 `(mtimeMs, size)` 缓存正文**和**解析后的 frontmatter。
+  每次仍然 `stat`（很便宜），只重读真正变过的文件，所以外部编辑器改的文件也能发现。
+- `getMetaList(includeContent)` 传 `true` 时把正文带出来。**searchAll 必须复用它**，
+  否则又变回 2N 次 I/O（这是修过的问题）。`get-meta-list` 这个 IPC 不带正文，
+  避免白白往渲染进程拷一份。
+- **任何写入 / 改名 / 删除 / 回滚 / 恢复都要调 `dropFromCache(fullPath)`**，
+  漏一处就会出现"改完还搜到旧内容"。测试里有断言数这个调用数量。
+
+已知边界：同一个 mtime 刻度内把文件改成同样大小会命中旧缓存。两个维度要同时相等，
+概率极低，代价只是搜索结果延迟一次刷新。
+
+压测：`npm run bench`。1000 条规模下重复搜索约 230ms、读文件 0 次；
+优化前是 ~920ms、读文件 2000 次。剩下的开销主要是 1000 次 `stat` 系统调用。
+
 ### 版本管理
 - 每次保存：若内容变化，把**旧内容**存为 `.versions/<rel>/<时间戳>.md`（时间戳含毫秒，避免同秒覆盖）。
 - 保留最近 30 个**未星标**版本；星标（index.json 的 `pinned`）不计入上限、永不自动删。
@@ -111,11 +146,10 @@ const content = \`--- ... ---\`;
 3. 如果这段文案会随语言切换而变，确认 `setLang()` 里重绘了对应区域 ——
    漏掉的区域会残留旧语言，直到用户手动触发一次渲染
 
-### 已知限制
+### 主进程错误也已本地化
 
-主进程 `throw new Error('...')` 的文案仍是中文，英文界面下 `tErr()` 拼出来会混中文。
-正常操作路径上渲染进程会先自己判断并给出本地化提示，所以这只在异常路径可见。
-彻底解决需要给主进程异常加错误码，暂未做。
+主进程统一抛 `appError('E_XXX', detail)`，渲染侧 `describeError()` 翻成当前语言，
+见上面「抛给渲染进程的错误必须带错误码」。
 
 ## 测试
 
@@ -126,6 +160,7 @@ npm test         # 静态检查 + ZIP 导入逻辑单测 + 真实压缩解压往
 npm run test:ui  # 拉起 Electron，验证 contextBridge / 依赖加载 / 文件树真的渲染出来
 npm run test:fn  # 端到端走 IPC：新建→保存→版本→星标→回滚→锁定→删除→恢复→搜索→越权防护
 npm run test:all # 三层一起跑
+npm run bench    # 搜索压测（临时目录，默认 1000 条）
 ```
 
 主进程的自检开关（都只在测试里用）：
@@ -136,11 +171,23 @@ npm run test:all # 三层一起跑
 | `PFM_SELFTEST_FUNCTIONAL=1` | 追加功能自检；**必须同时设 PFM_DATA_DIR**，否则拒绝执行 |
 | `PFM_DATA_DIR=<目录>` | 把 DATA_ROOT 指到临时目录，避免测试动到真实提示词库 |
 | `PFM_SELFTEST_SHOT=<png>` | 存一张真实渲染截图，便于人工核对界面 |
+| `PFM_SELFTEST_LANG=en` | 切到指定语言后检查界面外壳有无残留中文 |
+| `PFM_SELFTEST_DIALOGS=<json>` | 用队列文件替换系统对话框，跑通导出/导入 |
+| `PFM_SELFTEST_BENCH=<条数>` | 生成指定规模的库并跑搜索压测 |
+
+### 导出/导入怎么做到自动化的
+
+这四个流程都要弹系统对话框。自检模式下 `installSelfTestDialogStubs()` 把
+`dialog.showSaveDialog` / `showOpenDialog` 换成"按队列返回预设结果"的桩，
+队列是 `PFM_SELFTEST_DIALOGS` 指向的 JSON 文件（每次取走一项并写回剩余项）。
+所以**队列顺序必须和调用顺序严格一致**，改动调用顺序时记得同步
+`tests/functional-smoke.js` 里的 `dialogQueue`。
+
+两个开关都不设时这段完全不生效，生产行为不受影响。
 
 **还没有自动化覆盖的部分**（改动这些地方要手动点一遍）：
-带系统对话框的导出/导入（export-zip / export-single / import-single / import-zip 的
-dialog 分支）、以及纯交互 UI —— 拖拽移动、右键菜单、键盘导航、主题切换、
-侧边栏拖宽、标签栏、流程图渲染、版本 diff 视图、代码块复制。
+纯鼠标/键盘交互 —— 拖拽移动、右键菜单、键盘导航、主题切换、侧边栏拖宽、
+标签栏、流程图渲染、版本 diff 视图、代码块复制按钮。
 
 ## 扩展点（留冗余）
 

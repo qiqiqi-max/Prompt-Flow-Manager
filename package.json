@@ -9,6 +9,7 @@
     "test:ui": "node tests/ui-smoke.js",
     "test:fn": "node tests/functional-smoke.js",
     "test:all": "npm test && npm run test:ui && npm run test:fn",
+    "bench": "node tests/search-bench.js",
     "sync-vendor": "node scripts/sync-vendor.js",
     "prebuild": "node scripts/sync-vendor.js",
     "build": "electron-builder --win",

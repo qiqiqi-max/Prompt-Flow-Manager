@@ -40,6 +40,7 @@ npm test         # 静态检查、ZIP 导入逻辑、真实压缩解压往返
 npm run test:ui  # 拉起 Electron，确认界面真的能渲染出来
 npm run test:fn  # 端到端功能自检（在临时目录里跑，不碰你的提示词库）
 npm run test:all # 三层一起跑
+npm run bench    # 搜索压测：默认 1000 条提示词，输出耗时与 I/O 次数
 ```
 
 ### 打包成 exe

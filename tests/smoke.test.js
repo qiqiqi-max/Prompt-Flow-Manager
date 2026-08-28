@@ -142,7 +142,7 @@ try {
   // 全部占用时必须抛错而不是死循环
   uniqueRel('x.md', () => true);
   loopGuard = false;
-} catch (e) { loopGuard = /同名文件过多/.test(e.message); }
+} catch (e) { loopGuard = /^E_TOO_MANY_DUPES\b/.test(e.message); }
 assert(loopGuard, '候选名耗尽时抛错，不会死循环');
 
 // sanitizeTitle：frontmatter 的 title 会变成文件名，必须挡住路径穿越
@@ -195,7 +195,7 @@ section('ZIP 真实往返（压缩 → 解压）');
   section('锁定与配置');
   // 防回归：锁定只存在渲染进程内存里，主进程照删不误
   assert(/async function isLocked\(/.test(mainSrc), '主进程有 isLocked');
-  assert(/if \(await isLocked\(rel\)\) throw new Error/.test(mainSrc), 'trash 在主进程强制校验锁');
+  assert(/if \(await isLocked\(rel\)\) throw appError\('E_LOCKED'/.test(mainSrc), 'trash 在主进程强制校验锁');
   assert(/lockedFiles: \[\]/.test(mainSrc), 'loadConfig 默认值含 lockedFiles');
   // 防回归：resize/move 每次触发都读写 config.json
   assert(/setTimeout\(flushBounds/.test(mainSrc), '窗口尺寸保存做了防抖');
@@ -256,6 +256,60 @@ assert(shadow.length === 0, '没有在遮蔽了 t 的回调里调用 t()' + (sha
   const missingR = [...used].filter(k => !(k in I18N.zh));
   assert(missingR.length === 0, 'renderer.js 引用的 i18n 键都存在' + (missingR.length ? '，缺失：' + missingR.join(', ') : ''));
   assert(htmlKeys.size >= 40, 'index.html 上挂了足够多的 data-i18n（' + htmlKeys.size + ' 个）');
+}
+
+section('错误码本地化');
+// 主进程原先直接抛中文，英文界面下 tErr() 会拼出中文详情。
+// 现在统一成 appError('E_XXX', detail)，渲染侧 describeError() 负责翻译。
+assert(/function appError\(/.test(mainSrc), '主进程有 appError 工具');
+assert(!/throw new Error\('[^']*[\u4e00-\u9fa5]/.test(mainSrc), '主进程不再抛中文字面量错误');
+{
+  const libSrc = fs.readFileSync(path.join(root, 'lib/zip-import.js'), 'utf8');
+  assert(!/(throw|reject\()\s*new Error\('[^']*[\u4e00-\u9fa5]/.test(libSrc), 'lib/zip-import.js 不再抛中文字面量错误');
+}
+assert(/function describeError\(/.test(rendererSrc), '渲染进程有 describeError');
+assert(/describeError\(e\)/.test(rendererSrc), 'tErr 走 describeError');
+{
+  const I18N = require('../src/i18n.js');
+  // 主进程用到的每个错误码都必须有对应文案，否则界面上会露出 E_XXX
+  const codes = new Set();
+  for (const src of [mainSrc, fs.readFileSync(path.join(root, 'lib/zip-import.js'), 'utf8')]) {
+    for (const m of src.matchAll(/appError\('([A-Z0-9_]+)'/g)) codes.add(m[1]);
+  }
+  assert(codes.size >= 10, '收集到足够多的错误码（' + codes.size + ' 个）');
+  const missing = [...codes].filter(c => !('err_' + c in I18N.zh) || !('err_' + c in I18N.en));
+  assert(missing.length === 0, '每个错误码都有中英文案' + (missing.length ? '，缺失：' + missing.join(', ') : ''));
+  // 带 {detail} 的文案，中英必须一致地带占位符，否则一种语言会丢掉细节
+  const inconsistent = [...codes].filter(c => {
+    const k = 'err_' + c;
+    return I18N.zh[k].includes('{detail}') !== I18N.en[k].includes('{detail}');
+  });
+  assert(inconsistent.length === 0, '中英文案的 {detail} 占位符一致' + (inconsistent.length ? '，不一致：' + inconsistent.join(', ') : ''));
+}
+
+section('搜索性能');
+// 搜索会遍历整库。原先 getMetaList 读一遍、searchAll 再读一遍，是 2N 次 I/O。
+assert(/async function getMetaList\(includeContent = false\)/.test(mainSrc), 'getMetaList 支持带出正文');
+assert(/const meta = await getMetaList\(true\)/.test(mainSrc), 'searchAll 复用 getMetaList 读到的正文');
+assert(!/countedReadFile\(safeJoin\(item\.rel\)\)/.test(mainSrc), 'searchAll 不再逐个重读文件');
+assert(/async function readParsedCached\(/.test(mainSrc), '有按 mtime+size 失效的正文缓存');
+assert(/hit\.mtimeMs === st\.mtimeMs && hit\.size === st\.size/.test(mainSrc), '缓存同时校验 mtime 与 size');
+// 所有写入/移动/删除路径都必须清缓存，否则会读到旧内容
+const dropCount = (mainSrc.match(/dropFromCache\(/g) || []).length;
+assert(dropCount >= 8, '写入/改名/删除/回滚/恢复都清了缓存（' + dropCount + ' 处）');
+assert(fs.existsSync(path.join(root, 'tests/search-bench.js')), '存在搜索压测脚本 tests/search-bench.js');
+assert(!!pkg.scripts.bench, '有 npm run bench');
+
+section('对话框自动化');
+// 导出/导入四个流程要弹系统对话框，原先只能人工点
+assert(/function installSelfTestDialogStubs\(/.test(mainSrc), '有自检用的对话框桩');
+assert(/PFM_SELFTEST_DIALOGS/.test(mainSrc), '对话框桩由 PFM_SELFTEST_DIALOGS 队列驱动');
+assert(/process\.env\.PFM_SELFTEST === '1' && process\.env\.PFM_SELFTEST_DIALOGS/.test(mainSrc),
+  '对话框桩只在自检模式生效（生产行为不变）');
+{
+  const fnSrc = fs.readFileSync(path.join(root, 'tests/functional-smoke.js'), 'utf8');
+  assert(/dialogQueue/.test(fnSrc), '功能测试准备了对话框队列');
+  assert(/exportedZip/.test(fnSrc) && /PK/.test(fnSrc), '功能测试校验导出的 ZIP 是真 ZIP');
 }
 
 section('测试防护');
