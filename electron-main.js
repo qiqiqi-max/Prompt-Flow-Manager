@@ -45,6 +45,14 @@ async function readParsedCached(fullPath) {
 function dropFromCache(fullPath) {
   contentCache.delete(fullPath);
 }
+// stdout/stderr 的读取端一旦消失（从终端启动后关掉终端、被管道到提前退出的命令、
+// 用 PowerShell 的 | Select-String 截流等），下一次 console.log 就会抛 EPIPE。
+// 主进程里的未捕获异常会让 Electron 弹"A JavaScript error occurred in the main process"，
+// 也就是说一条日志能把整个应用打挂。这里把流上的写错误吞掉，日志丢了无所谓，应用不能崩。
+for (const stream of [process.stdout, process.stderr]) {
+  if (stream && typeof stream.on === 'function') stream.on('error', () => {});
+}
+
 const archiver = require('archiver'); // 仅用于压缩导出
 const { readZipMarkdownEntries, sanitizeTitle, uniqueRel } = require('./lib/zip-import');
 
@@ -1058,6 +1066,81 @@ function attachSelfTest(targetWin) {
             }
           }
         }
+        // PFM_SELFTEST_READONLY=1：对当前库做只读体检。
+        // 把每个文件都读出来、解析 frontmatter、渲染 Markdown、解析流程图、跑搜索，
+        // 全程不写文件，所以可以安全地对着真实数据跑（用来回答"我的库能正常用吗"）。
+        if (process.env.PFM_SELFTEST_READONLY === '1') {
+          const ro = await targetWin.webContents.executeJavaScript(`(async () => {
+            const api = window.promptFlowApi;
+            const out = { files: [], errors: [], searches: [], flows: [] };
+            const metas = await api.getMetaList();
+            for (const item of metas) {
+              try {
+                const { content, meta } = await api.readFile(item.rel);
+                const html = renderMarkdown(content.replace(/^---[\\s\\S]*?---\\r?\\n?/, ''));
+                const rec = {
+                  rel: item.rel,
+                  bytes: content.length,
+                  title: meta.title || null,
+                  version: meta.version == null ? null : meta.version,
+                  htmlLen: html.length
+                };
+                if (item.top === 'workflows') {
+                  const steps = parseWorkflowFlow(content);
+                  rec.flowSteps = steps.length;
+                  // 真正把流程图渲染一遍并数节点数，只在游离元素里做，不动界面
+                  const probe = document.createElement('div');
+                  probe.innerHTML = renderFlowDiagram(steps, meta.title || item.rel);
+                  const nodes = probe.querySelectorAll('[data-flow-node], .flow-node').length;
+                  const brokenLinks = [];
+                  for (const s of steps) {
+                    if (!s.prompt) { brokenLinks.push(s.id + ' 缺 prompt'); continue; }
+                    const target = s.prompt.startsWith('prompts/') ? s.prompt : 'prompts/' + s.prompt;
+                    if (!metas.some(mm => mm.rel === target)) brokenLinks.push(s.id + ' → ' + s.prompt + '（文件不存在）');
+                  }
+                  out.flows.push({ rel: item.rel, steps: steps.length,
+                    missing: steps.filter(s => !s.prompt).length, nodes, brokenLinks });
+                }
+                out.files.push(rec);
+              } catch (e) {
+                out.errors.push(item.rel + ' → ' + (e && e.message ? e.message : String(e)));
+              }
+            }
+            for (const q of ['需求', 'prompt', '代码', 'zzz_no_match_zzz']) {
+              try { out.searches.push({ q, hits: (await api.search(q)).length }); }
+              catch (e) { out.errors.push('search(' + q + ') → ' + e.message); }
+            }
+            return out;
+          })()`, true);
+          console.log('[readonly] 库内文件 ' + ro.files.length + ' 个');
+          for (const f of ro.files) {
+            console.log('[readonly]   ' + f.rel + '  ' + f.bytes + ' 字节, title=' + f.title +
+              ', version=' + f.version + ', 渲染 HTML ' + f.htmlLen + ' 字符' +
+              (f.flowSteps == null ? '' : ', 流程步骤 ' + f.flowSteps));
+          }
+          for (const s of ro.searches) console.log('[readonly] 搜索 "' + s.q + '" → ' + s.hits + ' 条');
+          const emptyRender = ro.files.filter(f => f.htmlLen === 0);
+          const noTitle = ro.files.filter(f => !f.title);
+          const badFlow = ro.flows.filter(f => f.steps === 0 || f.missing > 0);
+          if (ro.errors.length) fail('只读体检有报错: ' + ro.errors.join(' | '));
+          else console.log('[readonly] PASS 所有文件都能读取并解析，无异常');
+          if (emptyRender.length) fail('这些文件渲染结果为空: ' + emptyRender.map(f => f.rel).join(', '));
+          else console.log('[readonly] PASS 所有文件的 Markdown 都渲染出内容');
+          if (noTitle.length) console.log('[readonly] 注意：这些文件的 frontmatter 缺 title: ' + noTitle.map(f => f.rel).join(', '));
+          else console.log('[readonly] PASS 所有文件都有 title');
+          if (badFlow.length) fail('这些工作流的 flow 解析异常: ' + JSON.stringify(badFlow));
+          else console.log('[readonly] PASS 工作流的流程图步骤都解析正常（' + ro.flows.length + ' 个工作流）');
+          for (const f of ro.flows) {
+            console.log('[readonly]   ' + f.rel + ': ' + f.steps + ' 步 → 流程图 ' + f.nodes + ' 个节点');
+          }
+          const noNodes = ro.flows.filter(f => f.nodes === 0);
+          if (noNodes.length) fail('这些工作流渲染不出流程图节点: ' + noNodes.map(f => f.rel).join(', '));
+          else if (ro.flows.length) console.log('[readonly] PASS 流程图都能渲染出节点');
+          const broken = ro.flows.filter(f => f.brokenLinks && f.brokenLinks.length);
+          if (broken.length) fail('流程图里有指向不存在文件的节点: ' + JSON.stringify(broken.map(f => ({ rel: f.rel, links: f.brokenLinks }))));
+          else if (ro.flows.length) console.log('[readonly] PASS 流程图每个节点都指向存在的提示词');
+        }
+
         // PFM_SELFTEST_LANG=en 时切到英文再检查，用于核对 i18n 覆盖。
         // 走真实的 setLang() 路径，所以必须配 PFM_DATA_DIR 隔离配置文件。
         if (process.env.PFM_SELFTEST_LANG) {
@@ -1097,6 +1180,20 @@ function attachSelfTest(targetWin) {
             } else {
               console.log('[selftest] 语言已切到 ' + res.lang);
             }
+          }
+        }
+        // PFM_SELFTEST_OPEN=<相对路径> 时先打开该文件，让截图能拍到正文/流程图。
+        // 会写入"最近打开"（和用户点一下的效果一样），所以配合 PFM_DATA_DIR 用。
+        if (process.env.PFM_SELFTEST_OPEN) {
+          const rel = process.env.PFM_SELFTEST_OPEN;
+          const info = await targetWin.webContents.executeJavaScript(
+            '(async () => { await openFile(' + JSON.stringify(rel) + '); await new Promise(r => setTimeout(r, 500));' +
+            ' return { rel: state.currentRel, previewLen: ($("preview") || {}).innerHTML ? $("preview").innerHTML.length : 0,' +
+            ' flowNodes: document.querySelectorAll("#preview .flow-node, #preview [data-flow-node]").length }; })()', true);
+          if (info.rel === rel && info.previewLen > 0) {
+            console.log('[selftest] PASS 打开 ' + rel + '（预览 ' + info.previewLen + ' 字符，流程图节点 ' + info.flowNodes + ' 个）');
+          } else {
+            fail('打开 ' + rel + ' 后预览为空: ' + JSON.stringify(info));
           }
         }
         // PFM_SELFTEST_SHOT=<路径> 时顺手存一张真实渲染截图，便于人工核对界面

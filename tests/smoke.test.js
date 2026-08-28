@@ -312,6 +312,51 @@ assert(/process\.env\.PFM_SELFTEST === '1' && process\.env\.PFM_SELFTEST_DIALOGS
   assert(/exportedZip/.test(fnSrc) && /PK/.test(fnSrc), '功能测试校验导出的 ZIP 是真 ZIP');
 }
 
+section('日志不能把应用打挂');
+// 故障回顾：从终端启动后关掉终端、或 stdout 被管到提前退出的命令（PowerShell 的
+// | Select-Object -First N 就会这样），下一次 console.log 抛 EPIPE，
+// 主进程未捕获异常 → Electron 弹 "A JavaScript error occurred in the main process"。
+assert(/for \(const stream of \[process\.stdout, process\.stderr\]\)/.test(mainSrc), '主进程给 stdout/stderr 挂了错误处理');
+assert(/stream\.on\('error', \(\) => \{\}\)/.test(mainSrc), '写日志失败时静默丢弃，不抛异常');
+{
+  // 这个守卫必须在任何真实的 console.log 调用之前装上，否则启动早期的日志仍会崩。
+  // 按行找，且跳过注释行——注释里提到 console.log 不算。
+  const lines = mainSrc.split(/\r?\n/);
+  const guardLine = lines.findIndex(l => l.includes('process.stdout, process.stderr'));
+  const firstLogLine = lines.findIndex(l => !/^\s*(\/\/|\*)/.test(l) && /console\.log\s*\(/.test(l.replace(/\/\/.*$/, '')));
+  assert(guardLine !== -1, '找到了 stdout/stderr 守卫');
+  assert(firstLogLine === -1 || guardLine < firstLogLine,
+    '守卫在第一次 console.log 调用之前（守卫第 ' + (guardLine + 1) + ' 行，首个日志第 ' + (firstLogLine + 1) + ' 行）');
+}
+
+section('工作流流程图解析');
+// 故障回顾：flow 段用惰性正则 /^flow:\\s*\\n([\\s\\S]*?)(?=^\\S|\\n\\S|$)/m 去截，
+// 多行模式下第一行行尾就满足 $，结果只解析出 1 个步骤且丢掉 prompt，
+// 流程图永远只有一个空节点。README 里承诺的"点击节点跳转"实际一直是坏的。
+assert(!/\(\?=\^\\S\|\\n\\S\|\$\)/.test(rendererSrc), '不再用会被行尾锚点截断的惰性正则截 flow 段');
+assert(/lines\.findIndex\(l => \/\^flow:/.test(rendererSrc), 'flow 段改为按行提取');
+assert(/if \(\/\^\\s\/\.test\(line\)\) blockLines\.push\(line\)/.test(rendererSrc), '缩进行归入 flow 段');
+assert(/else break;/.test(rendererSrc), '遇到顶格行才结束 flow 段');
+// 用真实的种子工作流验证解析结果
+{
+  const wf = fs.readFileSync(path.join(root, 'workflows/full-project-flow.md'), 'utf8');
+  const stepLines = (wf.match(/^\s+- id:/gm) || []).length;
+  assert(stepLines === 5, '示例工作流本身有 5 个步骤（实际 ' + stepLines + '）');
+  const promptLines = (wf.match(/^\s+prompt:/gm) || []).length;
+  assert(promptLines === stepLines, '每个步骤都有 prompt 字段');
+}
+
+section('只读体检');
+assert(/PFM_SELFTEST_READONLY/.test(mainSrc), '主进程支持只读体检（PFM_SELFTEST_READONLY）');
+assert(/renderFlowDiagram\(steps/.test(mainSrc), '只读体检会真的渲染一遍流程图并数节点');
+assert(/brokenLinks/.test(mainSrc), '只读体检会检查流程图节点指向的文件是否存在');
+{
+  const uiSrc = fs.readFileSync(path.join(root, 'tests/ui-smoke.js'), 'utf8');
+  assert(/PFM_SELFTEST_READONLY/.test(uiSrc), 'test:ui 会跑只读体检');
+  assert(/流程图都能渲染出节点/.test(uiSrc), 'test:ui 校验流程图节点数');
+  assert(/pfm-ui-/.test(uiSrc), 'test:ui 在临时目录副本上跑，不碰真实库');
+}
+
 section('测试防护');
 // 功能自检会增删文件，必须拒绝在没有 PFM_DATA_DIR 的情况下运行
 assert(/拒绝在真实数据目录上跑/.test(mainSrc), '功能自检未设 PFM_DATA_DIR 时会拒绝执行');

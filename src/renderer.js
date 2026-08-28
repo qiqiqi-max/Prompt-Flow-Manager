@@ -120,13 +120,22 @@ function parseFrontmatter(content) {
 }
 
 function parseWorkflowFlow(content) {
-  // 简单解析 frontmatter 中 flow 的线性步骤（支持 - id/prompt/label/next）
+  // 解析 frontmatter 里 flow 的步骤（- id/prompt/label/next，next 支持数组）
   const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!m) return [];
-  const yaml = m[1];
-  const flowMatch = yaml.match(/^flow:\s*\n([\s\S]*?)(?=^\S|\n\S|$)/m);
-  if (!flowMatch) return [];
-  const block = flowMatch[1];
+  const lines = m[1].split(/\r?\n/);
+  // 按行取块，不要用惰性正则去截 flow 段。之前的写法在多行模式下会被行尾锚点
+  // 提前截断，只解析出第一个步骤而且丢掉 prompt，导致流程图永远只有一个空节点。
+  const startIdx = lines.findIndex(l => /^flow:\s*$/.test(l));
+  if (startIdx === -1) return [];
+  const blockLines = [];
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() === '') { blockLines.push(line); continue; }
+    if (/^\s/.test(line)) blockLines.push(line); // 缩进行 = 仍在 flow 段内
+    else break;                                  // 顶格 = 下一个 frontmatter 字段
+  }
+  const block = blockLines.join('\n');
   const steps = [];
   let cur = null;
   for (const line of block.split(/\r?\n/)) {
