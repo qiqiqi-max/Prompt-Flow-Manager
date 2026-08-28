@@ -389,6 +389,13 @@ mark {
   border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.15);
   padding: 4px; z-index: 100; min-width: 140px;
 }
+/* 输入框/选择类弹层：居中显示。
+   .ctx-menu 本身没有 left/top，position: fixed 下会落到静态位置（往往在视口外），
+   所以这类弹层必须显式定位，否则"打开了却看不见"。 */
+.ctx-menu.ctx-centered {
+  left: 50%; top: 32%; transform: translate(-50%, -32%);
+  min-width: 320px; max-width: min(420px, 90vw);
+}
 .ctx-item { padding: 7px 14px; cursor: pointer; border-radius: 4px; font-size: 13px; }
 .ctx-item:hover { background: var(--selection); }
 .ctx-item.danger { color: var(--danger); }

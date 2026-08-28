@@ -946,10 +946,10 @@ function promptInput(title, placeholder) {
           <button class="btn-primary" id="ctx-ok">${escapeHtml(t('ok'))}</button>
         </div>
       </div>`;
-    menu.classList.remove('hidden');
+    showCenteredMenu();
     const inp = $('ctx-input');
     inp.focus();
-    const done = (v) => { menu.classList.add('hidden'); menu.innerHTML = ''; resolve(v); };
+    const done = (v) => { hideCtxMenu(); menu.innerHTML = ''; resolve(v); };
     $('ctx-ok').onclick = () => done(inp.value.trim());
     $('ctx-cancel').onclick = () => done(null);
     inp.onkeydown = (e) => {
@@ -1133,11 +1133,12 @@ function showCtxMenu(x, y, node) {
     ? `<div class="ctx-sep"></div>`
     : `<div class="ctx-item ${it.danger ? 'danger' : ''}" data-i="${i}">${escapeHtml(it.label)}</div>`
   ).join('');
+  menu.classList.remove('ctx-centered'); // 右键菜单按坐标定位，不居中
   menu.classList.remove('hidden');
   menu.style.left = Math.min(x, window.innerWidth - 160) + 'px';
   menu.style.top = Math.min(y, window.innerHeight - 40) + 'px';
   menu.querySelectorAll('.ctx-item').forEach((el, i) => {
-    el.onclick = () => { menu.classList.add('hidden'); items[i].act(); };
+    el.onclick = () => { hideCtxMenu(); items[i].act(); };
   });
 }
 
@@ -1171,10 +1172,30 @@ description:
   }
 }
 
-document.addEventListener('click', (e) => {
+// 点击弹层外部就关掉它。
+// 必须用 mousedown 而不是 click：promptInput() 是在按钮的 click 里打开弹层的，
+// 同一次 click 会继续冒泡到 document，如果这里监听 click，弹层刚打开就被关掉，
+// 表现就是"点新建提示词没反应"。mousedown 在 click 之前触发，不会误杀。
+document.addEventListener('mousedown', (e) => {
   const menu = $('ctx-menu');
-  if (!menu.contains(e.target)) menu.classList.add('hidden');
+  if (!menu.contains(e.target)) hideCtxMenu();
 });
+
+function hideCtxMenu() {
+  const menu = $('ctx-menu');
+  menu.classList.add('hidden');
+  menu.classList.remove('ctx-centered');
+}
+
+// 居中显示弹层。showCtxMenu 会写内联 left/top，这里必须清掉，
+// 否则弹层会跑到上一次右键的位置去（.ctx-menu 的 CSS 本身没有 left/top）。
+function showCenteredMenu() {
+  const menu = $('ctx-menu');
+  menu.style.left = '';
+  menu.style.top = '';
+  menu.classList.add('ctx-centered');
+  menu.classList.remove('hidden');
+}
 
 // ===== 搜索 =====
 // 高亮文本中的关键词（结果已 escapeHtml，此处安全地包 <mark>）
@@ -1623,10 +1644,11 @@ async function init() {
           <button class="btn-link" id="import-zip-btn">${escapeHtml(t('importZipBackup'))}</button>
         </div>
       </div>`;
-    menu.classList.remove('hidden');
-    const done = () => { menu.classList.add('hidden'); menu.innerHTML = ''; };
+    showCenteredMenu();
+    const done = () => { hideCtxMenu(); menu.innerHTML = ''; };
     $('import-single-btn').onclick = async () => { done(); importSingle(); };
     $('import-zip-btn').onclick = async () => { done(); importZip(); };
+    $('import-single-btn').focus();
   };
   $('btn-trash').onclick = openTrash;
   $('btn-settings').onclick = openSettings;

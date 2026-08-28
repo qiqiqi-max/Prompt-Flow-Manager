@@ -329,6 +329,41 @@ assert(/stream\.on\('error', \(\) => \{\}\)/.test(mainSrc), '写日志失败时�
     '守卫在第一次 console.log 调用之前（守卫第 ' + (guardLine + 1) + ' 行，首个日志第 ' + (firstLogLine + 1) + ' 行）');
 }
 
+section('弹层不能被自己的打开点击关掉');
+// 故障回顾：promptInput() 是在按钮的 click 回调里显示弹层的，这次 click 继续冒泡到
+// document，而 document 上监听的是 click 且"点弹层外就关闭"，于是弹层刚打开就被关掉。
+// 表现是「新建提示词 / 新建工作流 / 新建目录 / 重命名 / 移动 / 创建副本 / 导入」
+// 全部点了没反应——等于整个应用只能看不能改。
+assert(!/document\.addEventListener\('click', \(e\) => \{\s*const menu = \$\('ctx-menu'\)/.test(rendererSrc),
+  '关闭弹层的监听不再挂在 click 上');
+assert(/document\.addEventListener\('mousedown'/.test(rendererSrc), '改为监听 mousedown（在 click 之前触发）');
+assert(/function hideCtxMenu\(/.test(rendererSrc), '有统一的关闭函数 hideCtxMenu');
+assert(/function showCenteredMenu\(/.test(rendererSrc), '有统一的居中显示函数 showCenteredMenu');
+// 第二个故障：.ctx-menu 没有 left/top，position:fixed 下会落到视口外，
+// 于是"显示了但看不见"。输入类弹层必须显式定位。
+{
+  const cssSrc = fs.readFileSync(path.join(root, 'src/styles.css'), 'utf8');
+  assert(/\.ctx-menu\.ctx-centered/.test(cssSrc), 'CSS 里有居中定位的 .ctx-centered');
+  assert(/\.ctx-centered[\s\S]{0,120}left:\s*50%/.test(cssSrc), '.ctx-centered 显式设置了 left');
+  assert(/\.ctx-centered[\s\S]{0,120}top:/.test(cssSrc), '.ctx-centered 显式设置了 top');
+}
+assert(/showCenteredMenu\(\);\s*\n\s*const inp = \$\('ctx-input'\)/.test(rendererSrc), 'promptInput 用居中显示');
+assert(/menu\.classList\.remove\('ctx-centered'\); \/\/ 右键菜单按坐标定位/.test(rendererSrc),
+  '右键菜单会清掉居中态，按坐标定位');
+
+section('UI 点击自检');
+// 之前所有测试都直接调 IPC，绕过了 UI，所以"点了没反应"一路没被发现。
+assert(/PFM_SELFTEST_UI/.test(mainSrc), '主进程支持 UI 点击自检（PFM_SELFTEST_UI）');
+assert(/dispatchEvent\(new MouseEvent\(type/.test(mainSrc), '用真实事件序列 mousedown→mouseup→click 点击');
+assert(/r\.bottom <= window\.innerHeight \+ 1/.test(mainSrc), '弹层可见性判定包含"矩形在视口内"，不只看 hidden 类');
+assert(/拒绝在真实库上点/.test(mainSrc), 'UI 自检未设 PFM_DATA_DIR 时拒绝执行');
+{
+  const uiSrc = fs.readFileSync(path.join(root, 'tests/ui-smoke.js'), 'utf8');
+  assert(/PFM_SELFTEST_UI/.test(uiSrc), 'test:ui 会跑 UI 点击自检');
+  assert(/点「新建提示词」后弹出阶段选择且在视口内/.test(uiSrc), 'test:ui 卡住"新建提示词"这条');
+  assert(/整条新建流程真的落盘了文件/.test(uiSrc), 'test:ui 卡住"新建能落盘"这条');
+}
+
 section('工作流流程图解析');
 // 故障回顾：flow 段用惰性正则 /^flow:\\s*\\n([\\s\\S]*?)(?=^\\S|\\n\\S|$)/m 去截，
 // 多行模式下第一行行尾就满足 $，结果只解析出 1 个步骤且丢掉 prompt，

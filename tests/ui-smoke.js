@@ -41,6 +41,7 @@ const child = spawn(electronBin, [root], {
     ...process.env,
     PFM_SELFTEST: '1',
     PFM_SELFTEST_READONLY: '1',
+    PFM_SELFTEST_UI: '1',
     PFM_DATA_DIR: dataDir,
     ELECTRON_ENABLE_LOGGING: '1'
   },
@@ -63,12 +64,24 @@ const timeout = setTimeout(() => {
 child.on('exit', (code) => {
   clearTimeout(timeout);
   cleanup();
-  // 流程图解析曾经整段失效（只解析出 1 个空步骤），所以这几条必须出现
+  // 这几条对应曾经真实坏掉过的功能，必须出现在输出里：
+  // 1) 流程图解析整段失效（只解析出 1 个空步骤）
+  // 2) 点「新建提示词」没反应（打开弹层的 click 冒泡后把弹层自己关掉）
+  const mustHave = [
+    /\[readonly\] PASS 所有文件都能读取并解析/,
+    /\[readonly\] PASS 流程图都能渲染出节点/,
+    /\[readonly\] PASS 流程图每个节点都指向存在的提示词/,
+    /\[selftest:ui\] PASS 点「新建提示词」后弹出阶段选择且在视口内/,
+    /\[selftest:ui\] PASS 整条新建流程真的落盘了文件/,
+    /\[selftest:ui\] PASS 点弹层外部能关闭/,
+    /\[selftest:ui\] PASS 右键菜单能弹出且有菜单项/,
+    /\[selftest:ui\] PASS 文件树方向键能切到下一个文件/
+  ];
+  const missing = mustHave.filter(re => !re.test(out));
+  if (missing.length) console.error('[test:ui] 缺少必需的检查项: ' + missing.map(String).join(', '));
   const passed = code === 0
     && /\[selftest\] 全部通过/.test(out)
-    && /\[readonly\] PASS 所有文件都能读取并解析/.test(out)
-    && /\[readonly\] PASS 流程图都能渲染出节点/.test(out)
-    && /\[readonly\] PASS 流程图每个节点都指向存在的提示词/.test(out)
+    && missing.length === 0
     && !/FAIL/.test(out);
   console.log('\n[test:ui] ' + (passed ? '通过' : '失败（exit=' + code + '）'));
   process.exit(passed ? 0 : 1);

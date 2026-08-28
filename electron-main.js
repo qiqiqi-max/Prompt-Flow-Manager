@@ -1030,6 +1030,141 @@ function attachSelfTest(targetWin) {
     return out;
   })()`;
 
+  // 在页面里模拟真实点击。只依赖 DOM 与真实事件，不走任何测试专用后门。
+  const uiScript = `(async () => {
+    const out = [];
+    const check = (name, ok, detail) => out.push([name, !!ok, detail || '']);
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const menu = () => document.getElementById('ctx-menu');
+    // 弹层"可见"的判定：没有 hidden、有尺寸、且矩形落在视口内。
+    // 只判 hidden 是不够的——曾经 CSS 缺 left/top，弹层显示了但在视口外。
+    const menuVisible = () => {
+      const el = menu();
+      if (!el || el.classList.contains('hidden')) return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 &&
+        r.top >= 0 && r.left >= 0 &&
+        r.bottom <= window.innerHeight + 1 && r.right <= window.innerWidth + 1;
+    };
+    // 用真实事件序列点击：mousedown → mouseup → click，
+    // 因为"关闭弹层"的监听挂在 mousedown 上，只 dispatch click 测不出真实行为。
+    const realClick = async (el) => {
+      for (const type of ['mousedown', 'mouseup', 'click']) {
+        el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+      }
+      await sleep(250);
+    };
+    const typeAndConfirm = async (value) => {
+      const inp = document.getElementById('ctx-input');
+      if (!inp) return false;
+      inp.value = value;
+      await realClick(document.getElementById('ctx-ok'));
+      return true;
+    };
+    const pressEsc = async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      const inp = document.getElementById('ctx-input');
+      if (inp) inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await sleep(250);
+    };
+
+    try {
+      const before = (await window.promptFlowApi.getMetaList()).length;
+
+      // ---- 空状态「新建提示词」完整走通三个弹层 ----
+      await realClick(document.getElementById('empty-new-prompt'));
+      check('点「新建提示词」后弹出阶段选择且在视口内', menuVisible(),
+        menu() ? 'hidden=' + menu().classList.contains('hidden') + ' rect=' + JSON.stringify(menu().getBoundingClientRect()) : 'no menu');
+      check('弹层里的输入框自动获得焦点', document.activeElement && document.activeElement.id === 'ctx-input',
+        document.activeElement ? document.activeElement.id : 'none');
+      if (!menuVisible()) return out; // 后面全都依赖这一步
+
+      await typeAndConfirm('测试');
+      check('确定后弹出名称输入', menuVisible());
+      const newName = 'UI点击自检-' + Date.now();
+      await typeAndConfirm(newName);
+      check('再确定后弹出工程类型选择', menuVisible());
+      await typeAndConfirm('其他');
+      await sleep(700);
+
+      const after = await window.promptFlowApi.getMetaList();
+      const created = after.find(x => x.rel === 'prompts/testing/' + newName + '.md');
+      check('整条新建流程真的落盘了文件', !!created && after.length === before + 1,
+        '库内文件 ' + before + ' → ' + after.length + '，期望新增 ' + newName);
+      check('新建后进入编辑模式', !!document.getElementById('editor-wrap') &&
+        !document.getElementById('editor-wrap').classList.contains('hidden'));
+
+      // ---- 工具栏按钮同样能弹出 ----
+      await pressEsc();
+      await realClick(document.getElementById('btn-new-folder'));
+      check('点「＋目录」能弹出输入框', menuVisible());
+      await pressEsc();
+      check('Esc 能关掉弹层', !menuVisible());
+
+      // ---- 点弹层外部要能关闭（防止把 mousedown 改错方向）----
+      await realClick(document.getElementById('btn-new-workflow'));
+      check('点「＋工作流」能弹出输入框', menuVisible());
+      await realClick(document.body);
+      check('点弹层外部能关闭', !menuVisible());
+
+      // ---- 导入方式选择 ----
+      await realClick(document.getElementById('btn-import'));
+      check('点「导入」能弹出方式选择', menuVisible());
+      await realClick(document.body);
+
+      // ---- 主题切换 ----
+      const themeBefore = document.body.className;
+      await realClick(document.getElementById('btn-theme'));
+      check('切换主题会改变 body class', document.body.className !== themeBefore,
+        themeBefore + ' → ' + document.body.className);
+      await realClick(document.getElementById('btn-theme'));
+
+      // ---- 抽屉 ----
+      await realClick(document.getElementById('btn-trash'));
+      check('回收站抽屉能打开', !document.getElementById('trash-drawer').classList.contains('hidden'));
+      await realClick(document.getElementById('btn-trash-close'));
+      await realClick(document.getElementById('btn-settings'));
+      check('设置抽屉能打开', !document.getElementById('settings-drawer').classList.contains('hidden'));
+      await realClick(document.getElementById('btn-settings-close'));
+
+      // ---- 文件树键盘导航 ----
+      // 注意：导航只在文件行之间进行（.tree-row.file），当前项的类名是 active
+      const fileRows = Array.from(document.querySelectorAll('#tree .tree-row.file'));
+      if (fileRows.length > 1) {
+        const tree = document.getElementById('tree');
+        await realClick(fileRows[0]);
+        await sleep(300);
+        const firstRel = (document.querySelector('#tree .tree-row.file.active') || {}).__rel ||
+          (document.querySelector('#tree .tree-row.file.active') || {}).dataset?.rel || state.currentRel;
+        tree.focus();
+        tree.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+        await sleep(400);
+        const secondRel = state.currentRel;
+        check('文件树方向键能切到下一个文件', !!firstRel && !!secondRel && firstRel !== secondRel,
+          String(firstRel) + ' → ' + String(secondRel));
+        tree.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+        await sleep(400);
+        check('方向键能切回上一个文件', state.currentRel === firstRel,
+          String(state.currentRel) + ' 应为 ' + String(firstRel));
+      } else {
+        check('文件树里有多于一个文件行可供导航', false, '只有 ' + fileRows.length + ' 个文件行');
+      }
+
+      // ---- 右键菜单 ----
+      const fileRow = document.querySelector('#tree .tree-row.file') || document.querySelector('#tree .tree-row');
+      if (fileRow) {
+        fileRow.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 200, clientY: 200 }));
+        await sleep(250);
+        const items = menu() ? menu().querySelectorAll('.ctx-item').length : 0;
+        check('右键菜单能弹出且有菜单项（' + items + ' 项）', menuVisible() && items > 0);
+        await realClick(document.body);
+      }
+    } catch (e) {
+      check('UI 点击自检执行中断', false, e && e.message ? e.message : String(e));
+    }
+    return out;
+  })()`;
+
   return {
     run: async () => {
       const fail = (msg) => { console.error('[selftest] FAIL ' + msg); process.exitCode = 1; };
@@ -1179,6 +1314,22 @@ function attachSelfTest(targetWin) {
               else fail('切换到英文后界面外壳仍有中文（' + res.total + ' 处）: ' + res.chunks.join(' | '));
             } else {
               console.log('[selftest] 语言已切到 ' + res.lang);
+            }
+          }
+        }
+        // PFM_SELFTEST_UI=1：真的用鼠标点一遍界面。
+        // 为什么必须有这层：功能自检是直接调 IPC 的，绕过了所有 UI；
+        // 结果"点新建提示词没反应"这种全量阻塞的 bug 一路没被发现——
+        // 打开弹层的那次 click 冒泡到 document 后把弹层自己关掉了。
+        // 会新建文件，所以必须配 PFM_DATA_DIR。
+        if (process.env.PFM_SELFTEST_UI === '1') {
+          if (!process.env.PFM_DATA_DIR) {
+            fail('UI 点击自检必须设置 PFM_DATA_DIR，拒绝在真实库上点');
+          } else {
+            const uiResults = await targetWin.webContents.executeJavaScript(uiScript, true);
+            for (const [name, ok, detail] of uiResults) {
+              if (ok) console.log('[selftest:ui] PASS ' + name);
+              else fail('[ui] ' + name + (detail ? ' → ' + detail : ''));
             }
           }
         }
