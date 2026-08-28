@@ -34,7 +34,9 @@ const WORKFLOWS_DIR = path.join(DATA_ROOT, 'workflows');
 const TEMPLATES_DIR = path.join(DATA_ROOT, 'templates');
 const VERSIONS_DIR = path.join(DATA_ROOT, '.versions');
 const TRASH_DIR = path.join(DATA_ROOT, '.trash');
-const CONFIG_PATH = path.join(app.getPath('userData'), 'config.json');
+// 配置默认放 userData（不污染提示词目录）；设了 PFM_DATA_DIR 时跟着走，
+// 否则测试改语言/主题会写进用户真实配置。
+const CONFIG_PATH = path.join(process.env.PFM_DATA_DIR ? DATA_ROOT : app.getPath('userData'), 'config.json');
 
 // 打包后首次运行：从 asar 内拷出种子资源到 Data 目录
 function ensureSeedData() {
@@ -881,11 +883,63 @@ function attachSelfTest(targetWin) {
             }
           }
         }
+        // PFM_SELFTEST_LANG=en 时切到英文再检查，用于核对 i18n 覆盖。
+        // 走真实的 setLang() 路径，所以必须配 PFM_DATA_DIR 隔离配置文件。
+        if (process.env.PFM_SELFTEST_LANG) {
+          if (!process.env.PFM_DATA_DIR) {
+            fail('语言自检必须设置 PFM_DATA_DIR，拒绝改写用户真实配置');
+          } else {
+            const lang = process.env.PFM_SELFTEST_LANG === 'en' ? 'en' : 'zh';
+            const res = await targetWin.webContents.executeJavaScript(`(async () => {
+              await setLang('${lang}');
+              await new Promise(r => setTimeout(r, 400));
+              // 只检查"界面外壳"的文案。以下容器渲染的是用户数据
+              // （提示词标题、标签、正文、工程类型…），里面出现中文是正常的，
+              // 把它们算进来会让检查变成误报。
+              const userDataContainers = [
+                'tree', 'tabs-bar', 'breadcrumb', 'meta-bar', 'preview', 'editor',
+                'recent-list', 'search-results', 'types-list',
+                'version-list', 'version-detail', 'version-diff', 'trash-list',
+                'filter-stage', 'filter-type', 'tag-datalist'
+              ];
+              const clone = document.body.cloneNode(true);
+              for (const id of userDataContainers) {
+                const el = clone.querySelector('#' + id);
+                if (el) el.remove();
+              }
+              document.body.appendChild(clone);
+              clone.style.position = 'absolute';
+              clone.style.left = '-99999px';
+              const text = clone.innerText || '';
+              clone.remove();
+              const chunks = text.match(/[\\u4e00-\\u9fa5]+/g) || [];
+              return { lang: '${lang}', chunks: [...new Set(chunks)].slice(0, 20), total: chunks.length };
+            })()`, true);
+            if (lang === 'en') {
+              const ok = res.total === 0;
+              if (ok) console.log('[selftest] PASS 切换到英文后界面外壳无残留中文');
+              else fail('切换到英文后界面外壳仍有中文（' + res.total + ' 处）: ' + res.chunks.join(' | '));
+            } else {
+              console.log('[selftest] 语言已切到 ' + res.lang);
+            }
+          }
+        }
         // PFM_SELFTEST_SHOT=<路径> 时顺手存一张真实渲染截图，便于人工核对界面
         if (process.env.PFM_SELFTEST_SHOT) {
-          const image = await targetWin.webContents.capturePage();
-          fs.writeFileSync(process.env.PFM_SELFTEST_SHOT, image.toPNG());
-          console.log('[selftest] 截图已保存: ' + process.env.PFM_SELFTEST_SHOT);
+          // 窗口被遮挡或还没绘制完时 capturePage 会返回空图，重试几次。
+          let png = null;
+          for (let i = 0; i < 5; i++) {
+            const image = await targetWin.webContents.capturePage();
+            png = image.toPNG();
+            if (png && png.length > 0) break;
+            await new Promise(r => setTimeout(r, 400));
+          }
+          if (png && png.length > 0) {
+            fs.writeFileSync(process.env.PFM_SELFTEST_SHOT, png);
+            console.log('[selftest] 截图已保存: ' + process.env.PFM_SELFTEST_SHOT + '（' + png.length + ' 字节）');
+          } else {
+            fail('截图为空：窗口可能未绘制');
+          }
         }
       } catch (e) {
         fail(e.message);

@@ -1,7 +1,8 @@
 // tests/functional-smoke.js
 // 端到端功能自检：真正拉起 Electron，从渲染进程调 contextBridge 暴露的 API，
-// 走完整条 IPC 链路（新建 → 保存 → 版本 → 星标 → 回滚 → 锁定 → 删除 → 恢复 → 搜索 → 越权防护）。
-// 数据目录指向系统临时目录，不会碰你真实的提示词库。
+// 走完整条 IPC 链路（新建 → 保存 → 版本 → 星标 → 回滚 → 锁定 → 删除 → 恢复 → 搜索 → 越权防护），
+// 最后切到英文界面，检查有没有残留中文（历史上 renderer.js 里几十处文案是硬编码的）。
+// 数据目录与配置文件都指向系统临时目录，不会碰你真实的提示词库和设置。
 // 运行：npm run test:fn
 const fs = require('fs');
 const os = require('os');
@@ -27,6 +28,7 @@ const child = spawn(electronBin, [root], {
     PFM_SELFTEST: '1',
     PFM_SELFTEST_FUNCTIONAL: '1',
     PFM_DATA_DIR: dataDir,
+    PFM_SELFTEST_LANG: 'en',
     ELECTRON_ENABLE_LOGGING: '1'
   },
   stdio: ['ignore', 'pipe', 'pipe']
@@ -48,7 +50,10 @@ const timeout = setTimeout(() => {
 child.on('exit', (code) => {
   clearTimeout(timeout);
   cleanup();
-  const passed = code === 0 && /\[selftest\] 全部通过/.test(out) && !/FAIL/.test(out);
+  const passed = code === 0
+    && /\[selftest\] 全部通过/.test(out)
+    && /切换到英文后界面外壳无残留中文/.test(out)
+    && !/FAIL/.test(out);
   console.log('\n[test:fn] ' + (passed ? '通过' : '失败（exit=' + code + '）'));
   process.exit(passed ? 0 : 1);
 });

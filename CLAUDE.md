@@ -79,6 +79,44 @@ const DATA_ROOT = app.isPackaged ? app.getPath('userData') : __dirname;  // 用�
 - 锁定（防误删）由**主进程**强制：`trash` handler 先查 `config.lockedFiles`。
   改名/移动允许，但锁会跟着文件走，避免"改名再删"绕过。
 
+## 多语言（i18n）
+
+**硬规则：renderer.js 里不许出现面向用户的中文字面量。** 所有文案走 `src/i18n.js`，
+`npm test` 有断言卡这条（含未标注豁免就报错的检查）。
+
+- `t(key)` / `t(key, { name })` —— 取文案，支持 `{name}` 占位符
+- `tErr(key, e)` —— 失败提示统一格式：`<本地化前缀><分隔符><错误详情>`
+- `dirLabel(key)` —— 目录名与阶段名（`prompts` / `testing` 这类键）的显示名，
+  **不要直接读 `state.stageLabels`**，那是主进程给的中文
+- 静态 HTML 用 `data-i18n` / `data-i18n-title` / `data-i18n-placeholder`
+
+### 确实需要保留中文的地方，必须显式豁免
+
+```js
+console.error('保存展开状态失败:', e); // i18n-exempt: 开发日志
+
+// i18n-exempt-start: 写入 .md 的文件内容，不是界面文案
+const content = \`--- ... ---\`;
+// i18n-exempt-end
+```
+
+已豁免的三类：开发日志（`console.error`）、会写进 frontmatter 的**用户数据**
+（`前端项目` 等工程类型，翻译会破坏已有文件）、新建工作流时写入的模板正文
+（其中 `prompt:` 路径指向中文文件名的种子提示词，翻译会让流程图节点全部失效）。
+
+### 加新文案的流程
+
+1. 在 `i18n.js` 的 `zh` 和 `en` **两处**都加键（键数不一致测试会失败）
+2. 代码里用 `t('newKey')`
+3. 如果这段文案会随语言切换而变，确认 `setLang()` 里重绘了对应区域 ——
+   漏掉的区域会残留旧语言，直到用户手动触发一次渲染
+
+### 已知限制
+
+主进程 `throw new Error('...')` 的文案仍是中文，英文界面下 `tErr()` 拼出来会混中文。
+正常操作路径上渲染进程会先自己判断并给出本地化提示，所以这只在异常路径可见。
+彻底解决需要给主进程异常加错误码，暂未做。
+
 ## 测试
 
 三层，各管一件事：

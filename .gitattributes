@@ -1,0 +1,15 @@
+# 统一行尾，避免 core.autocrlf 在不同机器上产出整文件的假 diff
+* text=auto eol=lf
+
+# Windows 脚本必须是 CRLF，否则 cmd 解析会出问题
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制，不做行尾转换也不做 diff
+*.png binary
+*.ico binary
+*.svg text eol=lf
+
+# 由 scripts/sync-vendor.js 生成，diff 没有意义
+src/vendor/** linguist-vendored -diff

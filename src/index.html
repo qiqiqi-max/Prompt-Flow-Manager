@@ -13,7 +13,7 @@
       <div class="toolbar-left">
         <button class="btn-icon" id="btn-new-prompt" data-i18n="btnNewPrompt">＋ 提示词</button>
         <button class="btn-icon" id="btn-new-workflow" data-i18n="btnNewWorkflow">＋ 工作流</button>
-        <button class="btn-icon" id="btn-import" title="导入 (Ctrl+I)">📥</button>
+        <button class="btn-icon" id="btn-import" data-i18n-title="btnImportTitle" title="导入 (Ctrl+I)">📥</button>
         <button class="btn-icon" id="btn-new-folder" data-i18n="btnNewFolder">＋ 目录</button>
       </div>
       <div class="toolbar-center">
@@ -113,7 +113,7 @@
 
           <!-- 编辑区（原地切换） -->
           <div id="editor-wrap" class="editor-wrap hidden">
-            <textarea id="editor" class="editor" spellcheck="false" placeholder="在此编辑提示词内容…"></textarea>
+            <textarea id="editor" class="editor" spellcheck="false" data-i18n-placeholder="editorPlaceholder" placeholder="在此编辑提示词内容…"></textarea>
             <div class="editor-actions">
               <button class="btn-primary" id="btn-save" data-i18n="save">保存 (Ctrl+S)</button>
               <button class="btn-secondary" id="btn-cancel" data-i18n="cancel">取消</button>

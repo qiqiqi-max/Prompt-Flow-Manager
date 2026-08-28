@@ -201,7 +201,64 @@ section('ZIP 真实往返（压缩 → 解压）');
   assert(/setTimeout\(flushBounds/.test(mainSrc), '窗口尺寸保存做了防抖');
   assert(!/win\.on\('resize', saveBounds\)/.test(mainSrc), '不再直接把未防抖的写盘挂到 resize');
 
-  section('测试防护');
+  section('i18n 覆盖（英文界面曾大面积漏翻）');
+// 故障回顾：字典有 85 个键，但 renderer.js 只调了 7 次 t()，其余几十处提示
+// 全是硬编码中文 —— 切到 English 后一操作就弹中文。
+// 这里用"白名单豁免"来卡：renderer.js 里任何含中文的行，要么是注释，
+// 要么必须显式标注 // i18n-exempt: <理由>（或落在 i18n-exempt-start/end 区间内）。
+function collectUnexemptedCjk(file) {
+  const raw = fs.readFileSync(path.join(root, file), 'utf8').split(/\r?\n/);
+  const cjk = /[\u4e00-\u9fa5]/;
+  const bad = [];
+  let inExemptBlock = false;
+  raw.forEach((line, i) => {
+    if (/\/\/\s*i18n-exempt-start/.test(line)) { inExemptBlock = true; return; }
+    if (/\/\/\s*i18n-exempt-end/.test(line)) { inExemptBlock = false; return; }
+    if (inExemptBlock) return;
+    if (/^\s*(\/\/|\*|\/\*)/.test(line)) return;          // 纯注释行
+    if (/\/\/\s*i18n-exempt\b/.test(line)) return;          // 行内豁免
+    const code = line
+      .replace(/\/\*[\s\S]*?\*\//g, '')   // 行内块注释
+      .replace(/\/\/.*$/, '');            // 行尾注释
+    if (cjk.test(code)) bad.push((i + 1) + ': ' + line.trim());
+  });
+  return bad;
+}
+const unexempted = collectUnexemptedCjk('src/renderer.js');
+assert(unexempted.length === 0,
+  'renderer.js 无未标注豁免的硬编码中文' + (unexempted.length ? '，违规行：\n      ' + unexempted.join('\n      ') : ''));
+
+// t() 调用量：低于这个数说明又开始往代码里塞文案了
+const tCalls = (rendererSrc.match(/\bt\('/g) || []).length + (rendererSrc.match(/\btErr\('/g) || []).length;
+assert(tCalls >= 80, 'renderer.js 的 t()/tErr() 调用数 >= 80（实际 ' + tCalls + '）');
+assert(/function tErr\(/.test(rendererSrc), '有统一的失败提示拼装函数 tErr');
+assert(/function dirLabel\(/.test(rendererSrc), '有目录/阶段名本地化函数 dirLabel');
+assert(/s\.split\('\{' \+ k \+ '\}'\)/.test(rendererSrc), 't() 支持 {name} 占位符替换');
+
+// 防回归：map 回调用 t 作参数名会遮蔽全局 t()，回调内调 t('key') 直接抛异常
+const shadow = [];
+rendererSrc.split(/\r?\n/).forEach((line, i) => {
+  if (/\.(map|forEach|filter|find|some|every|sort|reduce)\(\s*t\s*(=>|,)/.test(line) && /\bt\('/.test(line)) {
+    shadow.push(i + 1);
+  }
+});
+assert(shadow.length === 0, '没有在遮蔽了 t 的回调里调用 t()' + (shadow.length ? '（行 ' + shadow.join(',') + '）' : ''));
+
+// index.html 引用的键必须都存在，否则界面上会直接显示键名
+{
+  const I18N = require('../src/i18n.js');
+  const htmlKeys = new Set();
+  for (const m of htmlSrc.matchAll(/data-i18n(?:-[a-z]+)?="([^"]+)"/g)) htmlKeys.add(m[1]);
+  const missing = [...htmlKeys].filter(k => !(k in I18N.zh));
+  assert(missing.length === 0, 'index.html 引用的 i18n 键都存在' + (missing.length ? '，缺失：' + missing.join(', ') : ''));
+  const used = new Set();
+  for (const m of rendererSrc.matchAll(/\bt(?:Err)?\('([^']+)'/g)) used.add(m[1]);
+  const missingR = [...used].filter(k => !(k in I18N.zh));
+  assert(missingR.length === 0, 'renderer.js 引用的 i18n 键都存在' + (missingR.length ? '，缺失：' + missingR.join(', ') : ''));
+  assert(htmlKeys.size >= 40, 'index.html 上挂了足够多的 data-i18n（' + htmlKeys.size + ' 个）');
+}
+
+section('测试防护');
 // 功能自检会增删文件，必须拒绝在没有 PFM_DATA_DIR 的情况下运行
 assert(/拒绝在真实数据目录上跑/.test(mainSrc), '功能自检未设 PFM_DATA_DIR 时会拒绝执行');
 assert(fs.existsSync(path.join(root, 'tests/ui-smoke.js')), '存在 tests/ui-smoke.js');

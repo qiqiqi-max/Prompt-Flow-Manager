@@ -10,11 +10,34 @@ const DiffMatchPatch = window.diff_match_patch;
 const api = window.promptFlowApi;
 
 // ===== i18n =====
-function t(key) {
+function t(key, params) {
   const lang = (state.config && state.config.lang) || 'zh';
   const tbl = I18N[lang] || I18N.zh;
-  return tbl[key] != null ? tbl[key] : (I18N.zh[key] != null ? I18N.zh[key] : key);
+  let s = tbl[key] != null ? tbl[key] : (I18N.zh[key] != null ? I18N.zh[key] : key);
+  if (params) {
+    for (const [k, v] of Object.entries(params)) s = s.split('{' + k + '}').join(String(v));
+  }
+  return s;
 }
+
+// 失败提示统一格式：<本地化前缀><分隔符><底层错误信息>
+// 说明：主进程抛出的 e.message 目前仍是中文，英文界面下这段会混中文，
+// 属已知限制（要彻底解决需要给主进程的异常加错误码）。
+function tErr(key, e) {
+  const detail = e && e.message ? e.message : String(e);
+  return t(key) + t('sep') + detail;
+}
+
+// 阶段/顶层目录的显示名：优先用 i18n，回落到主进程给的 STAGE_LABELS，最后用原始键。
+function dirLabel(key) {
+  const map = { prompts: 'dirPrompts', workflows: 'dirWorkflows', templates: 'dirTemplates' };
+  if (map[key]) return t(map[key]);
+  const stageKey = 'stage_' + key;
+  const lang = (state.config && state.config.lang) || 'zh';
+  if (I18N[lang] && I18N[lang][stageKey] != null) return I18N[lang][stageKey];
+  return (state.stageLabels && state.stageLabels[key]) || key;
+}
+
 function applyI18n() {
   document.querySelectorAll('[data-i18n]').forEach(el => {
     el.textContent = t(el.dataset.i18n);
@@ -56,7 +79,7 @@ const escapeHtml = (s) => String(s).replace(/[&<>"'`]/g, c => ({ '&': '&amp;', '
 const saveExpandedPathsDebounced = debounce(async () => {
   try {
     await api.setConfig({ expandedPaths: Array.from(state.expandedPaths) });
-  } catch (e) { console.error('保存展开状态失败:', e); }
+  } catch (e) { console.error('保存展开状态失败:', e); } // i18n-exempt: 开发日志
 }, 600);
 
 function parseFrontmatter(content) {
@@ -157,14 +180,14 @@ function enhanceCodeBlocks(container) {
     if (pre.querySelector('.code-copy-btn')) return;
     const btn = document.createElement('button');
     btn.className = 'code-copy-btn';
-    btn.textContent = '复制';
+    btn.textContent = t('copy');
     btn.onclick = async () => {
       const code = pre.querySelector('code');
       const text = code ? code.textContent : pre.textContent;
       try {
         await navigator.clipboard.writeText(text);
         btn.textContent = '✓';
-        setTimeout(() => { btn.textContent = '复制'; }, 1200);
+        setTimeout(() => { btn.textContent = t('copy'); }, 1200);
       } catch {
         const ta = document.createElement('textarea');
         ta.value = text;
@@ -173,7 +196,7 @@ function enhanceCodeBlocks(container) {
         document.execCommand('copy');
         document.body.removeChild(ta);
         btn.textContent = '✓';
-        setTimeout(() => { btn.textContent = '复制'; }, 1200);
+        setTimeout(() => { btn.textContent = t('copy'); }, 1200);
       }
     };
     pre.appendChild(btn);
@@ -199,13 +222,13 @@ function renderStats() {
   for (const m of state.metaList) {
     if (m.stage) stageCounts[m.stage] = (stageCounts[m.stage] || 0) + 1;
   }
-  const stageLabel = s => state.stageLabels[s] || s;
+  const stageLabel = s => dirLabel(s);
   const parts = [];
   for (const [stage, count] of Object.entries(stageCounts)) {
-    parts.push(`<div class="stat-card"><span class="stat-num">${count}</span><span class="stat-label">${stageLabel(stage)}</span></div>`);
+    parts.push(`<div class="stat-card"><span class="stat-num">${count}</span><span class="stat-label">${escapeHtml(stageLabel(stage))}</span></div>`);
   }
   if (!parts.length) {
-    parts.push(`<div class="stat-card"><span class="stat-num">0</span><span class="stat-label">暂无提示词</span></div>`);
+    parts.push(`<div class="stat-card"><span class="stat-num">0</span><span class="stat-label">${escapeHtml(t('noPromptsYet'))}</span></div>`);
   }
   panel.innerHTML = parts.join('');
 }
@@ -216,7 +239,7 @@ function updateStatusCounts() {
   if (!counts) return;
   const prompts = state.metaList.filter(m => m.top === 'prompts').length;
   const workflows = state.metaList.filter(m => m.top === 'workflows').length;
-  counts.textContent = `提示词 ${prompts} · 工作流 ${workflows}`;
+  counts.textContent = t('countsSummary', { prompts, workflows });
 }
 
 function updateStatusInfo(msg) {
@@ -324,8 +347,8 @@ function buildTreeNode(node, depth) {
     // tooltip：完整路径 + 关键元信息
     const tipParts = [node.rel];
     if (m) {
-      if (m.meta.projectType) tipParts.push('工程类型: ' + m.meta.projectType);
-      if (Array.isArray(m.meta.tags) && m.meta.tags.length) tipParts.push('标签: ' + m.meta.tags.join(', '));
+      if (m.meta.projectType) tipParts.push(t('projectType') + ': ' + m.meta.projectType);
+      if (Array.isArray(m.meta.tags) && m.meta.tags.length) tipParts.push(t('tag') + ': ' + m.meta.tags.join(', '));
       if (m.meta.description) tipParts.push(m.meta.description);
     }
     row.title = tipParts.join('\n');
@@ -344,7 +367,7 @@ function buildTreeNode(node, depth) {
       const lock = document.createElement('span');
       lock.className = 'lock-mark';
       lock.textContent = '🔒';
-      lock.title = '已锁定（防误删）';
+      lock.title = t('lockedTitle');
       row.append(lock);
     }
     wrap.appendChild(row);
@@ -359,14 +382,14 @@ function buildTreeNode(node, depth) {
 
 function labelForDir(node) {
   const map = {
-    'prompts': '提示词',
-    'workflows': '工作流',
-    'templates': '模板',
-    'project-init': '项目初始化',
-    'code-generation': '代码生成',
-    'code-review': '代码审查',
-    'testing': '测试',
-    'deployment': '部署'
+    'prompts': dirLabel('prompts'),
+    'workflows': dirLabel('workflows'),
+    'templates': dirLabel('templates'),
+    'project-init': dirLabel('project-init'),
+    'code-generation': dirLabel('code-generation'),
+    'code-review': dirLabel('code-review'),
+    'testing': dirLabel('testing'),
+    'deployment': dirLabel('deployment')
   };
   return map[node.name] || node.name;
 }
@@ -401,11 +424,11 @@ async function openFile(rel) {
     // 记录到最近打开
     addRecent(rel);
     // 更新状态栏信息
-    updateStatusInfo((state.currentMeta.title || rel) + ' · 已加载');
+    updateStatusInfo((state.currentMeta.title || rel) + ' · ' + t('loaded'));
   } catch (e) {
     state.currentRel = null;
-    toast('打开失败：' + e.message, 'error');
-    updateStatusInfo('打开失败');
+    toast(tErr('openFailed', e), 'error');
+    updateStatusInfo(t('openFailed'));
   }
 }
 
@@ -416,19 +439,20 @@ const saveTabsDebounced = debounce(async () => {
       tabs: state.tabs.map(t => t.rel),
       activeTab: state.activeTab
     });
-  } catch (e) { console.error('保存标签状态失败:', e); }
+  } catch (e) { console.error('保存标签状态失败:', e); } // i18n-exempt: 开发日志
 }, 500);
 function renderTabs() {
   const bar = $('tabs-bar');
   if (!bar) return;
   if (!state.tabs.length) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
   bar.classList.remove('hidden');
-  bar.innerHTML = state.tabs.map(t => {
-    const title = (t.meta && t.meta.title) || fileNameNoExt(t.rel.split('/').pop());
-    const active = t.rel === state.activeTab;
-    return `<div class="tab ${active ? 'active' : ''}" data-rel="${escapeHtml(t.rel)}" title="${escapeHtml(t.rel)}">
+  const closeLabel = t('close');
+  bar.innerHTML = state.tabs.map(tab => {
+    const title = (tab.meta && tab.meta.title) || fileNameNoExt(tab.rel.split('/').pop());
+    const active = tab.rel === state.activeTab;
+    return `<div class="tab ${active ? 'active' : ''}" data-rel="${escapeHtml(tab.rel)}" title="${escapeHtml(tab.rel)}">
       <span class="tab-title">${escapeHtml(title)}</span>
-      <button class="tab-close" data-close="${escapeHtml(t.rel)}" title="关闭">✕</button>
+      <button class="tab-close" data-close="${escapeHtml(tab.rel)}" title="${escapeHtml(closeLabel)}">✕</button>
     </div>`;
   }).join('');
   bar.querySelectorAll('.tab').forEach(el => {
@@ -461,7 +485,7 @@ async function switchTab(rel) {
   document.querySelectorAll('.tree-row').forEach(r => {
     r.classList.toggle('active', r.__rel === rel);
   });
-  updateStatusInfo((tab.meta.title || rel) + ' · 已加载');
+  updateStatusInfo((tab.meta.title || rel) + ' · ' + t('loaded'));
 }
 
 async function closeTab(rel) {
@@ -502,7 +526,7 @@ function addRecent(rel) {
 }
 const saveRecentDebounced = debounce(async () => {
   try { await api.setConfig({ recent: state.recent }); }
-  catch (e) { console.error('保存最近打开失败:', e); }
+  catch (e) { console.error('保存最近打开失败:', e); } // i18n-exempt: 开发日志
 }, 500);
 function renderRecent() {
   const panel = $('recent-panel');
@@ -516,7 +540,7 @@ function renderRecent() {
   const list = $('recent-list');
   list.innerHTML = recent.map(m => {
     const stage = stageOfRel(m.rel);
-    const stageLabel = state.stageLabels[stage] || (m.top === 'workflows' ? '工作流' : m.top === 'templates' ? '模板' : '');
+    const stageLabel = stage ? dirLabel(stage) : (m.top === 'workflows' ? dirLabel('workflows') : m.top === 'templates' ? dirLabel('templates') : '');
     const icon = m.rel.startsWith('workflows') ? '🔀' : (m.rel.startsWith('templates') ? '📋' : '📄');
     return `<div class="recent-item" data-rel="${escapeHtml(m.rel)}">
       <span class="ri-icon">${icon}</span>
@@ -547,14 +571,14 @@ function renderMetaBar() {
   const bar = $('meta-bar');
   const m = state.currentMeta;
   const stage = stageOfRel(state.currentRel);
-  const stageLabel = state.stageLabels[stage] || stage;
+  const stageLabel = stage ? dirLabel(stage) : stage;
   let html = '';
-  if (stageLabel) html += `<span class="meta-chip stage">阶段：${escapeHtml(stageLabel)}</span>`;
-  if (m.projectType) html += `<span class="meta-chip type">工程类型：${escapeHtml(m.projectType)}</span>`;
+  if (stageLabel) html += `<span class="meta-chip stage">${escapeHtml(t('stage'))}${escapeHtml(t('sep'))}${escapeHtml(stageLabel)}</span>`;
+  if (m.projectType) html += `<span class="meta-chip type">${escapeHtml(t('projectType'))}${escapeHtml(t('sep'))}${escapeHtml(m.projectType)}</span>`;
   if (Array.isArray(m.tags)) m.tags.forEach(t => html += `<span class="meta-chip tag">#${escapeHtml(t)}</span>`);
   if (m.description) html += `<span class="meta-chip">${escapeHtml(m.description)}</span>`;
   if (m.version != null) html += `<span class="meta-chip">v${escapeHtml(String(m.version))}</span>`;
-  if (m.updatedAt) html += `<span class="meta-chip">更新：${escapeHtml(String(m.updatedAt).slice(0, 16).replace('T', ' '))}</span>`;
+  if (m.updatedAt) html += `<span class="meta-chip">${escapeHtml(t('chipUpdated'))}${escapeHtml(t('sep'))}${escapeHtml(String(m.updatedAt).slice(0, 16).replace('T', ' '))}</span>`;
   bar.innerHTML = html;
 }
 
@@ -639,13 +663,13 @@ function renderFlowDiagram(steps, title) {
   const layers = Array.from({ length: maxLevel + 1 }, () => []);
   for (const s of steps) layers[level.get(s.id) || 0].push(s);
   // 渲染：逐层横向，层内节点等高排列；连线由 drawFlowEdges 绘制
-  let html = `<div class="flow-diagram"><div class="flow-title">流程图${title ? '：' + escapeHtml(title) : ''}</div>`;
+  let html = `<div class="flow-diagram"><div class="flow-title">${escapeHtml(t('flowDiagram'))}${title ? escapeHtml(t('sep')) + escapeHtml(title) : ''}</div>`;
   html += `<div class="flow-canvas">`;
   html += `<svg class="flow-edges" xmlns="http://www.w3.org/2000/svg"></svg>`;
   for (let lv = 0; lv < layers.length; lv++) {
     html += `<div class="flow-layer" data-level="${lv}">`;
     for (const s of layers[lv]) {
-      const label = s.label || s.id || '步骤';
+      const label = s.label || s.id || t('flowStep');
       html += `<div class="flow-node" data-id="${escapeHtml(s.id || '')}" data-prompt="${escapeHtml(s.prompt || '')}" data-label="${escapeHtml(label)}">${escapeHtml(label)}</div>`;
     }
     html += `</div>`;
@@ -705,7 +729,7 @@ async function enterEditMode() {
   $('editor-wrap').classList.remove('hidden');
   $('editor').value = state.currentContent;
   $('editor').focus();
-  $('btn-edit').textContent = '编辑中…';
+  $('btn-edit').textContent = t('editing');
 }
 
 async function exitEditMode(save) {
@@ -717,14 +741,14 @@ async function exitEditMode(save) {
     state.editMode = false;
     $('preview-wrap').classList.remove('hidden');
     $('editor-wrap').classList.add('hidden');
-    $('btn-edit').textContent = '编辑';
+    $('btn-edit').textContent = t('edit');
     renderContent();
     return true;
   }
   state.editMode = false;
   $('preview-wrap').classList.remove('hidden');
   $('editor-wrap').classList.add('hidden');
-  $('btn-edit').textContent = '编辑';
+  $('btn-edit').textContent = t('edit');
   return true;
 }
 
@@ -753,10 +777,10 @@ async function saveCurrent() {
     });
     updateStatusCounts();
     renderStats();
-    updateStatusInfo((meta.title || state.currentRel) + ' · 已保存 v' + (meta.version || '?'));
+    updateStatusInfo((meta.title || state.currentRel) + ' · ' + t('saved') + ' v' + (meta.version || '?'));
     return true;
   } catch (e) {
-    toast('保存失败：' + e.message, 'error');
+    toast(tErr('saveFailed', e), 'error');
     return false;
   }
 }
@@ -776,14 +800,14 @@ async function copyContent() {
     ta.select();
     document.execCommand('copy');
     document.body.removeChild(ta);
-    toast('已复制', 'success');
+    toast(t('copied'), 'success');
   }
 }
 
 // ===== 新建 =====
 async function pickProjectType() {
-  const types = state.config.projectTypes || ['前端项目', '后端项目', '数据分析', '脚本工具', '其他'];
-  const input = await promptInput('选择工程类型', types.join(' / '));
+  const types = state.config.projectTypes || ['前端项目', '后端项目', '数据分析', '脚本工具', '其他']; // i18n-exempt: 用户数据，会写进 frontmatter，翻译会破坏已有文件
+  const input = await promptInput(t('pickProjectType'), types.join(' / '));
   if (!input) return null;
   const found = types.find(t => t === input);
   if (found) return found;
@@ -799,11 +823,11 @@ async function pickProjectType() {
 async function newPrompt() {
   const stage = await pickStage();
   if (!stage) return;
-  const name = await promptInput('提示词名称', '如：需求分析');
+  const name = await promptInput(t('promptNameTitle'), t('promptNamePlaceholder'));
   if (!name) return;
-  const projectType = (await pickProjectType()) || '其他';
+  const projectType = (await pickProjectType()) || '其他'; // i18n-exempt: 用户数据默认值
   const rel = `prompts/${stage}/${name}.md`;
-  const stageLabel = state.stageLabels[stage];
+  const stageLabel = dirLabel(stage);
   const content = `---
 title: ${name}
 stage: ${stage}
@@ -817,19 +841,21 @@ description:
 `;
   try {
     await api.createFile(rel, content);
-    toast('已新建', 'success');
+    toast(t('created'), 'success');
     await refreshTree();
     await openFile(rel);
     enterEditMode();
   } catch (e) {
-    toast('新建失败：' + e.message, 'error');
+    toast(tErr('createFailed', e), 'error');
   }
 }
 
 async function newWorkflow() {
-  const name = await promptInput('工作流名称', '如：完整项目流程');
+  const name = await promptInput(t('workflowNameTitle'), t('workflowNamePlaceholder'));
   if (!name) return;
   const rel = `workflows/${name}.md`;
+  // i18n-exempt-start: 这是写入 .md 的文件内容，不是界面文案；
+  // 且 prompt 路径指向种子提示词的中文文件名，翻译会让流程图节点全部失效。
   const content = `---
 title: ${name}
 flow:
@@ -850,37 +876,38 @@ flow:
 
 本工作流定义了 ${name} 的步骤顺序。点击上方流程图节点可跳转到对应提示词。
 `;
+  // i18n-exempt-end
   try {
     await api.createFile(rel, content);
-    toast('已新建工作流', 'success');
+    toast(t('createdWorkflow'), 'success');
     await refreshTree();
     await openFile(rel);
     enterEditMode();
   } catch (e) {
-    toast('新建失败：' + e.message, 'error');
+    toast(tErr('createFailed', e), 'error');
   }
 }
 
 async function newFolder() {
-  const name = await promptInput('新建目录名（英文，将建在 prompts/ 下）', '如：refactor');
+  const name = await promptInput(t('newFolderTitle'), t('newFolderPlaceholder'));
   if (!name) return;
   const safe = name.replace(/[\\/:*?"<>|]/g, '').trim();
-  if (!safe) { toast('目录名无效', 'error'); return; }
+  if (!safe) { toast(t('invalidFolderName'), 'error'); return; }
   const rel = `prompts/${safe}`;
   try {
     await api.createFile(`${rel}/.gitkeep`, '');
-    toast('已新建目录', 'success');
+    toast(t('createdFolder'), 'success');
     await refreshTree();
   } catch (e) {
-    toast('新建目录失败：' + e.message, 'error');
+    toast(tErr('createFolderFailed', e), 'error');
   }
 }
 
-async function pickStage(title = '选择阶段') {
-  const opts = state.stages.map(s => state.stageLabels[s] || s).join(' / ');
+async function pickStage(title = t('pickStageTitle')) {
+  const opts = state.stages.map(s => dirLabel(s)).join(' / ');
   const input = await promptInput(title, opts);
   if (!input) return null;
-  const found = state.stages.find(s => (state.stageLabels[s] || s) === input || s === input);
+  const found = state.stages.find(s => dirLabel(s) === input || s === input);
   return found || state.stages[0];
 }
 
@@ -892,8 +919,8 @@ function promptInput(title, placeholder) {
         <div class="ctx-prompt-title">${escapeHtml(title)}</div>
         <input id="ctx-input" class="ctx-prompt-input" placeholder="${escapeHtml(placeholder || '')}">
         <div class="ctx-prompt-actions">
-          <button class="btn-link" id="ctx-cancel">取消</button>
-          <button class="btn-primary" id="ctx-ok">确定</button>
+          <button class="btn-link" id="ctx-cancel">${escapeHtml(t('cancel_'))}</button>
+          <button class="btn-primary" id="ctx-ok">${escapeHtml(t('ok'))}</button>
         </div>
       </div>`;
     menu.classList.remove('hidden');
@@ -915,7 +942,7 @@ async function renameCurrent() {
   const oldRel = state.currentRel;
   const segs = oldRel.split('/');
   const oldName = fileNameNoExt(segs[segs.length - 1]);
-  const newName = await promptInput('重命名（不含 .md）', oldName);
+  const newName = await promptInput(t('renameTitle'), oldName);
   if (!newName || newName === oldName) return;
   const newRel = segs.slice(0, -1).join('/') + '/' + newName + '.md';
   try {
@@ -925,11 +952,11 @@ async function renameCurrent() {
     const tab = state.tabs.find(t => t.rel === oldRel);
     if (tab) tab.rel = newRel;
     if (state.activeTab === oldRel) state.activeTab = newRel;
-    toast('已重命名', 'success');
+    toast(t('renamed'), 'success');
     await refreshTree();
     await openFile(newRel);
   } catch (e) {
-    toast('重命名失败：' + e.message, 'error');
+    toast(tErr('renameFailed', e), 'error');
   }
 }
 
@@ -939,7 +966,7 @@ async function deleteCurrent() {
     toast(t('lockedCannotDelete'), 'error');
     return;
   }
-  if (!(await confirmDialog(`删除「${state.currentMeta.title || state.currentRel}」？\n文件将移入回收站，可恢复。`))) return;
+  if (!(await confirmDialog(t('deleteConfirm', { name: state.currentMeta.title || state.currentRel })))) return;
   try {
     await api.trash(state.currentRel);
     const delRel = state.currentRel;
@@ -959,17 +986,17 @@ async function deleteCurrent() {
       $('empty-state').classList.remove('hidden');
       renderTabs();
     }
-    toast('已移入回收站', 'success');
+    toast(t('movedToTrash'), 'success');
     await refreshTree();
   } catch (e) {
-    toast('删除失败：' + e.message, 'error');
+    toast(tErr('deleteFailed', e), 'error');
   }
 }
 
 async function moveCurrent() {
   if (!state.currentRel) return;
-  if (!state.currentRel.startsWith('prompts/')) { toast('仅提示词可移动', 'error'); return; }
-  const stage = await pickStage('移动到阶段');
+  if (!state.currentRel.startsWith('prompts/')) { toast(t('onlyPromptsMovable'), 'error'); return; }
+  const stage = await pickStage(t('moveToStage'));
   if (!stage) return;
   const segs = state.currentRel.split('/');
   const fileName = segs[segs.length - 1];
@@ -982,11 +1009,11 @@ async function moveCurrent() {
     const tab = state.tabs.find(t => t.rel === state.currentRel);
     if (tab) tab.rel = newRel;
     if (state.activeTab === state.currentRel) state.activeTab = newRel;
-    toast('已移动', 'success');
+    toast(t('moved'), 'success');
     await refreshTree();
     await openFile(newRel);
   } catch (e) {
-    toast('移动失败：' + e.message, 'error');
+    toast(tErr('moveFailed', e), 'error');
   }
 }
 
@@ -995,12 +1022,12 @@ async function moveFileToDir(srcRel, dirRel) {
   if (!srcRel || !dirRel) return;
   // 不能拖到自己内部（父目录是自身或其祖先）
   if (dirRel === srcRel || srcRel.startsWith(dirRel + '/')) {
-    toast('不能移动到自身或子目录', 'error'); return;
+    toast(t('cannotMoveToSelf'), 'error'); return;
   }
-  if (!dirRel.startsWith('prompts/')) { toast('只能移动到 prompts/ 下的目录', 'error'); return; }
+  if (!dirRel.startsWith('prompts/')) { toast(t('onlyPromptsDir'), 'error'); return; }
   const fileName = srcRel.split('/').pop();
   const newRel = `${dirRel}/${fileName}`;
-  if (newRel === srcRel) { toast('已在该目录', 'error'); return; }
+  if (newRel === srcRel) { toast(t('alreadyInDir'), 'error'); return; }
   try {
     await api.rename(srcRel, newRel);
     migrateLock(srcRel, newRel);
@@ -1008,11 +1035,11 @@ async function moveFileToDir(srcRel, dirRel) {
     const tab = state.tabs.find(t => t.rel === srcRel);
     if (tab) tab.rel = newRel;
     if (state.activeTab === srcRel) state.activeTab = newRel;
-    toast('已移动', 'success');
+    toast(t('moved'), 'success');
     await refreshTree();
     if (state.currentRel === srcRel) await openFile(newRel);
   } catch (e) {
-    toast('移动失败：' + e.message, 'error');
+    toast(tErr('moveFailed', e), 'error');
   }
 }
 
@@ -1021,16 +1048,16 @@ async function duplicateCurrent() {
   const segs = state.currentRel.split('/');
   const baseName = fileNameNoExt(segs[segs.length - 1]);
   const dir = segs.slice(0, -1).join('/');
-  const newName = await promptInput('副本名称（不含 .md）', baseName + '-副本');
+  const newName = await promptInput(t('duplicateTitle'), baseName + t('duplicateSuffix'));
   if (!newName) return;
   const newRel = dir + '/' + newName + '.md';
   try {
     await api.createFile(newRel, state.currentContent);
-    toast('已创建副本', 'success');
+    toast(t('duplicated'), 'success');
     await refreshTree();
     await openFile(newRel);
   } catch (e) {
-    toast('复制失败：' + e.message, 'error');
+    toast(tErr('duplicateFailed', e), 'error');
   }
 }
 
@@ -1051,7 +1078,7 @@ async function toggleLockFile(rel) {
 }
 const saveLockedDebounced = debounce(async () => {
   try { await api.setConfig({ lockedFiles: Array.from(state.lockedFiles) }); }
-  catch (e) { console.error('保存锁定状态失败:', e); }
+  catch (e) { console.error('保存锁定状态失败:', e); } // i18n-exempt: 开发日志
 }, 400);
 // 重命名/移动时把锁定路径迁移到新路径
 function migrateLock(oldRel, newRel) {
@@ -1067,17 +1094,17 @@ function showCtxMenu(x, y, node) {
   const menu = $('ctx-menu');
   const items = [];
   if (node.type === 'file') {
-    items.push({ label: '打开', act: () => openFile(node.rel) });
-    items.push({ label: '复制内容', act: async () => { await openFile(node.rel); copyContent(); } });
-    items.push({ label: '创建副本', act: async () => { await openFile(node.rel); duplicateCurrent(); } });
-    items.push({ label: '重命名', act: async () => { await openFile(node.rel); renameCurrent(); } });
-    if (node.rel.startsWith('prompts/')) items.push({ label: '移动到…', act: async () => { await openFile(node.rel); moveCurrent(); } });
+    items.push({ label: t('ctxOpen'), act: () => openFile(node.rel) });
+    items.push({ label: t('ctxCopyContent'), act: async () => { await openFile(node.rel); copyContent(); } });
+    items.push({ label: t('ctxDuplicate'), act: async () => { await openFile(node.rel); duplicateCurrent(); } });
+    items.push({ label: t('rename'), act: async () => { await openFile(node.rel); renameCurrent(); } });
+    if (node.rel.startsWith('prompts/')) items.push({ label: t('ctxMoveTo'), act: async () => { await openFile(node.rel); moveCurrent(); } });
     const locked = state.lockedFiles.has(node.rel);
-    items.push({ label: locked ? '🔒 解除锁定' : '🔓 锁定（防误删）', act: async () => { await openFile(node.rel); toggleLockFile(node.rel); } });
+    items.push({ label: locked ? t('unlock') : t('lock'), act: async () => { await openFile(node.rel); toggleLockFile(node.rel); } });
     items.push({ sep: true });
-    items.push({ label: '删除', danger: true, act: async () => { await openFile(node.rel); deleteCurrent(); } });
+    items.push({ label: t('delete'), danger: true, act: async () => { await openFile(node.rel); deleteCurrent(); } });
   } else {
-    items.push({ label: '在此新建提示词', act: () => newPromptInDir(node) });
+    items.push({ label: t('ctxNewPromptHere'), act: () => newPromptInDir(node) });
   }
   menu.innerHTML = items.map((it, i) => it.sep
     ? `<div class="ctx-sep"></div>`
@@ -1093,11 +1120,11 @@ function showCtxMenu(x, y, node) {
 
 async function newPromptInDir(dirNode) {
   // dirNode.rel 形如 prompts/project-init
-  if (!dirNode.rel.startsWith('prompts/')) { toast('请选择 prompts 下的阶段目录', 'error'); return; }
+  if (!dirNode.rel.startsWith('prompts/')) { toast(t('selectStageDir'), 'error'); return; }
   const stage = dirNode.rel.split('/')[1];
-  const name = await promptInput('提示词名称', '如：需求分析');
+  const name = await promptInput(t('promptNameTitle'), t('promptNamePlaceholder'));
   if (!name) return;
-  const projectType = (await pickProjectType()) || '其他';
+  const projectType = (await pickProjectType()) || '其他'; // i18n-exempt: 用户数据默认值
   const rel = `${dirNode.rel}/${name}.md`;
   const content = `---
 title: ${name}
@@ -1112,12 +1139,12 @@ description:
 `;
   try {
     await api.createFile(rel, content);
-    toast('已新建', 'success');
+    toast(t('created'), 'success');
     await refreshTree();
     await openFile(rel);
     enterEditMode();
   } catch (e) {
-    toast('新建失败：' + e.message, 'error');
+    toast(tErr('createFailed', e), 'error');
   }
 }
 
@@ -1154,13 +1181,13 @@ const doSearch = debounce(async (q) => {
   $('tree').classList.add('hidden');
   box.classList.remove('hidden');
   if (!results.length) {
-    box.innerHTML = '<div class="search-empty">未找到匹配的提示词</div>';
+    box.innerHTML = '<div class="search-empty">' + escapeHtml(t('noResults')) + '</div>';
     return;
   }
   box.innerHTML = results.map(r => `
     <div class="search-item" data-rel="${escapeHtml(r.rel)}">
       <div class="si-title">${highlightTerm(escapeHtml(r.name), q)}</div>
-      <div class="si-meta">${escapeHtml(state.stageLabels[r.stage] || r.stage || '')}${r.projectType ? ' · ' + escapeHtml(r.projectType) : ''}</div>
+      <div class="si-meta">${escapeHtml(r.stage ? dirLabel(r.stage) : '')}${r.projectType ? ' · ' + escapeHtml(r.projectType) : ''}</div>
       ${r.snippet ? `<div class="si-snippet">${highlightTerm(escapeHtml(r.snippet), q)}</div>` : ''}
     </div>
   `).join('');
@@ -1173,16 +1200,16 @@ const doSearch = debounce(async (q) => {
 function populateFilters() {
   const stageSel = $('filter-stage');
   const typeSel = $('filter-type');
-  stageSel.innerHTML = '<option value="">全部阶段</option>' + state.stages.map(s => `<option value="${s}">${escapeHtml(state.stageLabels[s] || s)}</option>`).join('');
+  stageSel.innerHTML = '<option value="">' + escapeHtml(t('allStagesOption')) + '</option>' + state.stages.map(s => `<option value="${s}">${escapeHtml(dirLabel(s))}</option>`).join('');
   const types = [...new Set(state.metaList.map(m => m.meta.projectType).filter(Boolean))];
-  typeSel.innerHTML = '<option value="">全部类型</option>' + types.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
+  typeSel.innerHTML = '<option value="">' + escapeHtml(t('allTypes')) + '</option>' + types.map(type => `<option value="${escapeHtml(type)}">${escapeHtml(type)}</option>`).join('');
   // 标签自动补全（收集所有提示词的标签）
   const tagSet = new Set();
   for (const m of state.metaList) {
     if (Array.isArray(m.meta.tags)) m.meta.tags.forEach(t => t && tagSet.add(String(t)));
   }
   const dl = $('tag-datalist');
-  if (dl) dl.innerHTML = [...tagSet].sort().map(t => `<option value="${escapeHtml(t)}">`).join('');
+  if (dl) dl.innerHTML = [...tagSet].sort().map(tagName => `<option value="${escapeHtml(tagName)}">`).join('');
 }
 
 function applyFilter() {
@@ -1231,16 +1258,16 @@ async function openHistory() {
   $('version-list').classList.remove('hidden');
   const vl = $('version-list');
   if (!list.length) {
-    vl.innerHTML = '<div class="search-empty">暂无历史版本</div>';
+    vl.innerHTML = '<div class="search-empty">' + escapeHtml(t('noHistory')) + '</div>';
     return;
   }
   vl.innerHTML = list.map(v => `
     <div class="version-item" data-file="${escapeHtml(v.file)}">
-      <span class="vi-time">${formatVersionTime(v.timestamp)}<small>${v.pinned ? '⭐ 已星标' : '第 ' + (list.length - list.indexOf(v)) + ' 个'}</small></span>
+      <span class="vi-time">${formatVersionTime(v.timestamp)}<small>${escapeHtml(v.pinned ? t('pinned') : t('versionNth', { n: list.length - list.indexOf(v) }))}</small></span>
       <span class="vi-actions">
         <button class="pin-btn ${v.pinned ? 'pinned' : ''}" data-pin="${escapeHtml(v.file)}">${v.pinned ? '⭐' : '☆'}</button>
-        <button class="btn-link" data-view="${escapeHtml(v.file)}">查看</button>
-        <button class="btn-link" data-roll="${escapeHtml(v.file)}" style="color:var(--danger)">回滚</button>
+        <button class="btn-link" data-view="${escapeHtml(v.file)}">${escapeHtml(t('view'))}</button>
+        <button class="btn-link" data-roll="${escapeHtml(v.file)}" style="color:var(--danger)">${escapeHtml(t('rollback'))}</button>
       </span>
     </div>
   `).join('');
@@ -1248,7 +1275,7 @@ async function openHistory() {
     const file = item.dataset.file;
     item.querySelector('[data-view]').onclick = () => viewVersion(file);
     item.querySelector('[data-roll]').onclick = async () => {
-      if (!(await confirmDialog('回滚到此版本？当前内容会另存为新版本（不会丢失）。'))) return;
+      if (!(await confirmDialog(t('rollbackConfirm')))) return;
       try {
         const { content, meta } = await api.rollbackVersion(state.historyRel, file);
         if (state.currentRel === state.historyRel) {
@@ -1258,10 +1285,10 @@ async function openHistory() {
           renderMetaBar();
           renderContent();
         }
-        toast('已回滚', 'success');
+        toast(t('rollbackSuccess'), 'success');
         openHistory();
       } catch (e) {
-        toast('回滚失败：' + e.message, 'error');
+        toast(tErr('rollbackFailed', e), 'error');
       }
     };
     item.querySelector('[data-pin]').onclick = async (e) => {
@@ -1317,7 +1344,7 @@ function renderDiff(el, oldText, newText) {
       }
     }
   }
-  if (!html) html = '<div class="diff-empty">两个版本内容相同</div>';
+  if (!html) html = '<div class="diff-empty">' + escapeHtml(t('sameVersion')) + '</div>';
   el.innerHTML = html;
 }
 
@@ -1328,14 +1355,14 @@ async function openTrash() {
   drawer.classList.remove('hidden');
   const list = $('trash-list');
   if (!index.items.length) {
-    list.innerHTML = '<div class="search-empty">回收站为空</div>';
+    list.innerHTML = '<div class="search-empty">' + escapeHtml(t('trashEmpty')) + '</div>';
     return;
   }
   list.innerHTML = index.items.map(it => `
     <div class="version-item">
       <span class="vi-time">${escapeHtml(it.name)}<small>${escapeHtml(it.originalRel)} · ${String(it.trashedAt).slice(0, 16).replace('T', ' ')}</small></span>
       <span class="vi-actions">
-        <button class="btn-link" data-restore="${escapeHtml(it.id)}">恢复</button>
+        <button class="btn-link" data-restore="${escapeHtml(it.id)}">${escapeHtml(t('restore'))}</button>
       </span>
     </div>
   `).join('');
@@ -1343,11 +1370,11 @@ async function openTrash() {
     b.onclick = async () => {
       try {
         await api.restore(b.dataset.restore);
-        toast('已恢复', 'success');
+        toast(t('restoreSuccess'), 'success');
         await refreshTree();
         openTrash();
       } catch (e) {
-        toast('恢复失败：' + e.message, 'error');
+        toast(tErr('restoreFailed', e), 'error');
       }
     };
   });
@@ -1361,11 +1388,12 @@ async function openSettings() {
 }
 function renderSettingsTypes() {
   const list = $('types-list');
-  const types = state.config.projectTypes || ['前端项目', '后端项目', '数据分析', '脚本工具', '其他'];
-  list.innerHTML = types.map(t => `
+  const types = state.config.projectTypes || ['前端项目', '后端项目', '数据分析', '脚本工具', '其他']; // i18n-exempt: 用户数据，会写进 frontmatter，翻译会破坏已有文件
+  const deleteLabel = t('delete');
+  list.innerHTML = types.map(type => `
     <div class="type-tag">
-      <span>${escapeHtml(t)}</span>
-      <button class="btn-link" data-type="${escapeHtml(t)}" title="删除">✕</button>
+      <span>${escapeHtml(type)}</span>
+      <button class="btn-link" data-type="${escapeHtml(type)}" title="${escapeHtml(deleteLabel)}">✕</button>
     </div>
   `).join('');
   list.querySelectorAll('[data-type]').forEach(b => {
@@ -1374,7 +1402,7 @@ function renderSettingsTypes() {
         await api.removeProjectType(b.dataset.type);
         state.config.projectTypes = (await api.getConfig()).projectTypes;
         renderSettingsTypes();
-        toast('已删除', 'success');
+        toast(t('deleted'), 'success');
         populateFilters();
       } catch (e) {
         toast(e.message, 'error');
@@ -1385,14 +1413,14 @@ function renderSettingsTypes() {
 $('btn-add-type').onclick = async () => {
   const inp = $('new-type-input');
   const val = inp.value.trim();
-  if (!val) { toast('请输入类型名称', 'error'); return; }
+  if (!val) { toast(t('typeExistsOrRequired'), 'error'); return; }
   try {
     await api.addProjectType(val);
     state.config.projectTypes = (await api.getConfig()).projectTypes;
     renderSettingsTypes();
     populateFilters();
     inp.value = '';
-    toast('已添加', 'success');
+    toast(t('added'), 'success');
   } catch (e) {
     toast(e.message, 'error');
   }
@@ -1404,32 +1432,32 @@ $('new-type-input').onkeydown = (e) => {
 // ===== 导出 =====
 async function exportZip() {
   const res = await api.exportZip();
-   if (res.ok) toast('已导出到：' + res.path, 'success');
-  else toast('已取消导出');
+   if (res.ok) toast(t('exportedTo') + t('sep') + res.path, 'success');
+  else toast(t('exportCanceled'));
 }
 async function importSingle() {
   try {
     const res = await api.importSingle();
     if (res.ok) {
-      toast('已导入：' + res.rel, 'success');
+      toast(t('imported') + t('sep') + res.rel, 'success');
       await refreshTree();
     }
-  } catch (e) { toast('导入失败：' + e.message, 'error'); }
+  } catch (e) { toast(tErr('importFailed', e), 'error'); }
 }
 async function importZip() {
   try {
     const res = await api.importZip();
     if (res.ok) {
-      toast('已导入备份包', 'success');
+      toast(t('importedZip'), 'success');
       await refreshTree();
     }
-  } catch (e) { toast('导入失败：' + e.message, 'error'); }
+  } catch (e) { toast(tErr('importFailed', e), 'error'); }
 }
 async function exportSingle() {
   if (!state.currentRel) return;
   const res = await api.exportSingle(state.currentRel);
-  if (res.ok) toast('已导出到：' + res.path, 'success');
-  else toast('已取消导出');
+  if (res.ok) toast(t('exportedTo') + t('sep') + res.path, 'success');
+  else toast(t('exportCanceled'));
 }
 
 // ===== 主题 =====
@@ -1453,19 +1481,27 @@ async function setLang(lang) {
   applyI18n();
   updateLangButtons();
   await api.setConfig({ lang });
-  // 重建依赖文案的动态内容
+  // 重建所有依赖文案的动态内容。漏掉任何一处，切换语言后该区域会残留旧语言，
+  // 直到用户重新触发一次渲染才更新。
   renderTree();
   populateFilters();
   renderTabs();
   renderStats();
+  renderRecent();
+  updateStatusCounts();
+  if (state.currentRel) {
+    renderBreadcrumb();
+    renderMetaBar();
+    renderContent();
+  }
   updateStatusInfo(t('ready'));
-  toast(lang === 'en' ? 'Language: English' : '语言：中文', 'success');
+  toast(t('langSwitched'), 'success');
 }
 
 // ===== 分隔条拖拽 =====
 const saveSidebarWidthDebounced = debounce(async (w) => {
   try { await api.setConfig({ sidebarWidth: w }); }
-  catch (e) { console.error('保存侧边栏宽度失败:', e); }
+  catch (e) { console.error('保存侧边栏宽度失败:', e); } // i18n-exempt: 开发日志
 }, 400);
 function initResizer() {
   const resizer = $('resizer');
@@ -1558,10 +1594,10 @@ async function init() {
     const menu = $('ctx-menu');
     menu.innerHTML = `
       <div class="ctx-prompt-wrap">
-        <div class="ctx-prompt-title">选择导入方式</div>
+        <div class="ctx-prompt-title">${escapeHtml(t('importPickTitle'))}</div>
         <div class="ctx-prompt-actions" style="flex-direction:column;align-items:stretch">
-          <button class="btn-link" id="import-single-btn">导入单个 .md</button>
-          <button class="btn-link" id="import-zip-btn">导入 ZIP 备份</button>
+          <button class="btn-link" id="import-single-btn">${escapeHtml(t('importSingleMd'))}</button>
+          <button class="btn-link" id="import-zip-btn">${escapeHtml(t('importZipBackup'))}</button>
         </div>
       </div>`;
     menu.classList.remove('hidden');
@@ -1601,7 +1637,7 @@ async function init() {
     await copyContent();
     const btn = $('btn-copy');
     const orig = btn.textContent;
-    btn.textContent = '✓ 已复制';
+    btn.textContent = t('copySuccess');
     btn.disabled = true;
     setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1200);
   };
@@ -1623,10 +1659,10 @@ async function init() {
   $('btn-version-close-detail').onclick = openHistory;
   $('btn-settings-close').onclick = () => $('settings-drawer').classList.add('hidden');
   $('btn-empty-trash').onclick = async () => {
-    if (await confirmDialog('永久清空回收站？此操作不可恢复。')) {
+    if (await confirmDialog(t('emptyTrashConfirm'))) {
       await api.emptyTrash();
       openTrash();
-      toast('已清空', 'success');
+      toast(t('trashCleared'), 'success');
     }
   };
 
@@ -1679,8 +1715,8 @@ async function init() {
     else if (action === 'new-workflow') newWorkflow();
     else if (action === 'export') exportZip();
     else if (action === 'empty-trash') {
-      confirmDialog('永久清空回收站？').then(ok => {
-        if (ok) { api.emptyTrash().then(() => toast('已清空', 'success')); }
+      confirmDialog(t('emptyTrashConfirmShort')).then(ok => {
+        if (ok) { api.emptyTrash().then(() => toast(t('trashCleared'), 'success')); }
       });
     }
     else if (action === 'toggle-theme') toggleTheme();
