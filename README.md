@@ -1,158 +1,224 @@
-# Prompt Flow Manager · 提示词流程管理系统
+# Prompt Flow Manager
 
-一个本地桌面应用，用于管理你做项目时用到的提示词与工作流。核心用途：**积累和复用提示词**——需要时从本软件复制到其他 AI 工具使用。
+> 一款本地优先的提示词与 AI 工作流桌面管理工具。
 
-## 特性
+[![Node.js](https://img.shields.io/badge/Node.js-18%2B-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![Electron](https://img.shields.io/badge/Electron-28-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
+[![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)](https://github.com/qiqiqi-max/Prompt-Flow-Manager)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-- 📁 **分类管理**：提示词按项目阶段（初始化 / 编码 / 审查 / 测试 / 部署）分类存放
-- 🔍 **全文搜索**：按标题、标签、内容搜索并高亮关键词；可折叠高级筛选（阶段 / 工程类型 / 标签）
-- 📝 **Markdown 编辑**：轻量文本框，原地切换编辑/预览，Ctrl+S 保存
-- 🔀 **流程可视化**：工作流自动渲染流程图，点击节点跳转对应提示词
-- 🕘 **版本历史**：每次保存自动留档（保留最近 30 条未星标版本），可星标保护、对比差异、一键回滚
-- 🗑️ **回收站**：删除走回收站，可恢复，不误删
-- 💾 **导出备份**：一键打包整个库为 ZIP，或导出单个提示词为 .md 文件
-- 📊 **统计概览**：空状态显示各阶段提示词数量分布
-- 🕘 **最近打开**：空状态快速回到最近编辑过的提示词（自动记忆，最多 10 条）
-- 🌐 **中英双语**：设置面板切换，界面文案全量覆盖（工程类型等用户数据不翻译）
-- 🎨 **明暗主题**
-- ⚙️ **自定义工程类型**：设置面板管理预设类型列表
-- ⌨️ **键盘导航**：文件树上下箭头切换，Esc 关闭抽屉/编辑/清空搜索
-- 📋 **代码块复制**：预览区代码块悬停显示复制按钮
-- 📑 **创建副本**：基于现有提示词快速创建变体
-- 🔒 **锁定防误删**：右键锁定重要提示词，已锁定的文件无法删除（主进程强制校验，改名后锁跟随）
-- ↔️ **可调整侧边栏**：拖动分隔条调整宽度（自动记忆），双击重置
+Prompt Flow Manager 用于集中整理项目开发中反复使用的提示词、模板和执行流程。所有内容都以 Markdown 文件保存在本地，不依赖云端服务，也不绑定任何特定 AI 平台；需要使用时，直接搜索、预览并复制到 ChatGPT、Claude、Codex 或其他工具即可。
+
+它解决的不是“再做一个聊天客户端”，而是提示词资产散落、版本难追踪、流程难复用的问题。
+
+## 目录
+
+- [核心能力](#核心能力)
+- [适用场景](#适用场景)
+- [快速开始](#快速开始)
+- [使用指南](#使用指南)
+- [文件格式](#文件格式)
+- [数据与备份](#数据与备份)
+- [架构与安全](#架构与安全)
+- [开发与测试](#开发与测试)
+- [项目结构](#项目结构)
+- [许可证](#许可证)
+
+## 核心能力
+
+| 能力 | 说明 |
+| --- | --- |
+| 分类管理 | 按项目阶段或自定义目录组织提示词、工作流与模板 |
+| 全文搜索 | 搜索标题、标签和正文，支持关键词高亮及阶段、工程类型、标签筛选 |
+| Markdown 编辑 | 编辑与预览原地切换，支持 `Ctrl+S` 保存、代码块一键复制 |
+| 工作流可视化 | 根据工作流文件自动生成流程图，点击节点即可跳转到对应提示词 |
+| 多标签页 | 同时打开多个提示词，并在重启后恢复上次的标签页和活动状态 |
+| 版本历史 | 每次保存自动生成快照，可星标、查看差异和回滚；默认保留最近 30 个未星标版本 |
+| 安全删除 | 文件先进入回收站，可恢复；重要文件可锁定，主进程会强制阻止删除 |
+| 导入与导出 | 导入单个 Markdown 或 ZIP 备份，导出单个提示词或整个内容库 |
+| 个性化 | 明暗主题、中英文界面、自定义工程类型、可调节侧边栏 |
+| 高效操作 | 最近打开、创建副本、文件树键盘导航和常用快捷键 |
+
+应用对大规模提示词库做了针对性优化：文件内容与解析结果按修改时间和大小缓存，目录树与元数据一次遍历返回，搜索时复用正文索引。项目内置的基准脚本可用于复测这些性能路径。
+
+## 适用场景
+
+- 为不同项目阶段建立可复用的提示词库，例如需求、编码、审查、测试和部署。
+- 把一组相互依赖的提示词编排成可视化工作流。
+- 在调整提示词时保留历史版本，随时对比或回滚。
+- 以普通 Markdown 文件沉淀团队或个人方法，不被专有格式锁定。
+- 在离线或对隐私敏感的环境中管理提示词内容。
 
 ## 快速开始
 
 ### 环境要求
-- Node.js 18+（推荐 20+）
-- Windows 10+（打包目标）
 
-### 安装与运行
+- Node.js 18 或更高版本，推荐 Node.js 20+
+- npm 9+
+- Windows 10/11（当前打包目标）
+
+### 从源码运行
+
 ```bash
-npm install
+git clone https://github.com/qiqiqi-max/Prompt-Flow-Manager.git
+cd Prompt-Flow-Manager
+npm ci
 npm start
 ```
 
-### 测试
-```bash
-npm test         # 静态检查、ZIP 导入逻辑、真实压缩解压往返
-npm run test:ui  # 拉起 Electron，确认界面真的能渲染出来
-npm run test:fn  # 端到端功能自检（在临时目录里跑，不碰你的提示词库）
-npm run test:all # 三层一起跑
-npm run bench    # 搜索压测：默认 1000 条提示词，输出耗时与 I/O 次数
-```
+Windows 用户也可以在安装依赖后双击 `启动应用.bat`。
 
-### 打包成 exe
+### 构建便携版
+
 ```bash
 npm run dist
 ```
-生成的 portable exe 在 `dist/` 目录，双击即可运行。打包前会自动执行
-`npm run sync-vendor`，把渲染进程用到的第三方库同步到 `src/vendor/`。
 
-## 使用说明
+生成的 portable `.exe` 位于 `dist/`。构建前会自动同步渲染进程依赖到 `src/vendor/`，最终程序不需要联网加载前端库。
 
-### 基本操作
-| 操作 | 方式 |
-|------|------|
-| 新建提示词 | 工具栏「＋ 提示词」或 Ctrl+N，或文件树右键「在此新建」 |
-| 新建工作流 | 工具栏「＋ 工作流」 |
-| 最近打开 | 空状态下「最近打开」列表，点击快速跳转 |
-| 搜索 | 顶部搜索框，Ctrl+Shift+F 聚焦 |
-| 编辑 | 选中文件后点「编辑」，Ctrl+S 保存 |
-| 复制到 AI 工具 | 选中文件后点「复制」 |
-| 创建副本 | 文件树右键「创建副本」（基于现有提示词创建变体） |
-| 版本历史 | 点「历史」按钮，右侧抽屉 |
-| 重命名 / 移动 / 删除 | 内容区按钮，或文件树右键 |
-| 锁定文件 | 文件树右键「锁定（防误删）」，已锁定文件名旁显示 🔒 |
-| 导出备份 | 工具栏「导出」或 Ctrl+E |
-| 导出单个提示词 | 内容区「导出」按钮 |
-| 自定义工程类型 | 工具栏 ⚙ 设置 |
-| 切换主题 | 工具栏 🌓 或 Ctrl+Shift+L |
-| 文件树导航 | 选中树区后 ↑/↓ 切换文件 |
-| 调整侧边栏宽度 | 拖动分隔条，双击重置 |
-| 关闭抽屉/编辑 | Esc |
-| 清空搜索 | 搜索框内按 Esc |
+## 使用指南
 
-### 提示词文件格式
-每个提示词是一个 `.md` 文件，顶部 YAML frontmatter：
-```yaml
+| 操作 | 入口或快捷键 |
+| --- | --- |
+| 新建提示词 | 工具栏“+ 提示词”、`Ctrl+N`，或文件树右键菜单 |
+| 新建工作流 | 工具栏“+ 工作流” |
+| 搜索内容 | 顶部搜索框，`Ctrl+Shift+F` 聚焦 |
+| 编辑与保存 | 内容区“编辑”，`Ctrl+S` 保存 |
+| 复制提示词 | 内容区“复制” |
+| 创建副本 | 文件树右键“创建副本” |
+| 查看版本 | 内容区“历史”打开版本抽屉 |
+| 重命名、移动、删除 | 内容区操作按钮或文件树右键菜单 |
+| 锁定文件 | 文件树右键“锁定（防误删）” |
+| 导入或导出 | 顶部工具栏相应按钮，`Ctrl+E` 导出备份 |
+| 切换主题 | 工具栏主题按钮，`Ctrl+Shift+L` |
+| 文件树导航 | 聚焦文件树后使用 `↑` / `↓` |
+| 关闭抽屉或退出编辑 | `Esc` |
+
+## 文件格式
+
+### 提示词
+
+提示词是带 YAML frontmatter 的 `.md` 文件。正文就是复制到 AI 工具中的实际内容。
+
+```markdown
 ---
-title: 需求分析          # 显示名
-stage: project-init      # 阶段（由所在目录决定，也在此记录）
-projectType: 前端项目     # 工程类型
-tags: [需求, 分析]        # 标签
-description: 一句话说明
+title: 需求分析
+stage: project-init
+projectType: 前端项目
+tags: [需求, 分析]
+description: 梳理项目目标、范围和验收标准
 ---
-正文（会被复制出去的就是这部分）
+
+# 任务
+
+请根据以下背景梳理需求……
 ```
 
-`version` / `updatedAt` / `createdAt` 由软件自动维护，无需手填。
+`version`、`createdAt` 和 `updatedAt` 由应用自动维护，无需手动填写。
 
-### 工作流文件格式
-```yaml
+### 工作流
+
+工作流同样使用 Markdown，通过 frontmatter 中的 `flow` 描述步骤关系：
+
+```markdown
 ---
 title: 完整项目流程
 flow:
-  - id: step1
+  - id: requirement
     prompt: prompts/project-init/需求分析.md
     label: 需求分析
-    next: step2
-  - id: step2
+    next: implementation
+  - id: implementation
     prompt: prompts/code-generation/功能实现.md
     label: 功能实现
 ---
 ```
-打开工作流文件会自动渲染流程图，点击节点跳转对应提示词。
 
-## 数据位置
+打开工作流后，应用会渲染流程图；节点引用的是项目内提示词的相对路径。
 
-数据目录随运行方式不同：
+## 数据与备份
 
-| 运行方式 | 数据位置 |
-|----------|----------|
-| 源码运行（`npm start`） | 项目目录本身 |
-| 打包后的 exe | `%APPDATA%\prompt-flow-manager\` |
+应用采用本地文件存储，不需要数据库或账号。
 
-打包后 exe 内部是只读的，所以数据落在系统 userData 目录；首次运行会把内置示例提示词拷过去。
+| 运行方式 | 数据目录 |
+| --- | --- |
+| `npm start` 源码运行 | 当前项目目录 |
+| 打包后的便携版 | `%APPDATA%\prompt-flow-manager\` |
 
-两种方式下的目录结构一致：
-- `prompts/` — 提示词
-- `workflows/` — 工作流
-- `templates/` — 模板
-- `.versions/` — 版本快照
-- `.trash/` — 回收站
+主要数据目录如下：
 
-**把上面这些目录整体拷走即完整备份**（含版本历史）。注意工具栏的「导出」只打包
-`prompts/`、`workflows/`、`templates/`，不含版本快照。软件配置（主题、窗口大小、锁定列表）
-存在 userData 的 `config.json`。
+- `prompts/`：提示词库
+- `workflows/`：工作流定义
+- `templates/`：提示词模板
+- `.versions/`：版本快照
+- `.trash/`：回收站
+- `config.json`：主题、语言、窗口状态、标签页和锁定列表等设置
 
-## 目录结构
+工具栏的“导出”会把 `prompts/`、`workflows/` 和 `templates/` 打包为 ZIP。若要保留版本历史与回收站，请备份整个数据目录。
 
+## 架构与安全
+
+```mermaid
+flowchart LR
+    UI[Renderer<br/>HTML / CSS / JavaScript] -->|contextBridge 白名单 API| Preload[Preload]
+    Preload -->|IPC invoke| Main[Electron Main]
+    Main --> Store[(本地 Markdown<br/>配置 / 版本 / 回收站)]
+    Main --> Import[ZIP 导入导出]
+    Main --> Browser[系统默认浏览器]
 ```
-prompt-project/
-├── electron-main.js       主进程
-├── preload.js             contextBridge 桥接（白名单 IPC）
+
+- Electron 渲染进程启用 `contextIsolation`，关闭 `nodeIntegration`，只通过 preload 暴露白名单 API。
+- 页面启用内容安全策略（CSP），Markdown 预览经过 DOMPurify 清理。
+- 文件访问统一校验根目录边界，阻止路径穿越；版本文件名也经过白名单校验。
+- Markdown 中的 HTTP(S) 链接交给系统浏览器打开，其他外部协议会被拦截。
+- ZIP 导入会过滤非 Markdown 文件、限制单项大小，并对重名文件生成安全的新名称。
+- 配置写入串行化，减少多个界面状态同时保存造成的数据覆盖。
+- 正常运行采用单实例锁，避免两个进程同时修改同一个数据目录。
+
+## 开发与测试
+
+```bash
+npm test          # 静态约束、语法、ZIP、安全与回归检查
+npm run test:ui   # 启动真实 Electron 窗口并验证渲染及关键点击流程
+npm run test:fn   # 在临时目录执行端到端功能自检
+npm run test:tabs # 验证重启后标签页及正文恢复
+npm run test:all  # 依次运行全部测试
+npm run bench     # 生成 1000 条提示词并执行搜索性能基准
+```
+
+功能测试使用独立临时目录，不会读写真实提示词库。测试过程里出现的预期错误日志用于验证锁定、路径穿越和非法版本名等防护是否生效。
+
+常用开发命令：
+
+```bash
+npm run sync-vendor # 从 node_modules 更新本地前端依赖
+npm run build       # 构建 Windows 安装目标
+npm run dist        # 构建 Windows portable 版本
+```
+
+## 项目结构
+
+```text
+Prompt-Flow-Manager/
+├── electron-main.js         # 主进程、IPC、文件与窗口管理
+├── preload.js               # contextBridge 白名单接口
 ├── lib/
-│   └── zip-import.js      ZIP 导入逻辑（可单测）
-├── scripts/
-│   └── sync-vendor.js     同步第三方库到 src/vendor/
-├── src/                   界面
-│   ├── index.html
-│   ├── styles.css
-│   ├── renderer.js
-│   ├── i18n.js
-│   └── vendor/            marked / DOMPurify / diff-match-patch（自动生成，勿手改）
-├── tests/
-│   ├── smoke.test.js      npm test
-│   └── ui-smoke.js        npm run test:ui
-├── prompts/               提示词库（按阶段）
-├── workflows/             工作流
-├── templates/             模板
-├── .versions/             版本快照（自动）
-├── .trash/                回收站（自动）
+│   └── zip-import.js        # ZIP 安全导入逻辑
+├── src/
+│   ├── index.html           # 应用界面骨架
+│   ├── styles.css           # 主题与组件样式
+│   ├── renderer.js          # 渲染进程交互逻辑
+│   ├── i18n.js              # 中英文文案
+│   └── vendor/              # 本地化的渲染进程依赖
+├── prompts/                 # 内置提示词示例
+├── workflows/               # 内置工作流示例
+├── templates/               # 提示词模板
+├── tests/                   # 静态、UI、功能、标签恢复测试与基准
+├── scripts/                 # 构建辅助脚本
+├── build/                   # 应用图标与构建资源
 └── package.json
 ```
 
-## License
-MIT
+## 许可证
+
+本项目基于 [MIT License](LICENSE) 开源。

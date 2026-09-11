@@ -8,7 +8,8 @@
     "test": "node tests/smoke.test.js",
     "test:ui": "node tests/ui-smoke.js",
     "test:fn": "node tests/functional-smoke.js",
-    "test:all": "npm test && npm run test:ui && npm run test:fn",
+    "test:tabs": "node tests/tab-restore.test.js",
+    "test:all": "npm test && npm run test:ui && npm run test:fn && npm run test:tabs",
     "bench": "node tests/search-bench.js",
     "sync-vendor": "node scripts/sync-vendor.js",
     "prebuild": "node scripts/sync-vendor.js",
@@ -19,10 +20,21 @@
   "keywords": [
     "prompt",
     "workflow",
-    "electron"
+    "prompt-manager",
+    "prompt-engineering",
+    "electron",
+    "markdown"
   ],
-  "author": "",
+  "author": "qiqiqi-max",
   "license": "MIT",
+  "homepage": "https://github.com/qiqiqi-max/Prompt-Flow-Manager#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qiqiqi-max/Prompt-Flow-Manager.git"
+  },
+  "bugs": {
+    "url": "https://github.com/qiqiqi-max/Prompt-Flow-Manager/issues"
+  },
   "devDependencies": {
     "diff-match-patch": "^1.0.5",
     "dompurify": "^3.0.6",

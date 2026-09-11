@@ -369,6 +369,8 @@ mark {
 .version-item .vi-time { flex: 1; font-size: 13px; }
 .version-item .vi-time small { display: block; color: var(--text-muted); font-size: 11px; margin-top: 2px; }
 .version-item .vi-actions { display: flex; gap: 4px; }
+/* 回滚是破坏性操作，要红色警示。同样不能用内联 style（见 .ctx-prompt-actions.stacked）。 */
+.btn-link.danger { color: var(--danger); }
 .pin-btn { cursor: pointer; font-size: 16px; opacity: .5; border: none; background: none; }
 .pin-btn.pinned { opacity: 1; color: var(--accent); }
 .version-detail { flex: 1; display: flex; flex-direction: column; min-height: 0; }
@@ -430,6 +432,11 @@ mark {
 .ctx-prompt-input:focus { border-color: var(--primary); box-shadow: 0 0 0 2px var(--selection); }
 .ctx-prompt-actions {
   display: flex; gap: 6px; justify-content: flex-end; margin-top: 8px;
+}
+/* 竖排变体（导入方式选择）。CSP 的 style-src 没有 'unsafe-inline'，
+   经 innerHTML 注入的 style="" 会被浏览器拒绝执行，所以必须走类名。 */
+.ctx-prompt-actions.stacked {
+  flex-direction: column; align-items: stretch;
 }
 
 /* ===== Toast ===== */

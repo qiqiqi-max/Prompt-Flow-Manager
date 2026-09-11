@@ -83,7 +83,7 @@ const I18N = {
     promptNamePlaceholder: '如：需求分析',
     workflowNameTitle: '工作流名称',
     workflowNamePlaceholder: '如：完整项目流程',
-    newFolderTitle: '新建目录名（英文，将建在 prompts/ 下）',
+    newFolderTitle: '新建目录名（将建在 prompts/ 下）',
     newFolderPlaceholder: '如：refactor',
     invalidFolderName: '目录名无效',
     selectStageDir: '请选择 prompts 下的阶段目录',
@@ -128,6 +128,7 @@ const I18N = {
     importFailed: '导入失败',
     // 确认框
     deleteConfirm: '删除「{name}」？\n文件将移入回收站，可恢复。',
+    discardConfirm: '放弃未保存的修改？',
     emptyTrashConfirm: '永久清空回收站？此操作不可恢复。',
     emptyTrashConfirmShort: '永久清空回收站？',
     // 历史抽屉
@@ -273,7 +274,7 @@ const I18N = {
     promptNamePlaceholder: 'e.g. Requirement Analysis',
     workflowNameTitle: 'Workflow name',
     workflowNamePlaceholder: 'e.g. Full Project Flow',
-    newFolderTitle: 'New folder name (ASCII, created under prompts/)',
+    newFolderTitle: 'New folder name (created under prompts/)',
     newFolderPlaceholder: 'e.g. refactor',
     invalidFolderName: 'Invalid folder name',
     selectStageDir: 'Please select a stage folder under prompts/',
@@ -318,6 +319,7 @@ const I18N = {
     importFailed: 'Import failed',
     // 确认框
     deleteConfirm: 'Delete "{name}"?\nIt will be moved to trash and can be restored.',
+    discardConfirm: 'Discard unsaved changes?',
     emptyTrashConfirm: 'Permanently empty the trash? This cannot be undone.',
     emptyTrashConfirmShort: 'Permanently empty the trash?',
     // 历史抽屉

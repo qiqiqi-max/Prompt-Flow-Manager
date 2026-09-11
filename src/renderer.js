@@ -71,6 +71,7 @@ const state = {
   stageLabels: {},
   tree: [],
   metaList: [],
+  metaByRel: new Map(),      // rel -> metaList 条目，避免每行都线性 find（见 setMetaList）
   currentRel: null,         // 当前打开的文件相对路径
   currentContent: '',      // 文件原始内容（含 frontmatter）
   currentMeta: {},
@@ -226,11 +227,24 @@ function enhanceCodeBlocks(container) {
   });
 }
 
+// metaList 与 metaByRel 必须同时更新：树、面包屑、筛选、最近打开都改成查 Map
+// （原先每行做一次 metaList.find，1000 个文件就是约 50 万次比较，每次刷新都重来）。
+function setMetaList(list) {
+  state.metaList = list;
+  state.metaByRel = new Map(list.map(m => [m.rel, m]));
+}
+
 // ===== 文件树 =====
 async function refreshTree() {
-  state.tree = await api.listTree();
+  // 一次 IPC 拿全树 + 元数据。listTree 和 getMetaList 走同一套目录递归，
+  // 分开调用等于把整库 readdir 两遍，而 refreshTree 在新建/删除/重命名/移动/
+  // 保存后都会触发。
+  // 顺序上也必须先拿到元数据再渲染树：树上每行显示名来自 meta.title，
+  // 原先是先 renderTree() 再取 metaList，首次渲染只能退回文件名。
+  const { tree, meta } = await api.listTreeAndMeta();
+  state.tree = tree;
+  setMetaList(meta);
   renderTree();
-  state.metaList = await api.getMetaList();
   populateFilters();
   updateStatusCounts();
   renderStats();
@@ -363,7 +377,7 @@ function buildTreeNode(node, depth) {
     icon.textContent = node.rel.startsWith('workflows') ? '🔀' : (node.rel.startsWith('templates') ? '📋' : '📄');
     const name = document.createElement('span');
     name.className = 'name';
-    const m = state.metaList.find(x => x.rel === node.rel);
+    const m = state.metaByRel.get(node.rel);
     name.textContent = (m && m.meta.title) ? m.meta.title : fileNameNoExt(node.name);
     row.append(caret, icon, name);
     row.__rel = node.rel;  // 供筛选过滤用
@@ -422,12 +436,20 @@ async function openFile(rel) {
   if (!rel) return;
   if (state.editMode && !(await exitEditMode(true))) return;
   try {
-    // 多标签页：若已存在标签则激活，否则新建
+    // 多标签页：若已存在标签则激活，否则新建。
+    // 注意判的是 loaded 而不是"标签存不存在"：启动时从 config 恢复的标签是
+    // content:'' 的占位（见 init()），只判存在会让正文停留在空串——预览区空白，
+    // 此时进编辑再保存就把文件正文清空了。
     let tab = state.tabs.find(t => t.rel === rel);
     if (!tab) {
       const { content, meta } = await api.readFile(rel);
-      tab = { rel, content, meta, scroll: 0 };
+      tab = { rel, content, meta, scroll: 0, loaded: true };
       state.tabs.push(tab);
+    } else if (!tab.loaded) {
+      const { content, meta } = await api.readFile(rel);
+      tab.content = content;
+      tab.meta = meta;
+      tab.loaded = true;
     }
     state.activeTab = rel;
     state.currentRel = rel;
@@ -496,6 +518,18 @@ async function switchTab(rel) {
   if (state.editMode && !(await exitEditMode(true))) return;
   const tab = state.tabs.find(t => t.rel === rel);
   if (!tab) return;
+  // 恢复出来的占位标签还没有正文，切过去之前先补读（理由同 openFile）
+  if (!tab.loaded) {
+    try {
+      const { content, meta } = await api.readFile(rel);
+      tab.content = content;
+      tab.meta = meta;
+      tab.loaded = true;
+    } catch (e) {
+      toast(tErr('openFailed', e), 'error');
+      return;
+    }
+  }
   state.activeTab = rel;
   state.currentRel = rel;
   state.currentContent = tab.content;
@@ -556,7 +590,7 @@ function renderRecent() {
   if (!panel) return;
   // 仅在空状态可见时渲染（实际显隐由空状态控制）
   const recent = state.recent
-    .map(r => state.metaList.find(m => m.rel === r))
+    .map(r => state.metaByRel.get(r))
     .filter(Boolean);
   if (!recent.length) { panel.classList.add('hidden'); return; }
   panel.classList.remove('hidden');
@@ -581,7 +615,7 @@ function renderBreadcrumb() {
   const segs = state.currentRel.split('/');
   const labels = segs.map((s, i) => {
     if (i < segs.length - 1) return labelForDir({ name: s }) || s;
-    const m = state.metaList.find(x => x.rel === state.currentRel);
+    const m = state.metaByRel.get(state.currentRel);
     return (m && m.meta.title) ? m.meta.title : fileNameNoExt(s);
   });
   bc.innerHTML = segs.map((s, i) => {
@@ -784,9 +818,9 @@ async function saveCurrent() {
     state.currentMeta = meta;
     // 同步到标签
     const tab = state.tabs.find(t => t.rel === state.currentRel);
-    if (tab) { tab.content = saved; tab.meta = meta; }
+    if (tab) { tab.content = saved; tab.meta = meta; tab.loaded = true; }
     toast(t('saved'), 'success');
-    state.metaList = await api.getMetaList();
+    setMetaList(await api.getMetaList());
     renderBreadcrumb();
     renderMetaBar();
     renderContent();
@@ -1268,7 +1302,7 @@ function applyFilter() {
     if (!hasFilter) { row.style.display = ''; return; }
     const rel = row.__rel;
     if (!rel) return;
-    const m = state.metaList.find(x => x.rel === rel);
+    const m = state.metaByRel.get(rel);
     let show = true;
     if (stage && stageOfRel(rel) !== stage) show = false;
     if (type && (!m || m.meta.projectType !== type)) show = false;
@@ -1311,7 +1345,7 @@ async function openHistory() {
       <span class="vi-actions">
         <button class="pin-btn ${v.pinned ? 'pinned' : ''}" data-pin="${escapeHtml(v.file)}">${v.pinned ? '⭐' : '☆'}</button>
         <button class="btn-link" data-view="${escapeHtml(v.file)}">${escapeHtml(t('view'))}</button>
-        <button class="btn-link" data-roll="${escapeHtml(v.file)}" style="color:var(--danger)">${escapeHtml(t('rollback'))}</button>
+        <button class="btn-link danger" data-roll="${escapeHtml(v.file)}">${escapeHtml(t('rollback'))}</button>
       </span>
     </div>
   `).join('');
@@ -1344,9 +1378,18 @@ async function openHistory() {
   });
 }
 
+// 版本文件名 → 可读时间。
+// 形态有三种，必须都能吃下：
+//   20260826-143000          早期快照（无毫秒）
+//   20260826-143000-456      现在的快照（timestampName 总是带毫秒）
+//   restored-123456-<上面任一>.md   从回收站并回来的快照
+// 之前的正则只认第一种，结果版本列表显示的是原始串；viewVersion 还会把
+// 带 .md 的文件名整个传进来，标题栏直接露出扩展名。
 function formatVersionTime(ts) {
-  // 20260826-143000
-  const m = ts.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/);
+  const name = String(ts == null ? '' : ts)
+    .replace(/\.md$/i, '')
+    .replace(/^restored-\d+-/, '');
+  const m = name.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})(?:-(\d{3}))?$/);
   if (!m) return ts;
   return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
 }
@@ -1597,9 +1640,11 @@ async function init() {
   if (Array.isArray(state.config.recent)) state.recent = state.config.recent;
   // 加载锁定文件
   if (Array.isArray(state.config.lockedFiles)) state.lockedFiles = new Set(state.config.lockedFiles);
-  // 加载标签页（仅存 rel，内容惰性加载）
+  // 加载标签页（config 里只存 rel，正文等首次切过去时再读）。
+  // loaded:false 是关键标记——openFile/switchTab 靠它判断要不要补读，
+  // 少了它正文会一直是空串，保存时反而把文件清空。
   if (Array.isArray(state.config.tabs)) {
-    state.tabs = state.config.tabs.map(rel => ({ rel, content: '', meta: {}, scroll: 0 }));
+    state.tabs = state.config.tabs.map(rel => ({ rel, content: '', meta: {}, scroll: 0, loaded: false }));
   }
   state.activeTab = state.config.activeTab || null;
   const stagesInfo = await api.getStages();
@@ -1639,7 +1684,7 @@ async function init() {
     menu.innerHTML = `
       <div class="ctx-prompt-wrap">
         <div class="ctx-prompt-title">${escapeHtml(t('importPickTitle'))}</div>
-        <div class="ctx-prompt-actions" style="flex-direction:column;align-items:stretch">
+        <div class="ctx-prompt-actions stacked">
           <button class="btn-link" id="import-single-btn">${escapeHtml(t('importSingleMd'))}</button>
           <button class="btn-link" id="import-zip-btn">${escapeHtml(t('importZipBackup'))}</button>
         </div>

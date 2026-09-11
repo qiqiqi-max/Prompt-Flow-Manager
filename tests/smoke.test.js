@@ -111,7 +111,9 @@ section('主进程符号完整性（曾出现调用不存在的函数）');
 // 故障回顾：import-single / import-zip / add-project-type / remove-project-type
 // 调用了从未定义的 createFile() 和 setConfig()，一点就 ReferenceError。
 assert(/async function createFileAt\(/.test(mainSrc), 'createFileAt 已定义');
-assert(/async function updateConfig\(/.test(mainSrc), 'updateConfig 已定义');
+// 不锁 async：updateConfig 现在是同步函数返回 queueConfigWrite 的 promise
+// （写入要排队串行化，见 queueConfigWrite）。这里只关心"定义存在"。
+assert(/function updateConfig\(/.test(mainSrc), 'updateConfig 已定义');
 assert(!/createFile\(null,/.test(mainSrc), '不再调用不存在的 createFile(null, ...)');
 assert(!/setConfig\(null,/.test(mainSrc), '不再调用不存在的 setConfig(null, ...)');
 // 粗查：所有被调用的本地函数都要有定义

@@ -1,6 +1,6 @@
 // Prompt Flow Manager - Electron 主进程
 // 负责窗口、文件系统操作、版本管理、回收站、配置、导出
-const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const fsp = require('fs/promises');
@@ -19,11 +19,15 @@ function countedReadFile(fullPath) {
 // 维度同时相等才会发生，代价只是搜索结果延迟一次刷新。
 // 连 frontmatter 的解析结果一起缓存：getMetaList 每次都要对全库解析一遍，
 // 在 1000 条规模下这部分和 stat 一样构成主要耗时。
-const contentCache = new Map(); // fullPath -> { mtimeMs, size, content, meta }
+// 搜索用的派生字段（去掉 frontmatter 的正文 + 其小写形式）同样缓存：
+// 否则用户每敲一个字符，searchAll 就要对全库重做一次 stripFrontmatter 正则和
+// toLowerCase 大字符串分配——1000 条规模下这是搜索剩余耗时的绝大部分，
+// 而它们只随文件内容变化，和查询词无关，完全可以复用。
+const contentCache = new Map(); // fullPath -> { mtimeMs, size, content, meta, bodyRaw, bodyLower }
 let cacheHits = 0;
 let cacheMisses = 0;
 
-const EMPTY_ENTRY = { content: '', meta: {} };
+const EMPTY_ENTRY = { content: '', meta: {}, bodyRaw: '', bodyLower: '' };
 
 async function readParsedCached(fullPath) {
   let st;
@@ -36,7 +40,15 @@ async function readParsedCached(fullPath) {
   cacheMisses++;
   let content = '';
   try { content = await countedReadFile(fullPath); } catch { return EMPTY_ENTRY; }
-  const entry = { mtimeMs: st.mtimeMs, size: st.size, content, meta: parseFrontmatter(content).meta };
+  const bodyRaw = stripFrontmatter(content);
+  const entry = {
+    mtimeMs: st.mtimeMs,
+    size: st.size,
+    content,
+    meta: parseFrontmatter(content).meta,
+    bodyRaw,
+    bodyLower: bodyRaw.toLowerCase()
+  };
   contentCache.set(fullPath, entry);
   return entry;
 }
@@ -81,6 +93,9 @@ const DATA_ROOT = process.env.PFM_DATA_DIR
 const PROMPTS_DIR = path.join(DATA_ROOT, 'prompts');
 const WORKFLOWS_DIR = path.join(DATA_ROOT, 'workflows');
 const TEMPLATES_DIR = path.join(DATA_ROOT, 'templates');
+// 顶层目录名 → 绝对路径。遍历这三个目录的地方（listTree / getMetaList /
+// listTreeAndMeta）都从这里取，避免三处各写一遍三元表达式。
+const TOP_DIRS = { prompts: PROMPTS_DIR, workflows: WORKFLOWS_DIR, templates: TEMPLATES_DIR };
 const VERSIONS_DIR = path.join(DATA_ROOT, '.versions');
 const TRASH_DIR = path.join(DATA_ROOT, '.trash');
 // 配置默认放 userData（不污染提示词目录）；设了 PFM_DATA_DIR 时跟着走，
@@ -332,6 +347,20 @@ async function saveConfig(cfg) {
   try { await fsp.writeFile(CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf8'); } catch (e) { console.error(e); }
 }
 
+// 配置写入必须串行。渲染进程有五个各自独立的 debounce 在写 config
+// （tabs 500ms / recent 500ms / lockedFiles 400ms / sidebarWidth 400ms / expandedPaths 600ms），
+// 一次"打开文件 + 拖宽侧边栏 + 展开目录"就会让它们在相近时刻落地。
+// updateConfig 是 read-modify-write：若并发执行，各自读到同一份旧快照再全量写回，
+// 后写的会把前写的字段整个覆盖掉，表现是偶发的"设置没保存上"，很难复现。
+// 这里把所有 patch 排成一条 promise 链，每个 patch 都读到前一个的结果。
+let configWriteChain = Promise.resolve();
+function queueConfigWrite(fn) {
+  const run = configWriteChain.then(fn, fn);
+  // 链条本身不能因为某次失败而断掉，否则后续写入全被拒绝
+  configWriteChain = run.then(() => {}, () => {});
+  return run;
+}
+
 // ---------- 目录树 ----------
 async function buildSubTree(dir, baseRel) {
   const nodes = [];
@@ -362,6 +391,61 @@ async function listTree() {
   ];
 }
 
+// 一次遍历同时产出文件树和元数据列表。
+// 为什么合并：渲染进程每次 refreshTree 都要这两份数据，而 listTree 和 getMetaList
+// 走的是同一套目录递归——分开调用等于把整库 readdir 两遍（新建/删除/重命名/移动/
+// 保存后都会触发）。这里合成一次遍历、一次 IPC 往返。
+// 语义必须与原来的两个函数逐字一致：目录为空则不出现在树里（children.length 判断），
+// stage 只对 prompts 顶层的二级目录有意义。
+async function listTreeAndMeta() {
+  const meta = [];
+  // 每个目录内的条目并发处理。串行 await 的代价实测很显著：1000 个文件
+  // 逐个 stat 约 180ms，并发降到 25ms 量级——缓存命中时 stat 就是主要开销
+  // （读文件次数为 0，字符串处理只占个位数毫秒）。
+  // 顺序必须保持稳定：用 map 收集结果再按原序拼装，不要在回调里 push。
+  const walk = async (dir, baseRel, top) => {
+    let entries;
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      return []; // 目录不存在或不可读：当作空目录，不阻塞整棵树
+    }
+    const slots = await Promise.all(entries.map(async (e) => {
+      if (e.name.startsWith('.')) return null;
+      const rel = `${baseRel}/${e.name}`;
+      if (e.isDirectory()) {
+        const children = await walk(path.join(dir, e.name), rel, top);
+        // 空目录不进树（与旧 buildSubTree 行为一致）
+        if (!children.length) return null;
+        return { node: { type: 'dir', name: e.name, rel, children } };
+      }
+      if (!e.name.toLowerCase().endsWith('.md')) return null;
+      const entry = await readParsedCached(path.join(dir, e.name));
+      let stage = null;
+      if (top === 'prompts') {
+        const segs = rel.split('/');
+        stage = segs.length > 2 ? segs[1] : null;
+      }
+      return {
+        node: { type: 'file', name: e.name, rel },
+        metaItem: { rel, name: e.name, meta: entry.meta, stage, top }
+      };
+    }));
+    const nodes = [];
+    for (const slot of slots) {
+      if (!slot) continue;
+      nodes.push(slot.node);
+      if (slot.metaItem) meta.push(slot.metaItem);
+    }
+    return nodes;
+  };
+  const tree = [];
+  for (const top of ['prompts', 'workflows', 'templates']) {
+    tree.push({ type: 'dir', name: top, rel: top, children: await walk(TOP_DIRS[top], top, top) });
+  }
+  return { tree, meta };
+}
+
 // ---------- 元数据列表（用于筛选） ----------
 // includeContent=true 时把已经读到的正文一并带出来。
 // 搜索需要正文，如果不带出去，searchAll 就得把每个文件再读一遍（2N 次 I/O）。
@@ -369,26 +453,41 @@ async function listTree() {
 async function getMetaList(includeContent = false) {
   const out = [];
   for (const top of ['prompts', 'workflows', 'templates']) {
-    const rootDir = top === 'prompts' ? PROMPTS_DIR : top === 'workflows' ? WORKFLOWS_DIR : TEMPLATES_DIR;
+    const rootDir = TOP_DIRS[top];
+    // 目录内并发。缓存命中时每个文件仍要 stat 一次做失效判断，
+    // 串行 await 让整库 stat 排成一条链——1000 文件实测约 180ms，
+    // 并发后降到 25ms 量级。字符串处理只占个位数毫秒，不是瓶颈。
+    // 结果按原序拼装，保持输出顺序稳定。
     const walk = async (dir, baseRel) => {
       let entries;
       try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
-      for (const e of entries) {
-        if (e.name.startsWith('.')) continue;
+      const slots = await Promise.all(entries.map(async (e) => {
+        if (e.name.startsWith('.')) return null;
         const rel = `${baseRel}/${e.name}`;
-        if (e.isDirectory()) await walk(path.join(dir, e.name), rel);
-        else if (e.name.toLowerCase().endsWith('.md')) {
-          const entry = await readParsedCached(path.join(dir, e.name));
-          const meta = entry.meta;
-          let stage = null;
-          if (top === 'prompts') {
-            const segs = rel.split('/');
-            stage = segs.length > 2 ? segs[1] : null;
-          }
-          const item = { rel, name: e.name, meta, stage, top };
-          if (includeContent) item.content = entry.content;
-          out.push(item);
+        if (e.isDirectory()) return { subdir: path.join(dir, e.name), rel };
+        if (!e.name.toLowerCase().endsWith('.md')) return null;
+        const entry = await readParsedCached(path.join(dir, e.name));
+        let stage = null;
+        if (top === 'prompts') {
+          const segs = rel.split('/');
+          stage = segs.length > 2 ? segs[1] : null;
         }
+        const item = { rel, name: e.name, meta: entry.meta, stage, top };
+        // 搜索走 includeContent=true，直接把缓存里的派生字段带过去（不再重算）。
+        // 这些字段只在进程内使用，不经 IPC 发给渲染进程。
+        if (includeContent) {
+          item.content = entry.content;
+          item.bodyRaw = entry.bodyRaw;
+          item.bodyLower = entry.bodyLower;
+        }
+        return { item };
+      }));
+      // 子目录递归留在串行段：并发已经在每一层内部生效，
+      // 再叠一层并发会把打开的文件句柄数放大到不可控。
+      for (const slot of slots) {
+        if (!slot) continue;
+        if (slot.item) out.push(slot.item);
+        else if (slot.subdir) await walk(slot.subdir, slot.rel);
       }
     };
     await walk(rootDir, top);
@@ -404,12 +503,12 @@ async function searchAll(query) {
   const meta = await getMetaList(true);
   const results = [];
   for (const item of meta) {
-    const content = item.content || '';
     const nameHit = (item.meta.title || item.name).toLowerCase().includes(q);
     const tagHit = Array.isArray(item.meta.tags) && item.meta.tags.some(t => String(t).toLowerCase().includes(q));
-    const bodyRaw = stripFrontmatter(content);
-    const body = bodyRaw.toLowerCase();
-    const bodyIdx = body.indexOf(q);
+    // bodyRaw / bodyLower 来自 contentCache（见 readParsedCached），
+    // 不在这里重算——每敲一个字符重做全库的正则+toLowerCase 是搜索的主要开销。
+    const bodyRaw = item.bodyRaw || '';
+    const bodyIdx = (item.bodyLower || '').indexOf(q);
     let rank = 0, snippet = '';
     if (nameHit) rank = 3;
     else if (tagHit) rank = 2;
@@ -431,6 +530,13 @@ ipcMain.handle('log', (e, msg) => { console.log('[renderer]', String(msg)); });
 ipcMain.handle('list-tree', async () => {
   await ensureDirs();
   return listTree();
+});
+
+// 渲染进程 refreshTree 用这一个替代原先的 list-tree + get-meta-list 两次调用。
+// 另两个 handler 保留：自检脚本与其他调用点仍在单独使用它们。
+ipcMain.handle('list-tree-and-meta', async () => {
+  await ensureDirs();
+  return listTreeAndMeta();
 });
 
 ipcMain.handle('read-file', async (e, rel) => {
@@ -650,11 +756,14 @@ ipcMain.handle('search', async (e, query) => searchAll(query));
 
 ipcMain.handle('get-config', async () => loadConfig());
 
-async function updateConfig(patch) {
-  const cur = await loadConfig();
-  const next = { ...cur, ...(patch || {}) };
-  await saveConfig(next);
-  return next;
+// 经 queueConfigWrite 串行化：并发调用会排队，每次都基于最新的磁盘状态做合并。
+function updateConfig(patch) {
+  return queueConfigWrite(async () => {
+    const cur = await loadConfig();
+    const next = { ...cur, ...(patch || {}) };
+    await saveConfig(next);
+    return next;
+  });
 }
 
 ipcMain.handle('set-config', (e, cfg) => updateConfig(cfg));
@@ -1374,6 +1483,34 @@ function attachSelfTest(targetWin) {
   };
 }
 
+// ---------- 导航守卫 ----------
+// 提示词正文是 Markdown，渲染时明确放行了 target 属性（见 renderMarkdown），
+// 所以正文里的 [文档](https://…) 是可点的。默认行为是在**当前窗口内**导航过去，
+// 于是工具栏、文件树、未保存的编辑全部消失，且没有后退按钮——整个应用被一条
+// 链接劫持。导入的第三方 .md 同理。
+// 这里把两条路都堵上：新窗口请求交给系统浏览器，窗口内导航直接拒绝。
+// 只允许 file:// 通过，因为界面本身是 loadFile 加载的（reload 也走这条）。
+function attachNavigationGuard(targetWin) {
+  const openExternally = (url) => {
+    // 只把 http/https 交给系统浏览器。file:/// 之类的本地协议不转发，
+    // 否则一条 file:///C:/… 链接就能让应用去打开任意本地文件/程序。
+    if (/^https?:\/\//i.test(url)) {
+      shell.openExternal(url).catch(e => console.error('打开外部链接失败:', e.message));
+    } else {
+      console.log('[nav] 已拦截非 http(s) 链接: ' + url);
+    }
+  };
+  targetWin.webContents.setWindowOpenHandler(({ url }) => {
+    openExternally(url);
+    return { action: 'deny' };
+  });
+  targetWin.webContents.on('will-navigate', (e, url) => {
+    if (url.startsWith('file://')) return; // 界面自身/reload
+    e.preventDefault();
+    openExternally(url);
+  });
+}
+
 async function createWindow() {
   const config = await loadConfig();
   win = new BrowserWindow({
@@ -1397,25 +1534,23 @@ async function createWindow() {
       webgl: false
     }
   });
+  attachNavigationGuard(win);
   const selfTest = process.env.PFM_SELFTEST === '1' ? attachSelfTest(win) : null;
   win.loadFile(path.join(CODE_ROOT, 'src', 'index.html'));
   if (selfTest) selfTest.run();
 
-  // resize / move 会以每秒几十次的频率触发。不防抖会疯狂读写 config.json，
-  // 且多个 loadConfig→saveConfig 交错时会互相覆盖甚至写坏文件。
+  // resize / move 会以每秒几十次的频率触发。不防抖会疯狂读写 config.json。
+  // 走 updateConfig 而不是自己 loadConfig→saveConfig：后者是一次独立的
+  // read-modify-write，会和渲染进程那五个 debounce（tabs/recent/locked/
+  // sidebarWidth/expandedPaths）互相覆盖字段。updateConfig 内部有写队列。
   let boundsTimer = null;
-  let boundsWriting = false;
   const flushBounds = async () => {
-    if (boundsWriting || !win || win.isDestroyed()) return;
-    boundsWriting = true;
+    if (!win || win.isDestroyed()) return;
+    const bounds = win.getBounds();
     try {
-      const cfg = await loadConfig();
-      cfg.windowBounds = win.getBounds();
-      await saveConfig(cfg);
+      await updateConfig({ windowBounds: bounds });
     } catch (e) {
       console.error('保存窗口位置失败:', e);
-    } finally {
-      boundsWriting = false;
     }
   };
   const scheduleSaveBounds = () => {
@@ -1424,14 +1559,20 @@ async function createWindow() {
   };
   win.on('resize', scheduleSaveBounds);
   win.on('move', scheduleSaveBounds);
-  // 关窗前把待写入的尺寸落盘，否则最后一次调整会丢
+  // 关窗前把待写入的尺寸落盘，否则最后一次调整会丢。
+  // 这里必须同步写：close 之后进程随即退出，await 不保证能跑完。
+  // 为了不和写队列打架，先把队列里已排队的写等干净再动手——但同步上下文
+  // 等不了 promise，所以退而求其次：读当前磁盘内容做 merge，只覆盖
+  // windowBounds 一个字段，其余字段原样保留。最坏情况是丢掉一次
+  // 正在飞行中的 debounce 写入，而不是整份配置被覆盖。
   win.on('close', () => {
     if (boundsTimer) { clearTimeout(boundsTimer); boundsTimer = null; }
     if (win && !win.isDestroyed()) {
       try {
-        const cfg = { windowBounds: win.getBounds() };
+        const bounds = win.getBounds();
         const cur = fs.existsSync(CONFIG_PATH) ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) : {};
-        fs.writeFileSync(CONFIG_PATH, JSON.stringify({ ...cur, ...cfg }, null, 2), 'utf8');
+        cur.windowBounds = bounds;
+        fs.writeFileSync(CONFIG_PATH, JSON.stringify(cur, null, 2), 'utf8');
       } catch (e) { console.error('关窗保存尺寸失败:', e); }
     }
   });
@@ -1478,6 +1619,29 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+// ---------- 单实例 ----------
+// 两个实例操作同一份数据目录时，config.json 是全量读改写，
+// windowBounds / lockedFiles / tabs 会互相覆盖；.versions 的裁剪也可能打架。
+// 所以第二个实例直接退出，把已有窗口唤到前台。
+//
+// 自检模式不参与：测试会拉起多个 Electron，各自 PFM_DATA_DIR 指向不同的临时目录，
+// 本来就该允许共存。在这里加锁会让第二个测试进程静默退出，表现为莫名超时。
+const SINGLE_INSTANCE = process.env.PFM_SELFTEST !== '1' && !process.env.PFM_SELFTEST_BENCH;
+if (SINGLE_INSTANCE && !app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  if (SINGLE_INSTANCE) {
+    app.on('second-instance', () => {
+      if (!win || win.isDestroyed()) return;
+      if (win.isMinimized()) win.restore();
+      win.show();
+      win.focus();
+    });
+  }
+  bootstrap();
+}
+
+function bootstrap() {
 app.whenReady().then(async () => {
   if (process.env.PFM_SELFTEST_BENCH) {
     if (!process.env.PFM_DATA_DIR) {
@@ -1498,6 +1662,7 @@ app.whenReady().then(async () => {
   await createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
