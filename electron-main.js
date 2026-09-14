@@ -1,6 +1,6 @@
 // Prompt Flow Manager - Electron 主进程
 // 负责窗口、文件系统操作、版本管理、回收站、配置、导出
-const { app, BrowserWindow, ipcMain, dialog, Menu, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, shell, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const fsp = require('fs/promises');
@@ -67,6 +67,18 @@ for (const stream of [process.stdout, process.stderr]) {
 
 const archiver = require('archiver'); // 仅用于压缩导出
 const { readZipMarkdownEntries, sanitizeTitle, uniqueRel } = require('./lib/zip-import');
+// 原生菜单的文案也要跟随语言。i18n.js 结尾有 module.exports，可以直接在主进程 require，
+// 不必再维护第二份翻译表（之前菜单是硬编码中文，切到英文后整个菜单栏还是中文）。
+const I18N_TABLE = require('./src/i18n.js');
+// frontmatter 解析同样两边共用（src/frontmatter.js 结尾也有 module.exports）。
+const FRONTMATTER = require('./src/frontmatter.js');
+// 当前菜单语言。buildMenu 只在启动和语言变化时调用（见 syncMenuLang），
+// 所以文案取值统一读这个变量，不用每个调用点都把 lang 传一遍。
+let menuLang = null;
+function mt(key) {
+  const tbl = I18N_TABLE[menuLang === 'en' ? 'en' : 'zh'] || I18N_TABLE.zh;
+  return tbl[key] != null ? tbl[key] : (I18N_TABLE.zh[key] != null ? I18N_TABLE.zh[key] : key);
+}
 
 // 某些 Windows 环境 GPU 驱动/运行库缺失，禁用 GPU 硬件加速避免 GPU 进程崩溃。
 // 软件渲染对提示词管理器这种轻量界面性能完全足够。
@@ -102,7 +114,19 @@ const TRASH_DIR = path.join(DATA_ROOT, '.trash');
 // 否则测试改语言/主题会写进用户真实配置。
 const CONFIG_PATH = path.join(process.env.PFM_DATA_DIR ? DATA_ROOT : app.getPath('userData'), 'config.json');
 
-// 打包后首次运行：从 asar 内拷出种子资源到 Data 目录
+// 打包后首次运行：从 asar 内拷出种子资源到 Data 目录。
+//
+// 关于"拷到一半失败"：原先的跳过判断是"目标目录非空就跳过"，而 copyDirSync
+// 每个文件都没有单独保护。一个文件被占用/不可读就中途抛出，留下半个目录——
+// 而半个目录也算"非空"，于是**之后每次启动都跳过，缺口永远补不回来**。
+// 这里改成显式的进行中标记：拷之前放标记，成功后删掉。
+//   有标记 = 上次拷到一半就挂了 → 允许重拷（此时用户还没用过这个目录）
+//   无标记 + 目标非空 = 已完成的种子，或用户自己的内容 → 一定跳过
+// 不能只看标记不看内容：老版本升上来的用户没有标记但有真实数据，
+// 那样会把种子覆盖回去，清掉用户对同名文件（如 需求分析.md）的修改。
+function seedFlagPath(dir) {
+  return path.join(DATA_ROOT, '.seeding-' + dir);
+}
 function ensureSeedData() {
   // 只写 stdout，不再往数据目录追加 debug.log（那会无限增长）。
   const log = (msg) => console.log('[ensureSeedData] ' + msg);
@@ -113,17 +137,28 @@ function ensureSeedData() {
     for (const dir of ['prompts', 'workflows', 'templates']) {
       const dest = path.join(DATA_ROOT, dir);
       const src = path.join(seedRoot, dir);
+      const flag = seedFlagPath(dir);
       const destExists = fs.existsSync(dest);
       const destHasContent = destExists && fs.readdirSync(dest).length > 0;
+      const interrupted = fs.existsSync(flag);
       const srcExists = fs.existsSync(src);
-      log(dir + ': src=' + src + ' exists=' + srcExists + ', destExists=' + destExists + ', destHasContent=' + destHasContent);
-      if (destHasContent) { log('  skip ' + dir + ' (has content)'); continue; }
-      if (srcExists) {
-        log('  copying ' + dir);
-        copyDirSync(src, dest);
-        log('  done ' + dir + ', files=' + fs.readdirSync(dest).length);
+      log(dir + ': src exists=' + srcExists + ', destHasContent=' + destHasContent + ', interrupted=' + interrupted);
+      if (destHasContent && !interrupted) { log('  skip ' + dir + ' (已有内容)'); continue; }
+      if (!srcExists) { log('  seed MISSING for ' + dir); continue; }
+      if (interrupted) log('  上次拷贝未完成，重试 ' + dir);
+      try {
+        fs.writeFileSync(flag, new Date().toISOString(), 'utf8');
+      } catch (e) {
+        log('  无法写进行中标记，跳过 ' + dir + '：' + e.message);
+        continue;
+      }
+      const failed = copyDirSync(src, dest);
+      if (failed.length) {
+        // 有文件没拷成：保留标记，下次启动继续补。至少不会永久缺内容。
+        log('  ' + dir + ' 部分失败(' + failed.length + ' 个)，保留标记下次重试: ' + failed.slice(0, 3).join(', '));
       } else {
-        log('  seed MISSING for ' + dir);
+        try { fs.unlinkSync(flag); } catch {}
+        log('  done ' + dir + ', files=' + fs.readdirSync(dest).length);
       }
     }
     log('FINISHED');
@@ -131,14 +166,21 @@ function ensureSeedData() {
     log('ERROR: ' + e.message + '\n' + e.stack);
   }
 }
-function copyDirSync(src, dest) {
+// 返回拷贝失败的文件列表，而不是让第一个失败就掀翻整次拷贝。
+// 单个文件读不到（被杀软锁住、权限问题）不该导致其余几十个提示词都拷不过来。
+function copyDirSync(src, dest, failed = []) {
   fs.mkdirSync(dest, { recursive: true });
   for (const ent of fs.readdirSync(src, { withFileTypes: true })) {
     const s = path.join(src, ent.name);
     const d = path.join(dest, ent.name);
-    if (ent.isDirectory()) copyDirSync(s, d);
-    else fs.copyFileSync(s, d);
+    try {
+      if (ent.isDirectory()) copyDirSync(s, d, failed);
+      else fs.copyFileSync(s, d);
+    } catch (e) {
+      failed.push(ent.name + ': ' + e.message);
+    }
   }
+  return failed;
 }
 
 const STAGES = ['project-init', 'code-generation', 'code-review', 'testing', 'deployment'];
@@ -177,34 +219,58 @@ function safeJoin(relPath) {
   return resolved;
 }
 
-// ---------- frontmatter 解析（主进程权威） ----------
-function parseFrontmatter(content) {
-  const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
-  if (!m) return { meta: {}, body: content };
-  const yaml = m[1];
-  const body = m[2];
-  const meta = {};
-  for (const line of yaml.split(/\r?\n/)) {
-    if (!line.trim() || line.trim().startsWith('#')) continue;
-    const idx = line.indexOf(':');
-    if (idx === -1) continue;
-    const key = line.slice(0, idx).trim();
-    let val = line.slice(idx + 1).trim();
-    if (val.startsWith('[') && val.endsWith(']')) {
-      val = val.slice(1, -1).split(',').map(s => s.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
-    } else if (val === 'true') {
-      val = true;
-    } else if (val === 'false') {
-      val = false;
-    } else if (/^-?\d+$/.test(val)) {
-      val = parseInt(val, 10);
-    } else {
-      val = val.replace(/^["']|["']$/g, '');
-    }
-    meta[key] = val;
+// 写入专用校验。safeJoin 只保证"没逃出 DATA_ROOT"，但打包后 DATA_ROOT 就是
+// userData，而 config.json 正躺在那儿——于是 save-file('config.json', ...) 能用
+// 记笔记的 API 覆盖应用自己的配置（bumpAutoFields 还会给它加上 --- frontmatter，
+// 之后 loadConfig 解析失败回落默认值，主题/标签页/锁定/项目类型全丢）。
+// .trash/index.json 和 .versions/** 同理。
+// 写入只应该发生在三个内容目录里的 .md（外加建目录用的 .gitkeep 占位），
+// 这里按顶层目录 + 扩展名双白名单卡死。
+const WRITABLE_TOPS = new Set(['prompts', 'workflows', 'templates']);
+function safeJoinWritable(relPath) {
+  const resolved = safeJoin(relPath);
+  const rel = path.relative(DATA_ROOT_NORM, resolved).replace(/\\/g, '/');
+  const segs = rel.split('/');
+  // 必须落在 prompts/ workflows/ templates/ 之下，且不能就是顶层目录本身
+  if (segs.length < 2 || !WRITABLE_TOPS.has(segs[0])) throw appError('E_WRITE_FORBIDDEN', relPath);
+  // 任何一段以 . 开头都拒绝（.versions/.trash/.git 都在这条上），唯一例外是
+  // newFolder 用来占位的 .gitkeep 文件名本身。
+  const base = segs[segs.length - 1];
+  for (const s of segs.slice(0, -1)) {
+    if (s.startsWith('.')) throw appError('E_WRITE_FORBIDDEN', relPath);
   }
-  return { meta, body };
+  const isMd = base.toLowerCase().endsWith('.md') && base !== '.md';
+  if (!isMd && base !== '.gitkeep') throw appError('E_WRITE_FORBIDDEN', relPath);
+  return resolved;
 }
+
+// 回收站内部文件名的校验。
+// 为什么必须有：empty-trash 会对 path.join(TRASH_DIR, item.store) 调
+// fsp.rm(recursive: true, force: true)，而 item.store 来自 .trash/index.json——
+// 一个普通 JSON 文件。它被同步盘冲突、外部编辑器、或上次崩溃写坏之后，
+// store 变成 "../OUTSIDE" 就会静默递归删掉 .trash 之外的目录（实测能删到
+// DATA_ROOT 之外）。force:true 连"不存在"都不报错，所以出事没有任何痕迹。
+// store 名全部由本程序生成（trash handler 里的 `${id}${ext}` 和 `${id}-versions`），
+// 一定是单层名字，因此这里直接要求"不含分隔符且解析后仍在 .trash 内"。
+const TRASH_DIR_NORM = path.normalize(TRASH_DIR);
+function trashStorePath(storeName) {
+  const name = String(storeName == null ? '' : storeName);
+  if (!name) throw appError('E_TRASH_BAD_STORE', String(storeName));
+  if (name.includes('\0')) throw appError('E_TRASH_BAD_STORE', name);
+  // 单层名字：出现任何分隔符或 .. 都说明索引被改过
+  if (/[\\/]/.test(name) || name === '.' || name === '..') throw appError('E_TRASH_BAD_STORE', name);
+  const resolved = path.resolve(TRASH_DIR_NORM, name);
+  // 双保险：即使上面漏了某种形态，解析结果也必须落在 .trash 里面
+  const rel = path.relative(TRASH_DIR_NORM, resolved);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw appError('E_TRASH_BAD_STORE', name);
+  return resolved;
+}
+
+// ---------- frontmatter 解析 ----------
+// 实现在 src/frontmatter.js，渲染进程用 <script> 加载同一份文件。
+// 原先两边各有一份逐字复制的实现，改动其中一份不会同步到另一份，
+// 症状是界面显示的 meta 和磁盘里的不一致，且不报错。
+const parseFrontmatter = (content) => FRONTMATTER.parse(content);
 
 // 原地更新自动字段（version/updatedAt/createdAt），保留其余 frontmatter 与正文原样。
 // 这样 workflow 的 flow 多行数组等结构不会被破坏。
@@ -234,10 +300,7 @@ function bumpAutoFields(content, prevContent) {
   return `---\n${yaml}\n---\n${body}`;
 }
 
-function stripFrontmatter(content) {
-  const m = content.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?([\s\S]*)$/);
-  return m ? m[1] : content;
-}
+const stripFrontmatter = (content) => FRONTMATTER.strip(content);
 
 // ---------- 版本管理 ----------
 // 版本目录同样要做越权校验：relPath 来自渲染进程，不能直接拼进 path.join。
@@ -261,8 +324,9 @@ function versionFilePath(relPath, file) {
 
 // 带毫秒：同一秒内连续保存不会覆盖同名快照。
 // 仍保持"字典序 == 时间序"，因为各字段都是定宽零填充的。
-function timestampName() {
-  const d = new Date();
+// 接受一个 Date 是为了让 saveVersion 能在名字被占时往后挪一毫秒重算
+// （毫秒精度仍可能撞名，见那里的说明）。
+function timestampName(d = new Date()) {
   const p = n => String(n).padStart(2, '0');
   const ms = String(d.getMilliseconds()).padStart(3, '0');
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}-${ms}`;
@@ -272,27 +336,89 @@ async function ensureDir(dir) {
   await fsp.mkdir(dir, { recursive: true });
 }
 
+// ---------- 原子写 ----------
+// 普通 writeFile 是"先把目标截断到 0 字节，再写入"。中途断电/进程被杀，
+// 留下的就是空文件或半截文件。对 index.json 这类清单尤其致命：
+// readTrashIndex / readVersionIndex 的 catch 会把解析失败当成"空清单"静默返回，
+// 于是一次中断的写入 = 整个回收站列表（或所有星标）凭空消失，而被删的文件还躺在
+// .trash 里，UI 再也看不到。config.json 同理（主题/标签页/锁定/项目类型全丢）。
+// 写临时文件再 rename：rename 在同一卷上是原子的，读者只会看到旧的或新的完整内容。
+let atomicSeq = 0;
+async function writeFileAtomic(fullPath, data) {
+  const dir = path.dirname(fullPath);
+  await ensureDir(dir);
+  // 临时名要满足三个条件：
+  //   1. 以 . 开头——目录树遍历会跳过点开头的项，写入过程中不会闪现在文件树里；
+  //   2. 不以 .md 结尾——pruneVersions 和 list-versions 都按 .md 过滤目录内容，
+  //      临时文件若带 .md 会被算进版本配额，甚至被当成最旧快照删掉；
+  //   3. 带 pid + 计数器——同目录并发写不会用到同一个临时名。
+  const tmp = path.join(dir, `.tmp-${process.pid}-${atomicSeq++}-${path.basename(fullPath)}.part`);
+  try {
+    await fsp.writeFile(tmp, data, 'utf8');
+    await fsp.rename(tmp, fullPath);
+  } catch (e) {
+    // 失败时清掉临时文件，别在数据目录里留垃圾（清理本身失败就忽略）
+    try { await fsp.unlink(tmp); } catch {}
+    throw e;
+  }
+}
+
+// 快照名撞了就往后挪一毫秒重算，而不是覆盖或直接失败。
+//
+// 为什么需要：文件名精度只到毫秒，而快照名不能随便换格式——list-versions、
+// pruneVersions 的"字典序 == 时间序"、VERSION_FILE_RE 都依赖这个形态。
+// 同一毫秒内落两个快照时，两次 writeFileAtomic 会 rename 到同一个目标名：
+// 实测（并发保存探针）在 Windows 上其中一次直接抛裸 EPERM，整个保存失败，
+// 用户看到的是"保存失败"而正文其实已经写了一半。
+// 挪毫秒而不是加随机后缀，是为了让名字仍然能被 VERSION_FILE_RE 认出来。
 async function saveVersion(relPath, content) {
   const dir = versionDirFor(relPath);
   await ensureDir(dir);
-  const name = timestampName() + '.md';
-  await fsp.writeFile(path.join(dir, name), content, 'utf8');
+  let d = new Date();
+  let name = timestampName(d) + '.md';
+  // 上限防死循环：正常撞一两次就够，连撞 1000 次说明目录有别的问题
+  for (let i = 0; i < 1000 && fs.existsSync(path.join(dir, name)); i++) {
+    d = new Date(d.getTime() + 1);
+    name = timestampName(d) + '.md';
+  }
+  await writeFileAtomic(path.join(dir, name), content);
   await pruneVersions(relPath);
+}
+
+// 读索引 JSON，区分"文件不存在"和"文件损坏"两种情况。
+// 之前两个索引都是 catch{ return 空 }，于是一次中断的写入（旧代码是原地
+// writeFile，open(w) 先截断）会让整份索引静默变空：回收站列表清空但文件还在
+// .trash 里、所有星标丢失，用户以为数据没了。现在写入是原子的，正常不该再出现
+// 损坏；万一真损坏（磁盘错误、外部编辑），把坏文件改名留档而不是当空处理，
+// 至少证据还在、可人工恢复。
+async function readIndexJson(idxPath, fallback) {
+  let raw;
+  try {
+    raw = await fsp.readFile(idxPath, 'utf8');
+  } catch {
+    return { ...fallback }; // 不存在：正常初始状态
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    throw new Error('not an object');
+  } catch (e) {
+    const bak = idxPath + '.corrupt-' + timestampName();
+    try { await fsp.rename(idxPath, bak); } catch {}
+    console.error('[index] 索引损坏，已改名留档:', bak, e.message);
+    return { ...fallback };
+  }
 }
 
 async function readVersionIndex(relPath) {
   const idxPath = path.join(versionDirFor(relPath), 'index.json');
-  try {
-    return JSON.parse(await fsp.readFile(idxPath, 'utf8'));
-  } catch {
-    return { pinned: {} };
-  }
+  return readIndexJson(idxPath, { pinned: {} });
 }
 
 async function writeVersionIndex(relPath, index) {
   const dir = versionDirFor(relPath);
   await ensureDir(dir);
-  await fsp.writeFile(path.join(dir, 'index.json'), JSON.stringify(index, null, 2), 'utf8');
+  await writeFileAtomic(path.join(dir, 'index.json'), JSON.stringify(index, null, 2));
 }
 
 async function pruneVersions(relPath) {
@@ -317,15 +443,13 @@ async function pruneVersions(relPath) {
 
 // ---------- 回收站 ----------
 async function readTrashIndex() {
-  try {
-    return JSON.parse(await fsp.readFile(path.join(TRASH_DIR, 'index.json'), 'utf8'));
-  } catch {
-    return { items: [] };
-  }
+  const idx = await readIndexJson(path.join(TRASH_DIR, 'index.json'), { items: [] });
+  if (!Array.isArray(idx.items)) idx.items = [];
+  return idx;
 }
 async function writeTrashIndex(index) {
   await ensureDir(TRASH_DIR);
-  await fsp.writeFile(path.join(TRASH_DIR, 'index.json'), JSON.stringify(index, null, 2), 'utf8');
+  await writeFileAtomic(path.join(TRASH_DIR, 'index.json'), JSON.stringify(index, null, 2));
 }
 
 // ---------- 配置 ----------
@@ -343,22 +467,42 @@ async function loadConfig() {
     return defaults;
   }
 }
+// 返回是否真的写成功。原先这里把错误吞掉只 console.error，
+// 于是 set-config 照样 resolve、渲染进程以为存上了，实际磁盘没变。
 async function saveConfig(cfg) {
-  try { await fsp.writeFile(CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf8'); } catch (e) { console.error(e); }
+  try {
+    await writeFileAtomic(CONFIG_PATH, JSON.stringify(cfg, null, 2));
+    return true;
+  } catch (e) {
+    console.error('保存配置失败:', e.message);
+    return false;
+  }
 }
 
-// 配置写入必须串行。渲染进程有五个各自独立的 debounce 在写 config
-// （tabs 500ms / recent 500ms / lockedFiles 400ms / sidebarWidth 400ms / expandedPaths 600ms），
-// 一次"打开文件 + 拖宽侧边栏 + 展开目录"就会让它们在相近时刻落地。
-// updateConfig 是 read-modify-write：若并发执行，各自读到同一份旧快照再全量写回，
-// 后写的会把前写的字段整个覆盖掉，表现是偶发的"设置没保存上"，很难复现。
-// 这里把所有 patch 排成一条 promise 链，每个 patch 都读到前一个的结果。
-let configWriteChain = Promise.resolve();
-function queueConfigWrite(fn) {
-  const run = configWriteChain.then(fn, fn);
+// ---------- 串行化 read-modify-write ----------
+// 凡是"读出整份 JSON → 改一个字段 → 整份写回"的操作都必须串行。并发执行时
+// 两边各自读到同一份旧快照，后写的把前写的整个覆盖掉——症状是偶发丢改动，极难复现。
+//
+// 三处都是这个形态，共用一套按 key 的 promise 链：
+//   config      渲染进程有五个独立 debounce 在写（tabs 500ms / recent 500ms /
+//               lockedFiles 400ms / sidebarWidth 400ms / expandedPaths 600ms），
+//               一次"打开文件 + 拖宽侧边栏 + 展开目录"就会让它们在相近时刻落地。
+//   trash       连续删两个文件时，第二条 unshift 基于旧快照，第一条记录直接消失，
+//               而文件已经躺在 .trash 里成了孤儿（磁盘占着，UI 看不到，也删不掉）。
+//   version:<rel> 快速连点星标会丢 pin 状态。按 rel 分链，不同文件互不阻塞。
+const writeChains = new Map();
+function queueWrite(key, fn) {
+  const prev = writeChains.get(key) || Promise.resolve();
+  const run = prev.then(fn, fn);
   // 链条本身不能因为某次失败而断掉，否则后续写入全被拒绝
-  configWriteChain = run.then(() => {}, () => {});
+  const guard = run.then(() => {}, () => {});
+  writeChains.set(key, guard);
+  // 链尾自清理，避免 version:<rel> 这类动态 key 让 Map 无限增长
+  guard.then(() => { if (writeChains.get(key) === guard) writeChains.delete(key); });
   return run;
+}
+function queueConfigWrite(fn) {
+  return queueWrite('config', fn);
 }
 
 // ---------- 目录树 ----------
@@ -546,24 +690,37 @@ ipcMain.handle('read-file', async (e, rel) => {
   return { content, meta };
 });
 
-ipcMain.handle('save-file', async (e, rel, content) => {
-  const full = safeJoin(rel);
+// 排进 ver:<rel> 链。这个 handler 是 read-modify-write：读磁盘上的 prev →
+// 存快照 → bumpAutoFields 拿 prev 算出新 version → 写回。并发时几路都读到同一份
+// prev，算出同一个 version，后写的把前面的整个盖掉。
+//
+// 实测（并发保存探针）：连发 5 次保存，version 只从 1 涨到 2，丢了 4 次自增；
+// 5 条快照只落了 3 条。触发路径不需要用户手快——Ctrl+S 和"保存"按钮都没有
+// 防重入，按住 Ctrl+S 就能连发；exitEditMode 保存后切文件也会再走一次。
+//
+// 用和 pin-version 相同的 key：saveVersion 里的 pruneVersions 要读版本索引判断
+// 星标，pin-version 要写这份索引，两者必须互斥，否则刚点的星标可能被裁掉。
+// 按 rel 分链，不同文件之间不互相阻塞。
+ipcMain.handle('save-file', async (e, rel, content) => queueWrite('ver:' + String(rel), async () => {
+  const full = safeJoinWritable(rel);
+  if (typeof content !== 'string') throw appError('E_CONTENT_NOT_STRING', typeof content);
   let prev = null;
   try { prev = await fsp.readFile(full, 'utf8'); } catch {}
   if (prev != null && prev !== content) await saveVersion(rel, prev);
   const toWrite = bumpAutoFields(content, prev);
   await ensureDir(path.dirname(full));
-  await fsp.writeFile(full, toWrite, 'utf8');
+  await writeFileAtomic(full, toWrite);
   dropFromCache(full);
   return { content: toWrite, meta: parseFrontmatter(toWrite).meta };
-});
+}));
 
 async function createFileAt(rel, content) {
-  const full = safeJoin(rel);
+  const full = safeJoinWritable(rel);
+  if (typeof content !== 'string') throw appError('E_CONTENT_NOT_STRING', typeof content);
   if (fs.existsSync(full)) throw appError('E_FILE_EXISTS', rel);
   await ensureDir(path.dirname(full));
   const toWrite = bumpAutoFields(content, null);
-  await fsp.writeFile(full, toWrite, 'utf8');
+  await writeFileAtomic(full, toWrite);
   dropFromCache(full);
   return { content: toWrite, meta: parseFrontmatter(toWrite).meta };
 }
@@ -571,8 +728,10 @@ async function createFileAt(rel, content) {
 ipcMain.handle('create-file', (e, rel, content) => createFileAt(rel, content));
 
 ipcMain.handle('rename', async (e, oldRel, newRel) => {
-  const oldFull = safeJoin(oldRel);
-  const newFull = safeJoin(newRel);
+  // 两侧都过写入白名单：源要被移走（等于删），目标要被写入，
+  // 任一侧落在 .versions/.trash/config.json 上都不行。
+  const oldFull = safeJoinWritable(oldRel);
+  const newFull = safeJoinWritable(newRel);
   if (fs.existsSync(newFull)) throw appError('E_TARGET_EXISTS', newRel);
   await ensureDir(path.dirname(newFull));
   await fsp.rename(oldFull, newFull);
@@ -585,12 +744,27 @@ ipcMain.handle('rename', async (e, oldRel, newRel) => {
     await ensureDir(path.dirname(newV));
     await fsp.rename(oldV, newV);
   }
-  // 锁定标记跟随改名，避免"改名 → 删除"绕过锁
-  const cfg = await loadConfig();
-  if (Array.isArray(cfg.lockedFiles) && cfg.lockedFiles.includes(oldRel)) {
-    const next = cfg.lockedFiles.filter(r => r !== oldRel);
-    if (!next.includes(newRel)) next.push(newRel);
-    await updateConfig({ lockedFiles: next });
+  // 锁定标记跟随改名，避免"改名 → 删除"绕过锁。
+  //
+  // 读改写整个塞进 queueConfigWrite：原先是在队列外 loadConfig，再拿这份快照去
+  // updateConfig。渲染进程有五个 debounce 在并发写 config（tabs/recent/locked/
+  // sidebarWidth/expandedPaths），只要在这两步之间插进来一次 lockedFiles 写入，
+  // 就会被这里的旧快照整个覆盖——症状是刚锁的文件莫名解锁。
+  //
+  // updateConfig 现在会因写盘失败抛错，但这里必须吞掉：文件已经 rename 完了，
+  // 抛出去渲染进程会显示"重命名失败"，而树刷新后文件明明已经改名。锁列表是
+  // 事后记账，权威的失败信号走用户主动触发的 set-config。
+  try {
+    await queueConfigWrite(async () => {
+      const cur = await loadConfig();
+      if (!Array.isArray(cur.lockedFiles) || !cur.lockedFiles.includes(oldRel)) return;
+      const next = cur.lockedFiles.filter(r => r !== oldRel);
+      if (!next.includes(newRel)) next.push(newRel);
+      const ok = await saveConfig({ ...cur, lockedFiles: next });
+      if (!ok) throw appError('E_CONFIG_WRITE', CONFIG_PATH);
+    });
+  } catch (err) {
+    console.error('锁定标记跟随改名失败（文件已改名）:', oldRel, '->', newRel, err.message);
   }
   return true;
 });
@@ -600,10 +774,20 @@ async function isLocked(rel) {
   return Array.isArray(cfg.lockedFiles) && cfg.lockedFiles.includes(rel);
 }
 
-ipcMain.handle('trash', async (e, rel) => {
-  const full = safeJoin(rel);
+// 整个 handler 排进 trash 链：中间的 readTrashIndex → unshift → writeTrashIndex
+// 是 read-modify-write，并发时后写的会覆盖掉前一条记录，而文件已经移进 .trash
+// 成了索引里查不到的孤儿。
+ipcMain.handle('trash', async (e, rel) => queueWrite('trash', async () => {
+  // 删除同样是改动库内容：不加白名单就能把 config.json 移进回收站
+  const full = safeJoinWritable(rel);
   if (await isLocked(rel)) throw appError('E_LOCKED', rel);
   if (!fs.existsSync(full)) return true;
+  // 目录整棵搬进回收站后，empty-trash 用 unlink 删不掉（EPERM），却会无条件清空
+  // 索引，结果整棵树永久留在 .trash 里、UI 再也看不到。回收站的语义只覆盖单个
+  // .md 文件，这里直接拒绝目录。
+  let st;
+  try { st = await fsp.stat(full); } catch { return true; }
+  if (st.isDirectory()) throw appError('E_TRASH_DIR_UNSUPPORTED', rel);
   await ensureDir(TRASH_DIR);
   const id = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const ext = path.extname(rel);
@@ -630,36 +814,63 @@ ipcMain.handle('trash', async (e, rel) => {
   }
   index.items.unshift({ id, originalRel: rel, name: path.basename(rel), trashedAt: new Date().toISOString(), store: storeName, versionStore });
   await writeTrashIndex(index);
-  // 清掉锁列表里的残留条目
-  const cfg = await loadConfig();
-  if (Array.isArray(cfg.lockedFiles) && cfg.lockedFiles.includes(rel)) {
-    await updateConfig({ lockedFiles: cfg.lockedFiles.filter(r => r !== rel) });
+  // 清掉锁列表里的残留条目。和 rename 同理：读改写整个进配置队列，
+  // 失败只记日志——文件已经在回收站里了，抛出去会显示"删除失败"但东西确实删了。
+  try {
+    await queueConfigWrite(async () => {
+      const cur = await loadConfig();
+      if (!Array.isArray(cur.lockedFiles) || !cur.lockedFiles.includes(rel)) return;
+      const ok = await saveConfig({ ...cur, lockedFiles: cur.lockedFiles.filter(r => r !== rel) });
+      if (!ok) throw appError('E_CONFIG_WRITE', CONFIG_PATH);
+    });
+  } catch (err) {
+    console.error('清理锁定标记失败（文件已移入回收站）:', rel, err.message);
   }
   return true;
-});
+}));
 
 ipcMain.handle('list-trash', async () => readTrashIndex());
 
-ipcMain.handle('restore', async (e, id) => {
+// 同样排进 trash 链：restore 也是 read-modify-write（读索引 → 移回文件 → 删条目）。
+ipcMain.handle('restore', async (e, id) => queueWrite('trash', async () => {
   const index = await readTrashIndex();
   const item = index.items.find(i => i.id === id);
   if (!item) throw appError('E_TRASH_ITEM_MISSING');
-  const storePath = path.join(TRASH_DIR, item.store);
-  const targetFull = safeJoin(item.originalRel);
+  // 抛错而不是自动摘条目：store 名越界说明索引被写坏了，
+  // 静默删条目会连带丢掉 .trash 里那份还能人工找回的文件。
+  const storePath = trashStorePath(item.store);
+  // store 文件不在了（被手动清理/外部删除）：直接把条目摘掉，否则 rename 会抛错，
+  // 后面删条目的代码永远执行不到，回收站里留下一条每次点都失败的幽灵记录。
+  if (!fs.existsSync(storePath)) {
+    index.items = index.items.filter(i => i.id !== id);
+    await writeTrashIndex(index);
+    throw appError('E_TRASH_STORE_MISSING', item.originalRel);
+  }
+  // 还原是往库里写文件，所以走 safeJoinWritable 而不是 safeJoin：后者只拦
+  // "跳出 DATA_ROOT"，库内的 .versions/.trash/config.json 照样允许写。
+  // originalRel 来自 .trash/index.json，索引写坏之后 "config.json" 或
+  // ".versions/x/1.md" 这种值会被原地覆盖，而删除入口（trash）一直是按
+  // safeJoinWritable 卡的，还原口比删除口宽本身就不对称。
+  // 老索引里若真有越界条目，这里会抛 E_WRITE_FORBIDDEN 并把条目留在回收站，
+  // 比静默覆盖掉配置文件好。
+  const targetFull = safeJoinWritable(item.originalRel);
   await ensureDir(path.dirname(targetFull));
   let finalRel = item.originalRel;
   if (fs.existsSync(targetFull)) {
-    // 原位置已有同名，加后缀
+    // 原位置已有同名，加后缀。
+    // 注意不能写 slice(0, -ext.length)：无扩展名时 ext 是 ''，-0 === 0，
+    // slice(0, 0) 得到空串，alt 就变成 "-restored1" 被还原到数据根目录下。
+    // .gitkeep（renderer 新建目录时会创建）和被删的目录都会走到这条路径。
     const ext = path.extname(item.originalRel);
-    const base = item.originalRel.slice(0, -ext.length);
+    const base = ext ? item.originalRel.slice(0, -ext.length) : item.originalRel;
     let n = 1;
     let alt = item.originalRel;
-    while (fs.existsSync(safeJoin(alt))) {
+    while (fs.existsSync(safeJoinWritable(alt))) {
       alt = `${base}-restored${n}${ext}`;
       n++;
     }
-    await fsp.rename(storePath, safeJoin(alt));
-    dropFromCache(safeJoin(alt));
+    await fsp.rename(storePath, safeJoinWritable(alt));
+    dropFromCache(safeJoinWritable(alt));
     finalRel = alt;
   } else {
     await fsp.rename(storePath, targetFull);
@@ -668,8 +879,8 @@ ipcMain.handle('restore', async (e, id) => {
   // 还原版本目录（若存在）。若目标版本目录已存在（同名文件被删后又重建过），
   // 不覆盖，而是并到新名字下保留两份历史。
   if (item.versionStore) {
-    const vStorePath = path.join(TRASH_DIR, item.versionStore);
     try {
+      const vStorePath = trashStorePath(item.versionStore);
       if (fs.existsSync(vStorePath)) {
         const targetV = versionDirFor(finalRel);
         if (fs.existsSync(targetV)) {
@@ -694,19 +905,25 @@ ipcMain.handle('restore', async (e, id) => {
   index.items = index.items.filter(i => i.id !== id);
   await writeTrashIndex(index);
   return true;
-});
+}));
 
-ipcMain.handle('empty-trash', async () => {
+ipcMain.handle('empty-trash', async () => queueWrite('trash', async () => {
   const index = await readTrashIndex();
+  // 用 rm(recursive) 而不是 unlink：早期版本允许把目录搬进回收站，
+  // unlink 删目录会 EPERM 失败，而索引在下面被无条件清空，
+  // 结果那棵树永久留在 .trash 里且再也没有入口。
+  // 校验放在 try 里：store 名越界时抛错被记日志并跳过这一条，
+  // 而不是中断整个清空——否则后面的 writeTrashIndex 执行不到，
+  // 已经删掉的条目还留在索引里，回收站里全是点不动的幽灵记录。
   for (const item of index.items) {
-    try { await fsp.unlink(path.join(TRASH_DIR, item.store)); } catch {}
+    try { await fsp.rm(trashStorePath(item.store), { recursive: true, force: true }); } catch (e) { console.error('清空回收站条目失败:', item.store, e.message); }
     if (item.versionStore) {
-      try { await fsp.rm(path.join(TRASH_DIR, item.versionStore), { recursive: true, force: true }); } catch {}
+      try { await fsp.rm(trashStorePath(item.versionStore), { recursive: true, force: true }); } catch (e) { console.error('清空回收站版本目录失败:', item.versionStore, e.message); }
     }
   }
   await writeTrashIndex({ items: [] });
   return true;
-});
+}));
 
 ipcMain.handle('list-versions', async (e, rel) => {
   const dir = versionDirFor(rel);
@@ -724,16 +941,25 @@ ipcMain.handle('read-version', async (e, rel, file) => {
   return fsp.readFile(versionFilePath(rel, file), 'utf8');
 });
 
-ipcMain.handle('pin-version', async (e, rel, file, pinned) => {
+// 按文件排队（不同文件的星标互不影响，同一文件的连续点击必须串行）。
+// 读索引 → 改 pinned → 写回同样是 read-modify-write：并发时后写的会把
+// 前一次的星标整份覆盖掉。
+ipcMain.handle('pin-version', async (e, rel, file, pinned) => queueWrite('ver:' + String(rel), async () => {
+  // file 必须先过校验，否则非法名字会被写进索引长期留着
+  versionFilePath(rel, file);
   const index = await readVersionIndex(rel);
   index.pinned = index.pinned || {};
   if (pinned) index.pinned[file] = true; else delete index.pinned[file];
   await writeVersionIndex(rel, index);
   return true;
-});
+}));
 
-ipcMain.handle('rollback-version', async (e, rel, file) => {
-  const full = safeJoin(rel);
+// 和 save-file 同链同理由：读 prev → 存快照 → 按 prev 算 version → 写回。
+// 回滚和保存并发（点了回滚又按 Ctrl+S）时，不排队就会两边各写一次，
+// 版本号只涨一次，其中一次的内容彻底消失。
+ipcMain.handle('rollback-version', async (e, rel, file) => queueWrite('ver:' + String(rel), async () => {
+  // 回滚是往库里写内容，走写入白名单（versionFilePath 另有自己的名字校验）
+  const full = safeJoinWritable(rel);
   const versionFull = versionFilePath(rel, file);
   const versionContent = await fsp.readFile(versionFull, 'utf8');
   let prev = null;
@@ -742,10 +968,12 @@ ipcMain.handle('rollback-version', async (e, rel, file) => {
   if (prev != null && prev !== versionContent) await saveVersion(rel, prev);
   // 回滚写入（作为新一次保存，bump 自动字段）
   const toWrite = bumpAutoFields(versionContent, prev);
-  await fsp.writeFile(full, toWrite, 'utf8');
+  // save-file 有这句，这里原先漏了：目录被外部删掉后回滚会 ENOENT 失败
+  await ensureDir(path.dirname(full));
+  await writeFileAtomic(full, toWrite);
   dropFromCache(full);
   return { content: toWrite, meta: parseFrontmatter(toWrite).meta };
-});
+}));
 
 ipcMain.handle('get-meta-list', async () => {
   await ensureDirs();
@@ -757,16 +985,37 @@ ipcMain.handle('search', async (e, query) => searchAll(query));
 ipcMain.handle('get-config', async () => loadConfig());
 
 // 经 queueConfigWrite 串行化：并发调用会排队，每次都基于最新的磁盘状态做合并。
+//
+// saveConfig 的返回值必须检查。它内部把写盘异常吞成 return false（磁盘满、
+// config.json 被占用或只读、目录权限变了都会走到这），原先这里直接 await 完就
+// 扔掉结果、照常 return next，于是 set-config 正常 resolve、渲染进程把内存里的
+// state.config 当成已落盘。症状是改主题/语言/锁定当场生效，重启后全部回滚，
+// 而且没有任何提示——用户只会觉得"这软件存不住设置"。
 function updateConfig(patch) {
   return queueConfigWrite(async () => {
     const cur = await loadConfig();
     const next = { ...cur, ...(patch || {}) };
-    await saveConfig(next);
+    const ok = await saveConfig(next);
+    if (!ok) throw appError('E_CONFIG_WRITE', CONFIG_PATH);
     return next;
   });
 }
 
-ipcMain.handle('set-config', (e, cfg) => updateConfig(cfg));
+ipcMain.handle('set-config', async (e, cfg) => {
+  const next = await updateConfig(cfg);
+  // 语言改了就重建原生菜单（buildMenu 只在启动时调一次，不管这里就永远停在旧语言）
+  syncMenuLang(next.lang);
+  return next;
+});
+
+// 渲染进程确认过"没有未保存改动"之后才走到这里。
+// 菜单里不用 role:'reload'，因为那个 role 绕过渲染进程直接重载，草稿会无声丢失。
+// 注意只能注册一次：ipcMain.handle 对同一通道重复注册会直接抛
+// "Attempted to register a second handler"，那是在模块顶层执行的，整个应用起不来。
+ipcMain.handle('reload-window', () => {
+  if (win && !win.isDestroyed()) win.webContents.reload();
+  return true;
+});
 
 ipcMain.handle('confirm', async (e, message) => {
   const res = await dialog.showMessageBox(win, {
@@ -790,16 +1039,28 @@ ipcMain.handle('export-zip', async () => {
     filters: [{ name: 'ZIP', extensions: ['zip'] }]
   });
   if (res.canceled || !res.filePath) return { ok: false };
+  // 关键：必须监听输出流的 error。原先只挂了 archive 的 error，于是
+  // 目标不可写（路径无权限/磁盘满/被占用）时 close 仍会触发 → resolve →
+  // 返回 {ok:true}，用户被告知"备份成功"而磁盘上根本没有文件；
+  // 目标是个目录时两个 error 都不触发，Promise 永不 settle，渲染进程的 await 永久挂起。
+  // 备份是最不该骗人的功能，这里改成任一路失败都 reject，并清掉半截文件。
   await new Promise((resolve, reject) => {
+    let settled = false;
+    const done = (fn, arg) => { if (!settled) { settled = true; fn(arg); } };
     const out = fs.createWriteStream(res.filePath);
     const archive = archiver('zip', { zlib: { level: 9 } });
-    out.on('close', resolve);
-    archive.on('error', reject);
+    out.on('error', (err) => done(reject, appError('E_EXPORT_WRITE', err.message)));
+    out.on('close', () => done(resolve));
+    archive.on('error', (err) => done(reject, appError('E_EXPORT_ARCHIVE', err.message)));
     archive.pipe(out);
     archive.directory(PROMPTS_DIR, 'prompts', {});
     archive.directory(WORKFLOWS_DIR, 'workflows', {});
     archive.directory(TEMPLATES_DIR, 'templates', {});
-    archive.finalize();
+    archive.finalize().catch((err) => done(reject, appError('E_EXPORT_ARCHIVE', err.message)));
+  }).catch(async (err) => {
+    // 失败时别留下半截 zip 让用户误当成可用备份
+    try { await fsp.unlink(res.filePath); } catch {}
+    throw err;
   });
   return { ok: true, path: res.filePath };
 });
@@ -948,6 +1209,232 @@ function installSelfTestDialogStubs() {
   dialog.showSaveDialog = async () => takeNext({ canceled: true });
   dialog.showOpenDialog = async () => takeNext({ canceled: true, filePaths: [] });
   console.log('[selftest] 已启用对话框桩，队列文件: ' + queuePath);
+}
+
+// ---------- 安全回归（跟着功能自检一起跑） ----------
+// 这几条都要先把磁盘弄成"坏状态"才能测：伪造被改坏的 .trash/index.json、
+// 把 config.json 占成目录让原子写必然失败。渲染进程没有 fs，构造不出前置条件，
+// 所以放在主进程。全程只动 PFM_DATA_DIR 指向的临时目录。
+async function runSecurityRegression(targetWin) {
+  const out = [];
+  const check = (name, ok, detail) => out.push([name, !!ok, detail == null ? '' : String(detail)]);
+  // 从渲染进程发起 IPC：这样走的是和用户操作完全相同的链路，
+  // 而不是在主进程里直接调 handler 内部函数（那样测不到 ipcMain 层）。
+  const viaIpc = (expr) => targetWin.webContents.executeJavaScript(
+    `(async () => { try { const r = await ${expr}; return { ok: true, value: r }; }
+      catch (e) { return { ok: false, message: String(e && e.message || e) }; } })()`, true);
+
+  // ---- 1. 回收站索引被改坏时不能删到 .trash 外面 ----
+  // .trash/index.json 是普通 JSON 文件，同步盘冲突、外部编辑器、上次崩溃写坏
+  // 都会让 store 变成 "../XXX"。empty-trash 对它调 rm(recursive, force)，
+  // force 连"不存在"都不报错，删错了不留任何痕迹。
+  const outsideDir = path.join(DATA_ROOT, 'SEC-MUST-SURVIVE');
+  const outsideFile = path.join(outsideDir, 'keep.txt');
+  try {
+    await ensureDir(outsideDir);
+    await fsp.writeFile(outsideFile, 'must survive', 'utf8');
+    await ensureDir(TRASH_DIR);
+    // 直接写坏索引，绕过所有正常入口
+    await fsp.writeFile(path.join(TRASH_DIR, 'index.json'), JSON.stringify({
+      items: [
+        { id: 'sec-escape-1', originalRel: 'prompts/x.md', name: 'x.md',
+          trashedAt: new Date().toISOString(), store: '../SEC-MUST-SURVIVE', versionStore: null },
+        { id: 'sec-escape-2', originalRel: 'prompts/y.md', name: 'y.md',
+          trashedAt: new Date().toISOString(), store: 'nested/../../SEC-MUST-SURVIVE', versionStore: null }
+      ]
+    }, null, 2), 'utf8');
+
+    const emptied = await viaIpc('window.promptFlowApi.emptyTrash()');
+    check('清空回收站在索引被改坏时仍返回成功', emptied.ok === true, emptied.message);
+    check('越界的 store 没有删到 .trash 之外的目录', fs.existsSync(outsideDir));
+    check('越界的 store 没有删到 .trash 之外的文件', fs.existsSync(outsideFile));
+
+    // restore 走的是同一批 store 字段，同样要挡住
+    await fsp.writeFile(path.join(TRASH_DIR, 'index.json'), JSON.stringify({
+      items: [{ id: 'sec-escape-3', originalRel: 'prompts/z.md', name: 'z.md',
+        trashedAt: new Date().toISOString(), store: '../SEC-MUST-SURVIVE', versionStore: null }]
+    }, null, 2), 'utf8');
+    const restored = await viaIpc(`window.promptFlowApi.restore('sec-escape-3')`);
+    check('恢复越界条目会被拒绝而不是照做', restored.ok === false, JSON.stringify(restored));
+    check('恢复失败后越界目录依然完好', fs.existsSync(outsideFile));
+  } catch (e) {
+    check('回收站越界防护用例执行完成', false, e && e.message);
+  } finally {
+    try { await fsp.writeFile(path.join(TRASH_DIR, 'index.json'), JSON.stringify({ items: [] }, null, 2), 'utf8'); } catch {}
+    try { await fsp.rm(outsideDir, { recursive: true, force: true }); } catch {}
+  }
+
+  // ---- 2. 配置写盘失败必须传到渲染进程 ----
+  // saveConfig 把写盘异常吞成 return false。原先 updateConfig 扔掉这个返回值，
+  // set-config 照常 resolve，渲染进程把内存值当成已落盘——改完当场生效、重启全丢。
+  // 这里把 config.json 换成目录：writeFileAtomic 最后那步 rename 必然 EPERM/EISDIR。
+  let cfgBackup = null;
+  try {
+    try { cfgBackup = await fsp.readFile(CONFIG_PATH, 'utf8'); } catch { cfgBackup = null; }
+    const before = await viaIpc('window.promptFlowApi.getConfig()');
+    const themeBefore = before.ok ? before.value.theme : null;
+
+    try { await fsp.unlink(CONFIG_PATH); } catch {}
+    await fsp.mkdir(CONFIG_PATH, { recursive: true });
+    const blocked = await viaIpc(`window.promptFlowApi.setConfig({ theme: 'sec-probe-theme' })`);
+    check('配置写盘失败时 setConfig 抛错而不是假装成功', blocked.ok === false, JSON.stringify(blocked));
+    check('失败信息带 E_CONFIG_WRITE 错误码',
+      blocked.ok === false && /E_CONFIG_WRITE/.test(blocked.message || ''), blocked.message);
+
+    // 复原后必须能正常写，且刚才那次失败的值没有残留在磁盘上
+    await fsp.rm(CONFIG_PATH, { recursive: true, force: true });
+    if (cfgBackup != null) await fsp.writeFile(CONFIG_PATH, cfgBackup, 'utf8');
+    const after = await viaIpc(`window.promptFlowApi.setConfig({ theme: ${JSON.stringify(themeBefore || 'light')} })`);
+    check('恢复可写后 setConfig 重新正常工作', after.ok === true, JSON.stringify(after));
+    let onDisk = null;
+    try { onDisk = JSON.parse(await fsp.readFile(CONFIG_PATH, 'utf8')); } catch {}
+    check('写盘失败的值没有留在 config.json 里',
+      !onDisk || onDisk.theme !== 'sec-probe-theme', onDisk && onDisk.theme);
+  } catch (e) {
+    check('配置写失败用例执行完成', false, e && e.message);
+  } finally {
+    try {
+      const st = fs.existsSync(CONFIG_PATH) ? await fsp.stat(CONFIG_PATH) : null;
+      if (st && st.isDirectory()) await fsp.rm(CONFIG_PATH, { recursive: true, force: true });
+      if (cfgBackup != null && !fs.existsSync(CONFIG_PATH)) await fsp.writeFile(CONFIG_PATH, cfgBackup, 'utf8');
+    } catch {}
+  }
+
+  // ---- 3. 回收站里的文件只能还原回三个内容目录 ----
+  // restore 原先用 safeJoin 决定写到哪，只挡住"跳出 DATA_ROOT"，
+  // 挡不住 originalRel 指向 config.json 或 .versions/**。而删除入口用的是
+  // safeJoinWritable，进得来的位置和出得去的位置标准不一致。
+  try {
+    await ensureDir(TRASH_DIR);
+    const payload = path.join(TRASH_DIR, 'sec-payload.md');
+    await fsp.writeFile(payload, 'payload', 'utf8');
+    await fsp.writeFile(path.join(TRASH_DIR, 'index.json'), JSON.stringify({
+      items: [{ id: 'sec-target', originalRel: 'config.json', name: 'config.json',
+        trashedAt: new Date().toISOString(), store: 'sec-payload.md', versionStore: null }]
+    }, null, 2), 'utf8');
+    const res = await viaIpc(`window.promptFlowApi.restore('sec-target')`);
+    check('还原到 config.json 被写入白名单拦住', res.ok === false, JSON.stringify(res));
+    let cfgIntact = true;
+    try {
+      const raw = await fsp.readFile(CONFIG_PATH, 'utf8');
+      cfgIntact = raw !== 'payload';
+    } catch { cfgIntact = true; }
+    check('config.json 没被回收站里的文件覆盖', cfgIntact);
+  } catch (e) {
+    check('还原白名单用例执行完成', false, e && e.message);
+  } finally {
+    try { await fsp.writeFile(path.join(TRASH_DIR, 'index.json'), JSON.stringify({ items: [] }, null, 2), 'utf8'); } catch {}
+    try { await fsp.unlink(path.join(TRASH_DIR, 'sec-payload.md')); } catch {}
+  }
+
+  // ---- 4. 并发保存不能丢自增、不能丢快照 ----
+  // save-file 是 read-modify-write：读磁盘上的 prev → 存快照 → 用 prev 算新 version → 写回。
+  // 原先它不排队，几路并发都读到同一份 prev，算出同一个 version，后写的整个盖掉前面的。
+  // 实测连发 5 次：version 只从 1 涨到 2（丢 4 次自增），5 条快照只落 3 条，
+  // 还有一次因为同毫秒快照撞名直接抛 EPERM 给用户。
+  // 触发不需要手快：Ctrl+S 和保存按钮都没防重入，按住就连发；退出编辑态时也会再走一次。
+  const J = (v) => JSON.stringify(v);
+  const mkDoc = (body) => ['---', 'title: sec-concurrency', '---', body].join('\n');
+  const relC = 'prompts/testing/sec-concurrency.md';
+  const relS = 'prompts/testing/sec-timestamp.md';
+  try {
+    const created = await viaIpc(`window.promptFlowApi.createFile(${J(relC)}, ${J(mkDoc('base'))})`);
+    if (!created.ok) {
+      check('并发用例前置：创建文件', false, created.message);
+    } else {
+      const before = await viaIpc(`window.promptFlowApi.readFile(${J(relC)})`);
+      const v0 = before.ok ? Number(before.value.meta.version) : null;
+
+      // 同时发 N 个内容各不相同的保存，每个都该让 version +1
+      const N = 5;
+      const calls = [];
+      for (let i = 0; i < N; i++) calls.push(`window.promptFlowApi.saveFile(${J(relC)}, ${J(mkDoc('body-' + i))})`);
+      const settled = await targetWin.webContents.executeJavaScript(
+        `(async () => { const rs = await Promise.allSettled([${calls.join(',')}]);
+           return rs.map(r => r.status === 'fulfilled' ? 'ok' : String(r.reason && r.reason.message || r.reason)); })()`, true);
+      check('并发保存全部成功（没有同毫秒撞名抛 EPERM）',
+        settled.every(s => s === 'ok'), JSON.stringify(settled));
+
+      const after = await viaIpc(`window.promptFlowApi.readFile(${J(relC)})`);
+      const vN = after.ok ? Number(after.value.meta.version) : null;
+      check(`并发 ${N} 次保存后 version 应为 ${v0 + N}`, vN === v0 + N,
+        `实际 version=${vN}（起始 ${v0}，丢失 ${v0 + N - vN} 次自增）`);
+
+      // 注意这条测的是 writeFileAtomic，不是队列：临时文件 + rename 保证任何时刻
+      // 读到的都是某一次写入的完整内容。做反向对照时撤掉队列它依然是绿的（实测过），
+      // 所以别把它算成并发覆盖——并发覆盖靠上面 version 和下面快照数那两条。
+      const finalBody = after.ok ? String(after.value.content) : '';
+      const hits = [];
+      for (let i = 0; i < N; i++) if (finalBody.includes('body-' + i)) hits.push(i);
+      check('原子写：磁盘正文是某一次保存的完整内容（不是半截或交错）', hits.length === 1,
+        `命中 ${JSON.stringify(hits)}`);
+
+      // N 次内容不同的保存，前 N-1 次的旧内容 + 初始内容 = N 条快照
+      let snaps = [];
+      try { snaps = (await fsp.readdir(versionDirFor(relC))).filter(f => f.endsWith('.md')); } catch {}
+      check(`并发保存应产生 ${N} 条版本快照`, snaps.length === N,
+        `实际 ${snaps.length} 条: ${JSON.stringify(snaps)}`);
+    }
+
+    // 快照撞名：saveVersion 必须往后挪毫秒，不能覆盖已存在的快照。
+    //
+    // 不能用"连发几次保存"来测：每次 IPC 往返实测约 12ms，永远撞不到同一毫秒，
+    // 那样写出来的断言在修复被撤掉时依然是绿的（第一版就是这么写的，
+    // 分离对照里证实了它测不到东西）。
+    // 所以这里直接在主进程调 saveVersion，并预先把它接下来几毫秒会用到的名字
+    // 全部占掉——这样它必然进入挪名分支，行为完全可判定：
+    //   修复在  → 占位文件全部原样保留，快照落在一个新名字上
+    //   修复不在 → 快照直接 rename 到占位名上，把它覆盖掉（Windows 上还可能抛 EPERM）
+    const dirT = versionDirFor(relS);
+    await ensureDir(dirT);
+    // 占名窗口要同时满足两头：
+    //   够宽——写这批占位文件本身要花时间（实测 25 次 writeFileSync 约 12ms），
+    //         窗口必须宽到把这段耗时盖住，否则 saveVersion 起手那一毫秒已经
+    //         漂到窗口外面，根本不会撞名，断言就又变成"永远为真"；
+    //   够窄——总数必须低于 MAX_UNPINNED_VERSIONS（30），否则 saveVersion 里的
+    //         pruneVersions 会把最旧的占位文件裁掉，看起来像"被覆盖"。
+    // 25ms 窗口写完约剩 12ms 余量。用同步写是为了让这段尽量短。
+    const DECOY_MS = 25;
+    const decoyNames = [];
+    const t0 = new Date();
+    for (let i = 0; i < DECOY_MS; i++) decoyNames.push(timestampName(new Date(t0.getTime() + i)) + '.md');
+    for (const n of decoyNames) fs.writeFileSync(path.join(dirT, n), 'DECOY', 'utf8');
+
+    // 前置断言：saveVersion 此刻会算出的名字必须已经被占掉，否则这个用例什么都没测到。
+    // 余量被机器拖慢吃光时这里会直接红，而不是假装通过。
+    const wouldPick = timestampName(new Date()) + '.md';
+    check('撞名用例前置：目标快照名确实已被占用', decoyNames.includes(wouldPick),
+      `将要使用 ${wouldPick}，占名窗口 ${decoyNames[0]} .. ${decoyNames[decoyNames.length - 1]}`);
+
+    await saveVersion(relS, 'SNAPSHOT-CONTENT');
+
+    const survived = [];
+    for (const n of decoyNames) {
+      let raw = null;
+      try { raw = await fsp.readFile(path.join(dirT, n), 'utf8'); } catch {}
+      if (raw !== 'DECOY') survived.push(n + '=' + JSON.stringify(raw));
+    }
+    check('快照撞名时没有覆盖已存在的版本', survived.length === 0,
+      `被改写/丢失的占位文件: ${JSON.stringify(survived)}`);
+
+    const allT = (await fsp.readdir(dirT)).filter(f => f.endsWith('.md'));
+    const fresh = allT.filter(f => !decoyNames.includes(f));
+    check('快照撞名时改用新文件名落盘', fresh.length === 1, `新增文件: ${JSON.stringify(fresh)}`);
+    if (fresh.length === 1) {
+      const body = await fsp.readFile(path.join(dirT, fresh[0]), 'utf8');
+      check('挪名后的快照内容正确', body === 'SNAPSHOT-CONTENT', JSON.stringify(body).slice(0, 80));
+    }
+  } catch (e) {
+    check('并发保存用例执行完成', false, e && e.message);
+  } finally {
+    // 这几个文件是用例自己造的，留着会污染后续只读体检和搜索用例的计数
+    for (const r of [relC, relS]) {
+      try { await fsp.rm(path.join(DATA_ROOT, r), { force: true }); } catch {}
+      try { await fsp.rm(versionDirFor(r), { recursive: true, force: true }); } catch {}
+    }
+  }
+
+  return out;
 }
 
 // ---------- 自检（PFM_SELFTEST=1） ----------
@@ -1126,6 +1613,24 @@ function attachSelfTest(targetWin) {
         const cancel = await api.exportZip();
         check('用户取消导出时返回 ok:false', cancel.ok === false, JSON.stringify(cancel));
       }
+
+      // 12. DOM clobbering 防护
+      // 提示词正文是纯文本，但渲染后要插进 innerHTML。DOMPurify 默认放行 id，
+      // 而 index.html 里 #preview 排在 <textarea id="editor"> 之前，
+      // 所以正文里一个 <div id="editor"> 就能让 getElementById('editor')
+      // 命中那个 div，保存逻辑读到 undefined，用户改动无声丢失。
+      const clob = renderMarkdown('<div id="editor">x</div><div name="editor">y</div>');
+      check('渲染正文会剥掉 id/name 属性', !/\\sid=/.test(clob) && !/\\sname=/.test(clob), clob);
+      const probe = document.createElement('div');
+      probe.innerHTML = clob;
+      // 插到 body 最前面：文档顺序一定早于真正的 textarea，
+      // 这样 id 若没被剥掉，getElementById 会先命中注入的节点。
+      document.body.insertBefore(probe, document.body.firstChild);
+      const hit = document.getElementById('editor');
+      const hitTag = hit ? hit.tagName : 'null';
+      probe.remove();
+      check('注入 id="editor" 后 getElementById 仍命中真正的 textarea',
+        hitTag === 'TEXTAREA', hitTag);
 
       // 清理
       const leftovers = (await api.getMetaList()).filter(mm => mm.rel !== renamed && mm.top === 'prompts');
@@ -1307,6 +1812,14 @@ function attachSelfTest(targetWin) {
             for (const [name, ok, detail] of fnResults) {
               if (ok) console.log('[selftest:fn] PASS ' + name);
               else fail('[fn] ' + name + (detail ? ' → ' + detail : ''));
+            }
+            // 安全回归：这几条必须在主进程里跑，因为要先用 fs 把磁盘弄成坏状态
+            // （伪造损坏的回收站索引、把 config.json 占成目录），再走真实 IPC 看行为。
+            // 渲染进程没有 fs，构造不出这些前置条件。
+            const secResults = await runSecurityRegression(targetWin);
+            for (const [name, ok, detail] of secResults) {
+              if (ok) console.log('[selftest:sec] PASS ' + name);
+              else fail('[sec] ' + name + (detail ? ' → ' + detail : ''));
             }
           }
         }
@@ -1511,15 +2024,55 @@ function attachNavigationGuard(targetWin) {
   });
 }
 
+// 恢复窗口位置前必须校验。config.windowBounds 直接来自磁盘，而 set-config
+// 又允许渲染进程写任意字段，所以这里可能是任何东西：
+//   - 拔掉副屏后，上次存的 x/y 落在已不存在的显示器上 → 窗口开在屏幕外，
+//     用户看不到也拖不回来，唯一的恢复手段是手删 config.json；
+//   - width/height 为 0 / 负数 / NaN / 字符串 → 窗口尺寸异常甚至起不来。
+// 规则：尺寸必须是有限正数并夹到最小值；位置必须整体落在某个显示器的可见区域内，
+// 否则丢弃 x/y 让 Electron 自己居中。
+const MIN_W = 800, MIN_H = 500;
+function sanitizeWindowBounds(raw) {
+  const b = raw && typeof raw === 'object' ? raw : {};
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  // 尺寸和位置的容错方式不同：
+  // 尺寸是垃圾（0/负数/NaN/字符串）就整个回落默认值，再夹一次最小值兜底。
+  // 只夹最小值不够——存进 0 会变成 800×500 这种用户没要求过的窗口，
+  // 回落默认更接近"当作没存过"。
+  const dim = (v, def, min) => {
+    const n = num(v);
+    return Math.max(min, n != null && n > 0 ? n : def);
+  };
+  const w = dim(b.width, 1200, MIN_W);
+  const h = dim(b.height, 780, MIN_H);
+  const out = { width: Math.round(w), height: Math.round(h) };
+  const x = num(b.x), y = num(b.y);
+  if (x == null || y == null) return out; // 没存过位置：交给 Electron 居中
+  let displays = [];
+  try { displays = screen.getAllDisplays(); } catch { return out; }
+  // 标题栏必须有一块落在某个显示器的工作区内，用户才抓得住窗口
+  const GRAB = 80; // 认为"抓得住"所需的最小可见宽度
+  const visible = displays.some(d => {
+    const a = d.workArea;
+    return x + w - GRAB > a.x && x + GRAB < a.x + a.width &&
+           y >= a.y - 8 && y + GRAB < a.y + a.height;
+  });
+  if (!visible) {
+    console.log('[bounds] 上次的窗口位置不在任何显示器内，已改为居中:', JSON.stringify({ x, y }));
+    return out;
+  }
+  out.x = Math.round(x);
+  out.y = Math.round(y);
+  return out;
+}
+
 async function createWindow() {
   const config = await loadConfig();
+  const bounds = sanitizeWindowBounds(config.windowBounds);
   win = new BrowserWindow({
-    width: config.windowBounds.width,
-    height: config.windowBounds.height,
-    x: config.windowBounds.x,
-    y: config.windowBounds.y,
-    minWidth: 800,
-    minHeight: 500,
+    ...bounds,
+    minWidth: MIN_W,
+    minHeight: MIN_H,
     title: 'Prompt Flow Manager',
     backgroundColor: config.theme === 'dark' ? '#1e1e1e' : '#ffffff',
     webPreferences: {
@@ -1544,11 +2097,17 @@ async function createWindow() {
   // read-modify-write，会和渲染进程那五个 debounce（tabs/recent/locked/
   // sidebarWidth/expandedPaths）互相覆盖字段。updateConfig 内部有写队列。
   let boundsTimer = null;
+  // 最大化时 getBounds() 返回的是铺满屏幕的尺寸。直接存下来，下次启动会以
+  // "非最大化但尺寸等于屏幕"的样子打开——看着像最大化，实际拖不动也还原不了。
+  // 存 getNormalBounds()（还原后的尺寸）+ 一个 maximized 标记，恢复时再 maximize()。
+  const currentBounds = () => {
+    if (win.isMaximized()) return { ...win.getNormalBounds(), maximized: true };
+    return { ...win.getBounds(), maximized: false };
+  };
   const flushBounds = async () => {
     if (!win || win.isDestroyed()) return;
-    const bounds = win.getBounds();
     try {
-      await updateConfig({ windowBounds: bounds });
+      await updateConfig({ windowBounds: currentBounds() });
     } catch (e) {
       console.error('保存窗口位置失败:', e);
     }
@@ -1569,45 +2128,67 @@ async function createWindow() {
     if (boundsTimer) { clearTimeout(boundsTimer); boundsTimer = null; }
     if (win && !win.isDestroyed()) {
       try {
-        const bounds = win.getBounds();
+        const bounds = currentBounds();
         const cur = fs.existsSync(CONFIG_PATH) ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) : {};
         cur.windowBounds = bounds;
-        fs.writeFileSync(CONFIG_PATH, JSON.stringify(cur, null, 2), 'utf8');
+        // 同步版的原子写：临时文件 + rename。异步 writeFileAtomic 在 close
+        // 回调里等不到，但截断风险是一样的——这里崩在半路，config.json 就废了。
+        const tmp = CONFIG_PATH + '.tmp-close';
+        fs.writeFileSync(tmp, JSON.stringify(cur, null, 2), 'utf8');
+        fs.renameSync(tmp, CONFIG_PATH);
       } catch (e) { console.error('关窗保存尺寸失败:', e); }
     }
   });
 
-  buildMenu();
+  // win 是模块级单例，销毁后必须置空。send() 只检查 `win &&`，
+  // macOS 下关窗后应用还活着、菜单仍可点，Cmd+N 会打到已销毁对象上
+  // 抛 "Object has been destroyed"。
+  win.on('closed', () => { win = null; });
+
+  // 上次是最大化状态：先按还原尺寸建窗，再最大化，这样"取消最大化"能回到合理尺寸
+  if (config.windowBounds && config.windowBounds.maximized) win.maximize();
+
+  // 用配置里的语言建菜单。不能直接 buildMenu()：menuLang 初始是 null，
+  // 英文用户启动时会先看到一整套中文菜单，直到手动切一次语言才更新。
+  syncMenuLang(config.lang);
 }
 
 function buildMenu() {
   const isMac = process.platform === 'darwin';
-  const send = (action) => win && win.webContents.send('menu-action', action);
+  // 必须同时检查 isDestroyed：win 置空是在 'closed' 事件里，而 'close' 到 'closed'
+  // 之间窗口已销毁但引用还在，此刻点菜单就会抛 "Object has been destroyed"。
+  const send = (action) => {
+    if (win && !win.isDestroyed()) win.webContents.send('menu-action', action);
+  };
   const template = [
     {
-      label: '文件',
+      label: mt('menuFile'),
       submenu: [
-        { label: '新建提示词', accelerator: 'CmdOrCtrl+N', click: () => send('new-prompt') },
-        { label: '新建工作流', click: () => send('new-workflow') },
+        { label: mt('menuNewPrompt'), accelerator: 'CmdOrCtrl+N', click: () => send('new-prompt') },
+        { label: mt('menuNewWorkflow'), click: () => send('new-workflow') },
         { type: 'separator' },
-        { label: '导出备份(ZIP)', accelerator: 'CmdOrCtrl+E', click: () => send('export') },
-        { label: '清空回收站', click: () => send('empty-trash') },
+        { label: mt('menuExportZip'), accelerator: 'CmdOrCtrl+E', click: () => send('export') },
+        { label: mt('menuEmptyTrash'), click: () => send('empty-trash') },
         { type: 'separator' },
         isMac ? { role: 'close' } : { role: 'quit' }
       ]
     },
     {
-      label: '编辑',
+      label: mt('menuEdit'),
       submenu: [
         { role: 'undo' }, { role: 'redo' }, { type: 'separator' },
         { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }
       ]
     },
     {
-      label: '视图',
+      label: mt('menuView'),
       submenu: [
-        { label: '切换主题', accelerator: 'CmdOrCtrl+T', click: () => send('toggle-theme') },
-        { role: 'reload' },
+        // 主题快捷键统一由渲染进程的 Ctrl+Shift+L 承担（index.html 的 tooltip 也这么写）。
+        // 这里原先挂 CmdOrCtrl+T，等于同一功能两个键，而且和浏览器习惯的"新标签页"撞。
+        { label: mt('menuToggleTheme'), click: () => send('toggle-theme') },
+        // role:'reload' 直接重载，编辑中的草稿无声消失。改成先问渲染进程，
+        // 由它检查脏状态（渲染侧 menu-action 处理里带确认），干净时才真的 reload。
+        { label: mt('menuReload'), accelerator: 'CmdOrCtrl+R', click: () => send('request-reload') },
         { role: 'toggleDevTools' },
         { type: 'separator' },
         { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' },
@@ -1617,6 +2198,14 @@ function buildMenu() {
     }
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+// 语言变了就重建菜单，否则切到 English 后原生菜单仍是中文。
+function syncMenuLang(lang) {
+  const next = lang === 'en' ? 'en' : 'zh';
+  if (next === menuLang) return;
+  menuLang = next;
+  buildMenu();
 }
 
 // ---------- 单实例 ----------
@@ -1643,6 +2232,9 @@ if (SINGLE_INSTANCE && !app.requestSingleInstanceLock()) {
 
 function bootstrap() {
 app.whenReady().then(async () => {
+  // activate 必须在 createWindow 之前注册：注册在后面时，一旦 createWindow 抛错
+  // 就永远注册不上（macOS 下点 Dock 图标再也开不出窗口）。
+  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
   if (process.env.PFM_SELFTEST_BENCH) {
     if (!process.env.PFM_DATA_DIR) {
       console.error('[bench] 必须设置 PFM_DATA_DIR，拒绝往真实库里写压测数据');
@@ -1657,10 +2249,30 @@ app.whenReady().then(async () => {
   if (process.env.PFM_SELFTEST === '1' && process.env.PFM_SELFTEST_DIALOGS) {
     installSelfTestDialogStubs();
   }
-  ensureSeedData();
-  await ensureDirs();
-  await createWindow();
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  // 启动链路里的异常必须自己兜住。这是个 async 回调，抛出去就是主进程的
+  // unhandledRejection：没有窗口、没有对话框、也不退出，只剩一个僵死进程，
+  // 用户得去任务管理器杀。数据目录只读（放在受管控目录、被同步盘锁住、
+  // 磁盘满）时 ensureDirs 就会抛，而 ensureSeedData 自己把异常吞了，
+  // 连日志都看不到根因。
+  try {
+    ensureSeedData();
+    await ensureDirs();
+    await createWindow();
+  } catch (e) {
+    console.error('[bootstrap] 启动失败:', e && e.stack ? e.stack : e);
+    // 至少让用户知道是哪里出了问题、数据目录在哪，而不是对着一个不存在的窗口。
+    try {
+      dialog.showErrorBox('Prompt Flow Manager 启动失败', [
+        '无法初始化数据目录：',
+        DATA_ROOT,
+        '',
+        '常见原因：目录只读、被同步盘/杀软占用、磁盘已满。',
+        '',
+        String(e && e.message ? e.message : e)
+      ].join('\n'));
+    } catch {}
+    app.exit(1);
+  }
 });
 }
 

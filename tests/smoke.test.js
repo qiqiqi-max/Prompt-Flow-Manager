@@ -25,7 +25,7 @@ console.log('冒烟测试');
 section('关键文件存在性');
 const required = [
   'electron-main.js', 'preload.js', 'lib/zip-import.js', 'scripts/sync-vendor.js',
-  'src/index.html', 'src/styles.css', 'src/renderer.js', 'src/i18n.js',
+  'src/index.html', 'src/styles.css', 'src/renderer.js', 'src/i18n.js', 'src/frontmatter.js',
   'src/vendor/marked.umd.js', 'src/vendor/purify.min.js', 'src/vendor/diff-match-patch.js',
   'package.json', 'build/icon.png', 'prompt-flow-manager.ico', '.gitignore'
 ];
@@ -61,11 +61,22 @@ assert(!!(pkg.dependencies && pkg.dependencies.archiver), 'archiver 在 dependen
 for (const p of ['lib/**/*', 'src/**/*', 'preload.js']) {
   assert(pkg.build.files.includes(p), 'build.files 包含 ' + p);
 }
+// 会被 sync-vendor 拷进 src/vendor/ 的三个库必须锁死到确定版本。
+// 理由：vendor 副本是提交进仓库的，而 ^x.y.z 允许 npm install 装到别的版本，
+// 于是"package.json 声明的版本"和"实际加载的那份文件"可以静默不一致，
+// 出问题时按声明的版本号去查 changelog 会查错。
+// DOMPurify 尤其重要：sandbox 是关的（见 webPreferences 注释），
+// 它是提示词正文渲染唯一的 XSS 边界，版本必须是确定的。
+for (const dep of ['dompurify', 'marked', 'diff-match-patch']) {
+  const range = (pkg.devDependencies || {})[dep] || '';
+  assert(/^\d+\.\d+\.\d+$/.test(range), dep + ' 锁定到确定版本（当前 ' + range + '）');
+}
+assert(!!(pkg.engines && pkg.engines.node), '声明了 engines.node');
 
 section('JS 语法检查');
 const jsFiles = [
   'electron-main.js', 'preload.js', 'lib/zip-import.js', 'scripts/sync-vendor.js',
-  'src/renderer.js', 'src/i18n.js', 'tests/smoke.test.js',
+  'src/renderer.js', 'src/i18n.js', 'src/frontmatter.js', 'tests/smoke.test.js',
   'src/vendor/marked.umd.js', 'src/vendor/purify.min.js', 'src/vendor/diff-match-patch.js'
 ];
 for (const f of jsFiles) {
@@ -102,7 +113,7 @@ assert(!/\brequire\s*\(/.test(rendererSrc), 'renderer.js 不再使用 require');
 assert(!/^\s*(const|let|var)\s+I18N\b/m.test(rendererSrc), 'renderer.js 未重复声明 I18N');
 const i18nDecls = (fs.readFileSync(path.join(root, 'src/i18n.js'), 'utf8').match(/^\s*(const|let|var)\s+I18N\b/gm) || []).length;
 assert(i18nDecls === 1, 'I18N 全局只声明一次');
-for (const v of ['vendor/marked.umd.js', 'vendor/purify.min.js', 'vendor/diff-match-patch.js', 'i18n.js', 'renderer.js']) {
+for (const v of ['vendor/marked.umd.js', 'vendor/purify.min.js', 'vendor/diff-match-patch.js', 'i18n.js', 'frontmatter.js', 'renderer.js']) {
   assert(htmlSrc.includes('src="' + v + '"'), 'index.html 引入了 ' + v);
 }
 assert(/Content-Security-Policy/.test(htmlSrc), 'index.html 有 CSP');
@@ -147,10 +158,27 @@ try {
 } catch (e) { loopGuard = /^E_TOO_MANY_DUPES\b/.test(e.message); }
 assert(loopGuard, '候选名耗尽时抛错，不会死循环');
 
-// sanitizeTitle：frontmatter 的 title 会变成文件名，必须挡住路径穿越
-assert(sanitizeTitle('../../evil') === '_.._evil' || !sanitizeTitle('../../evil').includes('/'), 'title 中的路径分隔符被清除');
+// sanitizeTitle：frontmatter 的 title 会变成文件名，必须挡住路径穿越。
+// 注意别写成 `A === '具体值' || 弱条件` 那种形式：这里原先第一个子句其实是 false
+// （真实输出是 '__.._evil' 而不是 '_.._evil'），全靠后半句"不含 /"兜着，
+// 于是穿越防护退化成只查一个字符，改坏了也测不出来。改成逐条断言真正的保证。
+{
+  const traversal = sanitizeTitle('../../evil');
+  assert(!/[\\/]/.test(traversal), 'title 中的路径分隔符被清除（得到 ' + traversal + '）');
+  assert(!traversal.startsWith('.'), 'title 不以点开头（否则会变成隐藏文件/被目录遍历跳过）');
+  // 关键性质：清洗后的名字拼进目录里不能跑出这个目录
+  const joined = path.join('/lib/prompts', traversal + '.md');
+  assert(joined.startsWith(path.join('/lib/prompts') + path.sep), '清洗后的名字拼路径不会逃出目标目录');
+  // 纯点号的标题不能产出 "." / ".." 这种在文件系统里有特殊含义的名字
+  for (const raw of ['.', '..', '....']) {
+    const out = sanitizeTitle(raw);
+    assert(out !== '.' && out !== '..', 'title "' + raw + '" 不会产出 . 或 ..（得到 ' + out + '）');
+  }
+}
 assert(!sanitizeTitle('a\\b:c*d?e"f<g>h|i').match(/[\\/:*?"<>|]/), 'Windows 非法字符被清除');
 assert(sanitizeTitle('   ') === '未命名', '空标题回退为默认名');
+// Windows 下文件名结尾的点和空格会被静默吃掉，导致"写入的名字"和"磁盘上的名字"不一致
+assert(!/[. ]$/.test(sanitizeTitle('evil. ')), 'title 结尾的点和空格被清除');
 
 section('ZIP 真实往返（压缩 → 解压）');
 (async () => {

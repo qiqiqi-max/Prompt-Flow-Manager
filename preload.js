@@ -32,6 +32,8 @@ const api = {
   removeProjectType: (t) => ipcRenderer.invoke('remove-project-type', t),
   importSingle: () => ipcRenderer.invoke('import-single'),
   importZip: () => ipcRenderer.invoke('import-zip'),
+  // 菜单的"重新加载"先问渲染进程有没有未保存改动，确认后再由主进程真的重载。
+  reloadWindow: () => ipcRenderer.invoke('reload-window'),
   onMenuAction: (cb) => {
     const handler = (e, action) => cb(action);
     ipcRenderer.on('menu-action', handler);

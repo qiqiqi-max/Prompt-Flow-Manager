@@ -76,6 +76,7 @@ const state = {
   currentContent: '',      // 文件原始内容（含 frontmatter）
   currentMeta: {},
   editMode: false,
+  editBaseline: '',           // 进入编辑时的内容快照，用于脏判断（见 isDirty）
   historyRel: null,
   filter: { stage: '', type: '', tag: '' },
   expandedPaths: new Set(),  // 文件树展开状态记忆（存目录的 rel）
@@ -97,27 +98,11 @@ const saveExpandedPathsDebounced = debounce(async () => {
   } catch (e) { console.error('保存展开状态失败:', e); } // i18n-exempt: 开发日志
 }, 600);
 
+// frontmatter 解析由 src/frontmatter.js 提供（FRONTMATTER 全局，index.html 里先加载）。
+// 主进程 require 的是同一个文件，所以两边的解析结果永远一致——
+// 原先这里和 electron-main.js 各有一份逐字复制的实现，改一边不会同步到另一边。
 function parseFrontmatter(content) {
-  const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
-  if (!m) return { meta: {}, body: content };
-  const yaml = m[1];
-  const body = m[2];
-  const meta = {};
-  for (const line of yaml.split(/\r?\n/)) {
-    if (!line.trim() || line.trim().startsWith('#')) continue;
-    const idx = line.indexOf(':');
-    if (idx === -1) continue;
-    const key = line.slice(0, idx).trim();
-    let val = line.slice(idx + 1).trim();
-    if (val.startsWith('[') && val.endsWith(']')) {
-      val = val.slice(1, -1).split(',').map(s => s.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
-    } else if (val === 'true') val = true;
-    else if (val === 'false') val = false;
-    else if (/^-?\d+$/.test(val)) val = parseInt(val, 10);
-    else val = val.replace(/^["']|["']$/g, '');
-    meta[key] = val;
-  }
-  return { meta, body };
+  return FRONTMATTER.parse(content);
 }
 
 function parseWorkflowFlow(content) {
@@ -193,9 +178,17 @@ async function confirmDialog(msg) {
 }
 
 // ===== Markdown 渲染 =====
+// FORBID_ATTR 里的 id/name 是防 DOM clobbering，不是防 XSS：
+// DOMPurify 默认放行 id，而它的 SANITIZE_DOM 只拦与 document/form 上已有属性
+// 撞名的 id。提示词正文里写 `<div id="editor">` 会被原样保留，插进 #preview
+// 之后 getElementById('editor') 按文档顺序命中的是这个 div（index.html 里
+// #preview 排在真正的 <textarea id="editor"> 前面），保存逻辑读到的就是
+// div.value === undefined。实测症状：编辑后点保存，写回磁盘的是渲染后的旧正文，
+// 用户的改动无声消失，dirty 检查也因为读不到 value 而认为"没改过"。
+// toast/其他按 id 取的节点同样可以被顶掉。
 function renderMarkdown(md) {
   const html = marked.parse(md || '', { breaks: true, gfm: true });
-  return DOMPurify.sanitize(html, { ADD_ATTR: ['target'] });
+  return DOMPurify.sanitize(html, { ADD_ATTR: ['target'], FORBID_ATTR: ['id', 'name'] });
 }
 
 // 给预览区代码块加复制按钮（后处理）
@@ -548,8 +541,12 @@ async function switchTab(rel) {
 async function closeTab(rel) {
   const idx = state.tabs.findIndex(t => t.rel === rel);
   if (idx === -1) return;
-  // 若关的是当前标签且在编辑，先退出
-  if (rel === state.activeTab && state.editMode) { exitEditMode(false); }
+  // 若关的是当前标签且在编辑，先退出。
+  // 必须 await 并尊重返回值：用户在"放弃未保存的修改？"里选取消时，
+  // 标签不能继续关掉（否则确认框形同虚设，草稿照样丢）。
+  if (rel === state.activeTab && state.editMode) {
+    if (!(await exitEditMode(false))) return;
+  }
   state.tabs.splice(idx, 1);
   if (state.activeTab === rel) {
     // 切到相邻标签
@@ -690,32 +687,41 @@ function renderFlowDiagram(steps, title) {
       if (byId.has(n)) indeg.set(n, (indeg.get(n) || 0) + 1);
     }
   }
-  // 层级 = 所有前驱层级最大值 + 1（最长前导路径）
+  // 层级 = 所有前驱层级最大值 + 1（最长前导路径）。
+  // Kahn 拓扑排序：出队时直接把层级推给后继，一趟 O(V+E) 完成。
+  // 原先的写法是"排序后再对每个节点回扫全部 steps 找前驱"，O(V·E)。
   const level = new Map();
-  const queue = steps.filter(s => (indeg.get(s.id) || 0) === 0).map(s => s.id);
-  // 拓扑排序求最长路径
   const indeg2 = new Map(indeg);
-  const sorted = [];
-  while (queue.length) {
-    const id = queue.shift();
-    sorted.push(id);
+  const queue = steps.filter(s => (indeg.get(s.id) || 0) === 0).map(s => s.id);
+  for (const id of queue) level.set(id, 0);
+  let visited = 0;
+  for (let head = 0; head < queue.length; head++) {
+    const id = queue[head];
+    visited++;
+    const lv = level.get(id) || 0;
     for (const n of byId.get(id).next) {
       if (!byId.has(n)) continue;
+      // 后继层级取所有前驱的最大值 + 1
+      level.set(n, Math.max(level.get(n) == null ? 0 : level.get(n), lv + 1));
       indeg2.set(n, indeg2.get(n) - 1);
       if (indeg2.get(n) === 0) queue.push(n);
     }
   }
-  for (const id of sorted) {
-    const s = byId.get(id);
-    let lv = 0;
-    // 找所有指向 id 的前驱的最大 level
-    for (const p of steps) {
-      if (p.next.includes(id) && level.has(p.id)) lv = Math.max(lv, level.get(p.id) + 1);
-    }
-    level.set(id, lv);
+  // 环里的节点入度永远降不到 0，拿不到层级。
+  // 不能放着不管：Math.max(...空) 是 -Infinity，Array.from({length:-Infinity})
+  // 得到零长数组，下面 layers[...].push 就会抛错，而这个异常会被 openFile 的
+  // catch 吞掉并把 currentRel 置空，留下"有标签页却没有当前文件"的坏状态，
+  // 之后任何走到 renderBreadcrumb 的操作都会在 null 上再炸一次，只能重启。
+  // 这里把成环的节点按原始顺序追加到末层，图仍然画得出来，用户也能看到它们。
+  const hasCycle = visited < steps.length;
+  if (hasCycle) {
+    // 全图成环时没有任何入口节点，level 是空的，末层要从 -1 起算，
+    // 否则所有节点都落到第 1 层、第 0 层空着，画出来是一条空白层。
+    let tail = -1;
+    for (const lv of level.values()) tail = Math.max(tail, lv);
+    for (const s of steps) if (!level.has(s.id)) level.set(s.id, tail + 1);
   }
-  // 无入边且未被分配（孤立）的放第 0 层
-  const maxLevel = steps.length ? Math.max(...level.values()) : 0;
+  const maxLevel = steps.length ? Math.max(0, ...level.values()) : 0;
   // 分层
   const layers = Array.from({ length: maxLevel + 1 }, () => []);
   for (const s of steps) layers[level.get(s.id) || 0].push(s);
@@ -779,23 +785,45 @@ function drawFlowEdges() {
 }
 
 // ===== 编辑模式 =====
+// 脏状态：编辑器内容与进入编辑时的快照不一致就算脏。
+// 原先完全没有这个概念，于是丢弃和保存两种相反行为都是静默的——
+// 按 Esc / 点取消 / 关标签直接丢掉草稿，而点树里另一个文件或切标签
+// 反而把未完成的草稿强制写进磁盘。i18n 里的 discardConfirm 文案
+// （zh/en 都有）就是为这个确认框准备的，之前一直没接上。
+function isDirty() {
+  if (!state.editMode) return false;
+  const ed = $('editor');
+  return !!ed && ed.value !== state.editBaseline;
+}
+
+function markDirtyIndicator() {
+  const btn = $('btn-edit');
+  if (btn) btn.textContent = isDirty() ? t('editing') + ' *' : t('editing');
+}
+
 async function enterEditMode() {
   if (!state.currentRel) return;
   state.editMode = true;
   $('preview-wrap').classList.add('hidden');
   $('editor-wrap').classList.remove('hidden');
   $('editor').value = state.currentContent;
+  state.editBaseline = state.currentContent; // 脏判断的基准
   $('editor').focus();
   $('btn-edit').textContent = t('editing');
 }
 
+// save=true 保存后退出；save=false 丢弃退出。
+// 丢弃且有未保存改动时先确认，避免草稿无声消失。
+// 返回 false = 用户取消，调用方必须中止自己的后续动作（切文件/切标签等）。
 async function exitEditMode(save) {
   if (!state.editMode) return true;
   if (save) {
     const ok = await saveCurrent();
     if (!ok) return false;
   } else {
+    if (isDirty() && !(await confirmDialog(t('discardConfirm')))) return false;
     state.editMode = false;
+    state.editBaseline = '';
     $('preview-wrap').classList.remove('hidden');
     $('editor-wrap').classList.add('hidden');
     $('btn-edit').textContent = t('edit');
@@ -803,10 +831,21 @@ async function exitEditMode(save) {
     return true;
   }
   state.editMode = false;
+  state.editBaseline = '';
   $('preview-wrap').classList.remove('hidden');
   $('editor-wrap').classList.add('hidden');
   $('btn-edit').textContent = t('edit');
   return true;
+}
+
+// 菜单里的"重新加载"走这里而不是 role:'reload'。
+// 原先是 role:'reload'，Ctrl+R 直接重载，编辑中的草稿无声消失。
+// 也不能靠 beforeunload：Electron 里它不会像浏览器那样弹原生确认，
+// 而是静默取消这次重载——按下 Ctrl+R 什么都不发生，比丢草稿更让人困惑。
+// 所以明确问一次，用户确认了才让主进程重载。
+async function requestReload() {
+  if (isDirty() && !(await confirmDialog(t('discardConfirm')))) return;
+  await api.reloadWindow();
 }
 
 async function saveCurrent() {
@@ -816,6 +855,10 @@ async function saveCurrent() {
     const { content: saved, meta } = await api.saveFile(state.currentRel, content);
     state.currentContent = saved;
     state.currentMeta = meta;
+    // 存盘成功即视为不脏。基准用编辑器里的原文而不是 saved：
+    // 主进程会回写 version/updatedAt，saved 和输入框内容天生不同，
+    // 拿 saved 当基准会让保存后立刻又显示未保存。
+    state.editBaseline = content;
     // 同步到标签
     const tab = state.tabs.find(t => t.rel === state.currentRel);
     if (tab) { tab.content = saved; tab.meta = meta; tab.loaded = true; }
@@ -913,19 +956,21 @@ async function newWorkflow() {
   const rel = `workflows/${name}.md`;
   // i18n-exempt-start: 这是写入 .md 的文件内容，不是界面文案；
   // 且 prompt 路径指向种子提示词的中文文件名，翻译会让流程图节点全部失效。
+  // prompt 必须是库根起算的完整相对路径（含 prompts/ 前缀）：
+  // 节点点击走 openFile(rel) → 主进程 safeJoin(rel)，少了前缀就解析不到文件。
   const content = `---
 title: ${name}
 flow:
   - id: step1
-    prompt: project-init/需求分析.md
+    prompt: prompts/project-init/需求分析.md
     label: 需求分析
     next: step2
   - id: step2
-    prompt: code-generation/功能实现.md
+    prompt: prompts/code-generation/功能实现.md
     label: 功能实现
     next: step3
   - id: step3
-    prompt: code-review/代码审查.md
+    prompt: prompts/code-review/代码审查.md
     label: 代码审查
 ---
 
@@ -968,6 +1013,19 @@ async function pickStage(title = t('pickStageTitle')) {
   return found || state.stages[0];
 }
 
+// 当前挂起的 promptInput 的 resolve 包装。
+// 弹层有三条"正常"关闭路径（确定/取消/回车）和两条"外部"关闭路径
+// （点弹层外面、按 Esc）。外部路径原先只是把弹层藏起来，Promise 永远不 settle，
+// 于是 await promptInput 的 newPrompt/rename/duplicate/newFolder 全部永久卡死。
+// 统一登记在这里，让 hideCtxMenu() 兜底 resolve(null)。
+let pendingPromptDone = null;
+function settlePendingPrompt() {
+  if (!pendingPromptDone) return;
+  const fn = pendingPromptDone;
+  pendingPromptDone = null; // 先清空再调用，避免 done() 里的 hideCtxMenu 递归回来
+  fn(null);
+}
+
 function promptInput(title, placeholder) {
   return new Promise(resolve => {
     const menu = $('ctx-menu');
@@ -983,7 +1041,13 @@ function promptInput(title, placeholder) {
     showCenteredMenu();
     const inp = $('ctx-input');
     inp.focus();
-    const done = (v) => { hideCtxMenu(); menu.innerHTML = ''; resolve(v); };
+    const done = (v) => {
+      pendingPromptDone = null;
+      hideCtxMenu();
+      menu.innerHTML = '';
+      resolve(v);
+    };
+    pendingPromptDone = done;
     $('ctx-ok').onclick = () => done(inp.value.trim());
     $('ctx-cancel').onclick = () => done(null);
     inp.onkeydown = (e) => {
@@ -1171,8 +1235,13 @@ function showCtxMenu(x, y, node) {
   menu.classList.remove('hidden');
   menu.style.left = Math.min(x, window.innerWidth - 160) + 'px';
   menu.style.top = Math.min(y, window.innerHeight - 40) + 'px';
-  menu.querySelectorAll('.ctx-item').forEach((el, i) => {
-    el.onclick = () => { hideCtxMenu(); items[i].act(); };
+  // 下标必须从 data-i 读回来。分隔符渲染成 .ctx-sep 而不是 .ctx-item，
+  // 用 forEach 的序号会跳过它，导致分隔符之后的每一项都偏移一格
+  // （表现是点"删除"实际拿到分隔符对象，抛 act is not a function）。
+  menu.querySelectorAll('.ctx-item').forEach((el) => {
+    const it = items[Number(el.dataset.i)];
+    if (!it || typeof it.act !== 'function') return;
+    el.onclick = () => { hideCtxMenu(); it.act(); };
   });
 }
 
@@ -1219,6 +1288,10 @@ function hideCtxMenu() {
   const menu = $('ctx-menu');
   menu.classList.add('hidden');
   menu.classList.remove('ctx-centered');
+  // 关闭弹层必须同时结算 promptInput 的 Promise，否则 await 它的
+  // 新建/重命名/复制/新建目录流程会永久挂起（界面看着空闲，实际回不来了）。
+  // done() 会先把 pendingPromptDone 置空再调用这里，所以不会递归。
+  settlePendingPrompt();
 }
 
 // 居中显示弹层。showCtxMenu 会写内联 left/top，这里必须清掉，
@@ -1341,7 +1414,7 @@ async function openHistory() {
   }
   vl.innerHTML = list.map(v => `
     <div class="version-item" data-file="${escapeHtml(v.file)}">
-      <span class="vi-time">${formatVersionTime(v.timestamp)}<small>${escapeHtml(v.pinned ? t('pinned') : t('versionNth', { n: list.length - list.indexOf(v) }))}</small></span>
+      <span class="vi-time">${escapeHtml(formatVersionTime(v.timestamp))}<small>${escapeHtml(v.pinned ? t('pinned') : t('versionNth', { n: list.length - list.indexOf(v) }))}</small></span>
       <span class="vi-actions">
         <button class="pin-btn ${v.pinned ? 'pinned' : ''}" data-pin="${escapeHtml(v.file)}">${v.pinned ? '⭐' : '☆'}</button>
         <button class="btn-link" data-view="${escapeHtml(v.file)}">${escapeHtml(t('view'))}</button>
@@ -1447,7 +1520,7 @@ async function openTrash() {
   }
   list.innerHTML = index.items.map(it => `
     <div class="version-item">
-      <span class="vi-time">${escapeHtml(it.name)}<small>${escapeHtml(it.originalRel)} · ${String(it.trashedAt).slice(0, 16).replace('T', ' ')}</small></span>
+      <span class="vi-time">${escapeHtml(it.name)}<small>${escapeHtml(it.originalRel)} · ${escapeHtml(String(it.trashedAt).slice(0, 16).replace('T', ' '))}</small></span>
       <span class="vi-actions">
         <button class="btn-link" data-restore="${escapeHtml(it.id)}">${escapeHtml(t('restore'))}</button>
       </span>
@@ -1518,9 +1591,15 @@ $('new-type-input').onkeydown = (e) => {
 
 // ===== 导出 =====
 async function exportZip() {
-  const res = await api.exportZip();
-   if (res.ok) toast(t('exportedTo') + t('sep') + res.path, 'success');
-  else toast(t('exportCanceled'));
+  // 必须有 try/catch：导出失败（目标不可写/磁盘满）时主进程现在会 reject，
+  // 不接的话就是一个未处理 rejection，用户那边毫无反馈。
+  try {
+    const res = await api.exportZip();
+    if (res.ok) toast(t('exportedTo') + t('sep') + res.path, 'success');
+    else toast(t('exportCanceled'));
+  } catch (e) {
+    toast(tErr('exportFailed', e), 'error');
+  }
 }
 async function importSingle() {
   try {
@@ -1548,11 +1627,19 @@ async function exportSingle() {
 }
 
 // ===== 主题 =====
+// setConfig 现在会在写盘失败时 reject（主进程抛 E_CONFIG_WRITE）。不接住的话
+// 是个 unhandled rejection：界面照常变色，用户以为存上了，重启后又变回来。
+// 这里不回滚视觉效果——本次会话内切换是真的生效了，只是存不下来，
+// 所以照常切换 + 明确告诉用户"没存住"。
 async function toggleTheme() {
   const cur = state.config.theme === 'dark' ? 'light' : 'dark';
   state.config.theme = cur;
   document.body.className = 'theme-' + cur;
-  await api.setConfig({ theme: cur });
+  try {
+    await api.setConfig({ theme: cur });
+  } catch (e) {
+    toast(describeError(e), 'error');
+  }
 }
 
 // ===== 语言切换 =====
@@ -1567,7 +1654,14 @@ async function setLang(lang) {
   document.documentElement.lang = lang === 'en' ? 'en' : 'zh-CN';
   applyI18n();
   updateLangButtons();
-  await api.setConfig({ lang });
+  // 写盘失败只提示，不 return：界面语言已经切了，中断会让后面那批重渲染漏掉，
+  // 结果半个界面是新语言半个是旧的。落盘失败的后果只是重启后回到旧语言。
+  let langSaveError = null;
+  try {
+    await api.setConfig({ lang });
+  } catch (e) {
+    langSaveError = e;
+  }
   // 重建所有依赖文案的动态内容。漏掉任何一处，切换语言后该区域会残留旧语言，
   // 直到用户重新触发一次渲染才更新。
   renderTree();
@@ -1582,7 +1676,8 @@ async function setLang(lang) {
     renderContent();
   }
   updateStatusInfo(t('ready'));
-  toast(t('langSwitched'), 'success');
+  if (langSaveError) toast(describeError(langSaveError), 'error');
+  else toast(t('langSwitched'), 'success');
 }
 
 // ===== 分隔条拖拽 =====
@@ -1732,11 +1827,17 @@ async function init() {
     setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1200);
   };
   $('btn-export-single').onclick = exportSingle;
+  // 脏标记：编辑器有输入就更新"编辑中 *"提示。
+  // 这是 isDirty() 唯一的数据来源，少了它所有丢弃确认都不会触发。
+  $('editor').addEventListener('input', markDirtyIndicator);
   $('btn-edit').onclick = async () => {
     if (state.editMode) { await exitEditMode(false); }
     else enterEditMode();
   };
-  $('btn-save').onclick = () => saveCurrent().then(ok => { if (ok) exitEditMode(true); });
+  // saveCurrent() 已经落盘，这里必须传 false。传 true 会让 exitEditMode 再存一次：
+  // 主进程每次 save-file 都生成版本快照并 bumpAutoFields，
+  // 结果一次点击写两遍盘、多一条无差异快照、version 自增 2。
+  $('btn-save').onclick = () => saveCurrent().then(ok => { if (ok) exitEditMode(false); });
   $('btn-cancel').onclick = () => exitEditMode(false);
   $('btn-history').onclick = openHistory;
   $('btn-rename').onclick = renameCurrent;
@@ -1769,29 +1870,34 @@ async function init() {
       editor.selectionStart = editor.selectionEnd = start + 2;
       return;
     }
+    // 快捷键归属：一个键只能有一个主人。
+    // 原生菜单的 accelerator 在 Windows 上优先级高于渲染进程的 keydown，
+    // 所以 Ctrl+N（新建提示词）和 Ctrl+E（导出）由菜单负责——它们经
+    // menu-action IPC 回到这里的 onMenuAction，功能不变。
+    // 之前这里也各写了一份，那两个分支实际永远不会执行，属于误导性死代码。
+    // 菜单里没有的键才留在这边：Ctrl+S / Ctrl+Shift+F / Ctrl+I / Ctrl+Shift+L。
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
       if (state.editMode) saveCurrent();
-    } else if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
-      e.preventDefault();
-      newPrompt();
     } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'f') {
       e.preventDefault();
       $('search-box').focus();
-    } else if ((e.ctrlKey || e.metaKey) && e.key === 'e') {
-      e.preventDefault();
-      exportZip();
     } else if ((e.ctrlKey || e.metaKey) && e.key === 'i') {
+      // index.html 的导入按钮 tooltip 写的就是 Ctrl+I，菜单里没有对应项，
+      // 所以这个键归渲染进程。
       e.preventDefault();
       $('btn-import').click();
     } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'l') {
-      // 用 Ctrl+Shift+L 切换主题，避免 Ctrl+T 拦截
+      // 主题切换只有这一个键（菜单项已去掉 CmdOrCtrl+T），
+      // 与 index.html 里 btn-theme 的 tooltip 一致。
       e.preventDefault();
       toggleTheme();
     } else if (e.key === 'Escape') {
       // Esc 依次关闭：上下文菜单 → 抽屉 → 退出编辑
       const ctx = $('ctx-menu');
-      if (!ctx.classList.contains('hidden')) { ctx.classList.add('hidden'); ctx.innerHTML = ''; return; }
+      // 走 hideCtxMenu 而不是自己加 .hidden：它会结算 promptInput 挂起的 Promise。
+      // 直接改 class + innerHTML 会让按 Esc 取消命名框的流程永久卡住。
+      if (!ctx.classList.contains('hidden')) { hideCtxMenu(); ctx.innerHTML = ''; return; }
       const hd = $('history-drawer'), td = $('trash-drawer');
       if (!hd.classList.contains('hidden')) { hd.classList.add('hidden'); return; }
       if (!td.classList.contains('hidden')) { td.classList.add('hidden'); return; }
@@ -1810,6 +1916,7 @@ async function init() {
       });
     }
     else if (action === 'toggle-theme') toggleTheme();
+    else if (action === 'request-reload') requestReload();
   });
 
   initResizer();
