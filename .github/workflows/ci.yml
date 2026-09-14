@@ -1,0 +1,69 @@
+# CI：每次 push / PR 跑一遍完整测试。
+#
+# 为什么用 windows-latest：这是个 Windows 桌面应用，而且历史上出过的故障
+# （路径大小写、反斜杠分隔符、缺 DLL 导致渲染进程起不来）都是 Windows 特有的，
+# 在 ubuntu 上跑等于测了个跟发布环境不一样的目标。
+#
+# 为什么不用 xvfb：Windows runner 自带图形会话，Electron 能直接建窗口。
+# test:ui / test:fn 会真的拉起 Electron 加载页面，所以必须有可用的显示环境。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # 手动触发，便于在不改代码的情况下复跑
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    # Electron 首次启动偶发较慢，给足超时但不要无限挂着
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # 用 npm ci 而不是 npm install：严格按 lockfile 装，
+      # 否则 CI 装到的版本可能和本地不一致，测试结果就没有参考价值。
+      # 没有 lockfile 时回退到 npm install，避免整个流水线直接失败。
+      - name: 安装依赖
+        shell: bash
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      # vendor 副本是提交进仓库的。这里重新同步一次并检查有没有差异：
+      # 如果有人升了依赖却忘了跑 npm run sync-vendor，
+      # 仓库里的 src/vendor/*.js 就和 package.json 声明的版本不一致，
+      # 而渲染进程实际加载的是仓库里那份旧文件。
+      - name: 检查 vendor 副本与依赖版本一致
+        shell: bash
+        run: |
+          npm run sync-vendor
+          if [ -n "$(git status --porcelain src/vendor)" ]; then
+            echo "src/vendor 与 node_modules 不一致，请在本地执行 npm run sync-vendor 后提交："
+            git --no-pager diff --stat src/vendor
+            exit 1
+          fi
+          echo "vendor 副本已是最新"
+
+      # 静态检查（语法、i18n 完整性、防回归断言），不需要图形环境
+      - name: 冒烟测试
+        run: npm test
+
+      # 下面三个会真的拉起 Electron。各自 PFM_DATA_DIR 指向临时目录，
+      # 不会碰仓库里的提示词库（脚本内部自己建临时副本）。
+      - name: 功能自检（真实 IPC 往返）
+        run: npm run test:fn
+
+      - name: UI 点击自检 + 只读体检
+        run: npm run test:ui
+
+      - name: 标签页恢复
+        run: npm run test:tabs
