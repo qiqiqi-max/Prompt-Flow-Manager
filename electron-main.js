@@ -1127,25 +1127,45 @@ ipcMain.handle('import-zip', async () => {
 
 ipcMain.handle('get-stages', () => ({ stages: STAGES, labels: STAGE_LABELS }));
 
+// 项目类型的增删都是 read-modify-write，读必须和写在同一个队列里。
+// 原先是队列外 loadConfig() 拿快照 → 改数组 → 交给 updateConfig 写，而 updateConfig
+// 只把"合并 patch + 写盘"这一步排进队列。渲染进程有五个 debounce 在写 config
+// （tabs / recent / lockedFiles / sidebarWidth / expandedPaths），读到写之间只要插进
+// 一次，patch 里带的就是那份过期数组。两次增删之间也会互相覆盖：连着加两个类型，
+// 后一次基于不含前一个的快照，落盘只剩后一个——UI 上两个都显示加成功了，重启就没了。
+// 这里内联 loadConfig + saveConfig，不调 updateConfig：updateConfig 自己也走 config
+// 队列，在队列回调里再调它会等自己所在链条的 guard，直接死锁。
+function updateProjectTypes(mutate) {
+  return queueConfigWrite(async () => {
+    const cur = await loadConfig();
+    const list = Array.isArray(cur.projectTypes) ? [...cur.projectTypes] : [...DEFAULT_PROJECT_TYPES];
+    const next = mutate(list); // 抛错就是校验失败，链条的 guard 会兜住不影响后续写入
+    const merged = next === null ? cur : { ...cur, projectTypes: next };
+    const ok = await saveConfig(merged);
+    if (!ok) throw appError('E_CONFIG_WRITE', CONFIG_PATH);
+    return merged;
+  });
+}
+
 ipcMain.handle('add-project-type', async (e, type) => {
   if (!type || typeof type !== 'string') throw appError('E_TYPE_INVALID');
   const t = String(type).trim();
   if (!t) throw appError('E_TYPE_EMPTY');
-  const cfg = await loadConfig();
-  const list = Array.isArray(cfg.projectTypes) ? [...cfg.projectTypes] : [...DEFAULT_PROJECT_TYPES];
-  if (list.includes(t)) throw appError('E_TYPE_EXISTS', t);
-  list.push(t);
-  return await updateConfig({ projectTypes: list });
+  return await updateProjectTypes((list) => {
+    if (list.includes(t)) throw appError('E_TYPE_EXISTS', t);
+    list.push(t);
+    return list;
+  });
 });
 
 ipcMain.handle('remove-project-type', async (e, type) => {
-  const cfg = await loadConfig();
-  const list = Array.isArray(cfg.projectTypes) ? [...cfg.projectTypes] : [...DEFAULT_PROJECT_TYPES];
-  if (list.length <= 1) throw appError('E_TYPE_MIN_ONE');
-  const idx = list.indexOf(type);
-  if (idx === -1) return await updateConfig({});
-  list.splice(idx, 1);
-  return await updateConfig({ projectTypes: list });
+  return await updateProjectTypes((list) => {
+    if (list.length <= 1) throw appError('E_TYPE_MIN_ONE');
+    const idx = list.indexOf(type);
+    if (idx === -1) return null; // 不存在：原样写回，保持原先"静默成功"的返回语义
+    list.splice(idx, 1);
+    return list;
+  });
 });
 
 // ---------- 启动 ----------
@@ -1432,6 +1452,78 @@ async function runSecurityRegression(targetWin) {
       try { await fsp.rm(path.join(DATA_ROOT, r), { force: true }); } catch {}
       try { await fsp.rm(versionDirFor(r), { recursive: true, force: true }); } catch {}
     }
+  }
+
+  // ---- 5. 项目类型增删不能互相覆盖（读必须在队列内） ----
+  // add/remove-project-type 也是 read-modify-write。原先读在队列外：
+  // loadConfig() 拿快照 → 改数组 → 交给 updateConfig，而 updateConfig 只把
+  // "合并 patch + 写盘"排进队列。几路并发各自基于同一份旧快照算结果，
+  // 后写的整个盖掉前面的，落盘只剩最后一个。每次调用都正常 resolve、
+  // 界面上类型也都出现了，重启才发现少了——和丢锁定标记是同一个坑。
+  const origCfg = await loadConfig();
+  const origTypes = Array.isArray(origCfg.projectTypes) ? [...origCfg.projectTypes] : [...DEFAULT_PROJECT_TYPES];
+  try {
+    const baseTypes = ['sec-base-a', 'sec-base-b'];
+    await viaIpc(`window.promptFlowApi.setConfig(${J({ projectTypes: baseTypes })})`);
+
+    // 并发新增 5 个互不相同的类型，5 个都必须留在磁盘上
+    const addNames = [];
+    for (let i = 0; i < 5; i++) addNames.push('sec-add-' + i);
+    const addCalls = addNames.map(n => `window.promptFlowApi.addProjectType(${J(n)})`);
+    const addRes = await targetWin.webContents.executeJavaScript(
+      `(async () => { const rs = await Promise.allSettled([${addCalls.join(',')}]);
+         return rs.map(r => r.status === 'fulfilled' ? 'ok' : String(r.reason && r.reason.message || r.reason)); })()`, true);
+    check('并发新增项目类型全部成功', addRes.every(s => s === 'ok'), JSON.stringify(addRes));
+
+    const listAdd = (await loadConfig()).projectTypes || [];
+    const missing = addNames.filter(n => !listAdd.includes(n));
+    check('并发新增的 5 个项目类型都落盘了', missing.length === 0,
+      `丢失 ${JSON.stringify(missing)}，磁盘上是 ${JSON.stringify(listAdd)}`);
+    check('并发新增没有冲掉原有类型', baseTypes.every(n => listAdd.includes(n)), JSON.stringify(listAdd));
+
+    // 删除阶段必须自己用 setConfig 铺前置，不能拿上面新增的结果当输入。
+    // 第一版就是 addNames.slice(0, 4)，反向对照时发现它测不到东西：撤掉修复后
+    // 新增阶段本来就丢了 4 个，删除的目标全都不在磁盘上，于是全走"不存在→静默成功"
+    // 分支，"都消失了"自然为真。前置被上一步破坏，断言就变成永远为真。
+    const delNames = [];
+    for (let i = 0; i < 4; i++) delNames.push('sec-del-' + i);
+    await viaIpc(`window.promptFlowApi.setConfig(${J({ projectTypes: [...baseTypes, ...delNames] })})`);
+    const listPre = (await loadConfig()).projectTypes || [];
+    check('并发删除用例前置：4 个待删类型都已在磁盘上',
+      delNames.every(n => listPre.includes(n)), JSON.stringify(listPre));
+
+    const delCalls = delNames.map(n => `window.promptFlowApi.removeProjectType(${J(n)})`);
+    const delRes = await targetWin.webContents.executeJavaScript(
+      `(async () => { const rs = await Promise.allSettled([${delCalls.join(',')}]);
+         return rs.map(r => r.status === 'fulfilled' ? 'ok' : String(r.reason && r.reason.message || r.reason)); })()`, true);
+    check('并发删除项目类型全部成功', delRes.every(s => s === 'ok'), JSON.stringify(delRes));
+
+    const listDel = (await loadConfig()).projectTypes || [];
+    const leftover = delNames.filter(n => listDel.includes(n));
+    check('并发删除的 4 个项目类型都从磁盘上消失了', leftover.length === 0,
+      `残留 ${JSON.stringify(leftover)}，磁盘上是 ${JSON.stringify(listDel)}`);
+    check('并发删除没有连带删掉别的类型', baseTypes.every(n => listDel.includes(n)),
+      JSON.stringify(listDel));
+
+    // 上面的修复把两个 handler 改成了共用 mutate 回调，几条校验分支的语义必须保持不变
+    const dup = await viaIpc(`window.promptFlowApi.addProjectType(${J(baseTypes[0])})`);
+    check('新增重名类型仍然报 E_TYPE_EXISTS',
+      dup.ok === false && /E_TYPE_EXISTS/.test(dup.message), JSON.stringify(dup));
+    const blank = await viaIpc(`window.promptFlowApi.addProjectType("   ")`);
+    check('新增空白类型仍然报 E_TYPE_EMPTY',
+      blank.ok === false && /E_TYPE_EMPTY/.test(blank.message), JSON.stringify(blank));
+    const noSuch = await viaIpc(`window.promptFlowApi.removeProjectType("sec-not-there")`);
+    check('删除不存在的类型仍然静默成功', noSuch.ok === true, JSON.stringify(noSuch));
+
+    await viaIpc(`window.promptFlowApi.setConfig(${J({ projectTypes: ['sec-only-one'] })})`);
+    const lastOne = await viaIpc(`window.promptFlowApi.removeProjectType("sec-only-one")`);
+    check('删到只剩一个时仍然报 E_TYPE_MIN_ONE',
+      lastOne.ok === false && /E_TYPE_MIN_ONE/.test(lastOne.message), JSON.stringify(lastOne));
+  } catch (e) {
+    check('项目类型并发用例执行完成', false, e && e.message);
+  } finally {
+    // 后面还有只读体检在用这份 config，必须还原成用例开始前的样子
+    try { await viaIpc(`window.promptFlowApi.setConfig(${J({ projectTypes: origTypes })})`); } catch {}
   }
 
   return out;
