@@ -26,6 +26,15 @@ function countedReadFile(fullPath) {
 const contentCache = new Map(); // fullPath -> { mtimeMs, size, content, meta, bodyRaw, bodyLower }
 let cacheHits = 0;
 let cacheMisses = 0;
+// 缓存上限。原先没有：dropFromCache 只在删除/移动/保存时清对应条目，
+// 从没被删过、只是不再被访问的文件会永久留在 Map 里，而每条都存了正文 +
+// 一份全小写副本（约 2 倍文件大小）。长会话里反复浏览/搜索一个大库，常驻内存
+// 只增不减。这里按 LRU 封顶：命中时把条目挪到队尾，插入后从队首淘汰最久未用的。
+// Map 保持插入顺序，所以队首就是最久未 touch 的条目。
+// 上限取 5000：远高于注释里 1000 条的性能基准，正常库一次搜索遍历不会触发淘汰
+// （否则会拉低命中率）；真超了也只是退化成重读，正确性不受影响。
+// 用 let 是为了让自检能临时调小，不必造几千个文件来验证淘汰。
+let CONTENT_CACHE_MAX = 5000;
 
 const EMPTY_ENTRY = { content: '', meta: {}, bodyRaw: '', bodyLower: '' };
 
@@ -35,6 +44,9 @@ async function readParsedCached(fullPath) {
   const hit = contentCache.get(fullPath);
   if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
     cacheHits++;
+    // 命中即 touch：删了重插挪到队尾，这样淘汰时队首永远是最久未访问的那条。
+    contentCache.delete(fullPath);
+    contentCache.set(fullPath, hit);
     return hit;
   }
   cacheMisses++;
@@ -49,7 +61,16 @@ async function readParsedCached(fullPath) {
     bodyRaw,
     bodyLower: bodyRaw.toLowerCase()
   };
+  // 先 delete 再 set：过期条目重读后要挪到队尾，否则同 key 的 set 只更新值不改
+  // 顺序，这条刚刷新却还排在队首，下一次淘汰就会把它当成最旧的删掉。
+  contentCache.delete(fullPath);
   contentCache.set(fullPath, entry);
+  // 超限则从队首（最久未用）逐个淘汰
+  while (contentCache.size > CONTENT_CACHE_MAX) {
+    const oldest = contentCache.keys().next().value;
+    if (oldest === undefined) break;
+    contentCache.delete(oldest);
+  }
   return entry;
 }
 
@@ -1525,6 +1546,58 @@ async function runSecurityRegression(targetWin) {
     // 后面还有只读体检在用这份 config，必须还原成用例开始前的样子
     try { await viaIpc(`window.promptFlowApi.setConfig(${J({ projectTypes: origTypes })})`); } catch {}
   }
+
+
+  // ---- 6. contentCache 按 LRU 封顶，只读浏览也不会让它无限增长 ----
+  // 原先只在文件被删/移/存时清对应条目：只读浏览过、从没变动的文件会永久留在
+  // Map 里，每条还存了正文 + 一份全小写副本。长会话里反复浏览大库，常驻内存只增
+  // 不减。这里把上限临时调小到 3，塞进 5 个文件，验证四件事：大小被压在上限内、
+  // 最久未访问的被淘汰、命中会把条目挪回队尾（保护最近用的）、被淘汰的重读能重新入缓存。
+  const savedCacheMax = CONTENT_CACHE_MAX;
+  const cacheTestDir = path.join(DATA_ROOT, '.cache-lru-test');
+  try {
+    await fsp.mkdir(cacheTestDir, { recursive: true });
+    CONTENT_CACHE_MAX = 3;
+    const cf = [];
+    for (let i = 0; i < 5; i++) {
+      const fp = path.join(cacheTestDir, 'c' + i + '.md');
+      await fsp.writeFile(fp, '# cache ' + i + '\nbody ' + i, 'utf8');
+      cf.push(fp);
+    }
+    // 依次读入（都是 miss），c0..c4 顺序进队；上限 3，读到 c3、c4 时各淘汰一次队首
+    for (const fp of cf) await readParsedCached(fp);
+    check('LRU 淘汰后缓存大小压在上限内',
+      contentCache.size === 3, 'size=' + contentCache.size + ', max=' + CONTENT_CACHE_MAX);
+    check('最久未访问的文件被淘汰',
+      !contentCache.has(cf[0]) && !contentCache.has(cf[1]),
+      'c0在=' + contentCache.has(cf[0]) + ', c1在=' + contentCache.has(cf[1]));
+    check('最近访问的三个文件留在缓存',
+      contentCache.has(cf[2]) && contentCache.has(cf[3]) && contentCache.has(cf[4]),
+      'c2=' + contentCache.has(cf[2]) + ', c3=' + contentCache.has(cf[3]) + ', c4=' + contentCache.has(cf[4]));
+
+    // 队首此刻是 c2。命中 c2 应把它挪到队尾，于是下一个新文件进来时淘汰的是 c3 而非 c2。
+    await readParsedCached(cf[2]);
+    const c5path = path.join(cacheTestDir, 'c5.md');
+    await fsp.writeFile(c5path, '# cache 5\nbody 5', 'utf8');
+    await readParsedCached(c5path);
+    check('命中会把条目挪回队尾，保护最近使用的项',
+      contentCache.has(cf[2]) && !contentCache.has(cf[3]),
+      'c2在=' + contentCache.has(cf[2]) + '（应在）, c3在=' + contentCache.has(cf[3]) + '（应被淘汰）');
+
+    // 被淘汰的 c0 文件还在磁盘上，重读应重新入缓存并记一次 miss
+    const missBefore = cacheMisses;
+    await readParsedCached(cf[0]);
+    check('被淘汰的文件重读会重新入缓存并计一次未命中',
+      contentCache.has(cf[0]) && cacheMisses === missBefore + 1,
+      'c0在=' + contentCache.has(cf[0]) + ', miss增量=' + (cacheMisses - missBefore));
+  } catch (e) {
+    check('contentCache LRU 用例执行完成', false, e && e.message);
+  } finally {
+    CONTENT_CACHE_MAX = savedCacheMax;
+    for (let i = 0; i < 6; i++) contentCache.delete(path.join(cacheTestDir, 'c' + i + '.md'));
+    try { await fsp.rm(cacheTestDir, { recursive: true, force: true }); } catch {}
+  }
+
 
   return out;
 }
