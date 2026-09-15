@@ -204,6 +204,7 @@ const I18N = {
     err_E_EXPORT_ARCHIVE: '生成备份包失败：{detail}',
     err_E_CONTENT_NOT_STRING: '内容必须是文本：{detail}',
     err_E_CONFIG_WRITE: '设置保存失败，磁盘可能已满或配置文件被占用：{detail}',
+    err_E_PREV_READ: '读取原文件失败，为避免覆盖已放弃保存。请关闭占用该文件的程序后重试：{detail}',
     // 原生菜单。主进程 buildMenu() 用这些键，语言切换时会重建菜单
     // （updateConfig 检测到 lang 变化就调 buildMenu）。
     menuFile: '文件',
@@ -444,6 +445,7 @@ const I18N = {
     err_E_EXPORT_ARCHIVE: 'Failed to build the backup archive: {detail}',
     err_E_CONTENT_NOT_STRING: 'Content must be text: {detail}',
     err_E_CONFIG_WRITE: 'Failed to save settings; the disk may be full or the config file is locked: {detail}',
+    err_E_PREV_READ: 'Could not read the existing file, so the save was aborted to avoid overwriting it. Close any program using the file and retry: {detail}',
     // 原生菜单。主进程 buildMenu() 用这些键，语言切换时会重建菜单
     // （updateConfig 检测到 lang 变化就调 buildMenu）。
     menuFile: 'File',

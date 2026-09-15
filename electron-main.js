@@ -770,6 +770,32 @@ ipcMain.handle('read-file', async (e, rel) => {
   return { content, meta };
 });
 
+// 读"写之前的旧正文"。ENOENT 是正常情况（文件还不存在），返回 null；
+// 其他任何错误都必须抛出去，绝不能当成"文件不存在"。
+//
+// 原先两处调用点都是裸 try/catch {}，分不清 ENOENT 和 EBUSY/EACCES/EMFILE/EIO。
+// 代价不是"少存一次快照"这么轻：prev 停在 null 之后
+//   1) saveVersion 被跳过——旧正文没有留下任何备份；
+//   2) 紧接着 writeFileAtomic 把那个刚刚读不到的文件整个覆盖掉。
+// 快照机制存在的意义正是兜住"磁盘上的内容和编辑器里的不一致"，
+// 而这条路径恰好在最需要它的时候把它跳过了：保存照常返回成功，
+// 磁盘上原来的正文永久消失，历史面板里也找不到对应快照。
+// （附带一条：如果这次要写的正文本身没有 frontmatter，
+//  bumpAutoFields(content, null) 还会把 version 归 1、createdAt 重算；
+//  正文带 frontmatter 时以其中的值为准，不会重置。）
+//
+// 触发既不需要并发也不需要崩溃：杀软扫描、同步盘（OneDrive/坚果云）占用、
+// 并发搜索时 fd 耗尽，任意一次瞬时锁就够，Windows 上尤其常见。
+// 宁可让这次保存失败并弹出真实原因，也不能静默吃掉用户的正文。
+async function readPrevContent(full) {
+  try {
+    return await fsp.readFile(full, 'utf8');
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return null;
+    throw appError('E_PREV_READ', (e && e.code ? e.code : 'UNKNOWN') + ' ' + full);
+  }
+}
+
 // 排进 ver:<rel> 链。这个 handler 是 read-modify-write：读磁盘上的 prev →
 // 存快照 → bumpAutoFields 拿 prev 算出新 version → 写回。并发时几路都读到同一份
 // prev，算出同一个 version，后写的把前面的整个盖掉。
@@ -784,8 +810,7 @@ ipcMain.handle('read-file', async (e, rel) => {
 ipcMain.handle('save-file', async (e, rel, content) => queueWrite('ver:' + String(rel), async () => {
   const full = safeJoinWritable(rel);
   if (typeof content !== 'string') throw appError('E_CONTENT_NOT_STRING', typeof content);
-  let prev = null;
-  try { prev = await fsp.readFile(full, 'utf8'); } catch {}
+  const prev = await readPrevContent(full);
   if (prev != null && prev !== content) await saveVersion(rel, prev);
   const toWrite = bumpAutoFields(content, prev);
   await ensureDir(path.dirname(full));
@@ -1063,8 +1088,10 @@ ipcMain.handle('rollback-version', async (e, rel, file) => queueWrite('ver:' + S
   const full = safeJoinWritable(rel);
   const versionFull = versionFilePath(rel, file);
   const versionContent = await fsp.readFile(versionFull, 'utf8');
-  let prev = null;
-  try { prev = await fsp.readFile(full, 'utf8'); } catch {}
+  // 同 save-file：读失败必须抛，不能当作"文件不存在"。
+  // 回滚这条路径上更要紧——它的全部意义就是"当前内容先存为新版本，不丢失"，
+  // 而 prev 被静默吞成 null 时恰好跳过那次 saveVersion，把要保住的内容直接覆盖掉。
+  const prev = await readPrevContent(full);
   // 当前内容先存为新版本（不丢失）
   if (prev != null && prev !== versionContent) await saveVersion(rel, prev);
   // 回滚写入（作为新一次保存，bump 自动字段）
@@ -1914,6 +1941,104 @@ async function runSecurityRegression(targetWin) {
     check('路径与导航用例执行完成', false, e && e.message);
   }
 
+
+  // ---- 9. 读旧正文失败时必须放弃保存，不能静默覆盖 ----
+  // save-file / rollback-version 原先都是 try { prev = await readFile(...) } catch {}。
+  // 只有 ENOENT 才该被吞掉（文件本来就不存在）；EBUSY/EACCES/EMFILE/EIO 落进同一个
+  // 空 catch 之后，prev 停在 null，saveVersion 被跳过（旧正文没有留下快照），
+  // 紧接着 writeFileAtomic 把这个刚刚读不到的文件整个盖掉。保存返回成功，正文没了。
+  //
+  // 用桩把 readFile 对这一个路径改成抛 EBUSY，是因为真去占用文件在 CI 上不可靠：
+  // Linux 的 flock 是劝告锁，fs.readFile 照样读得到，构造不出前置条件。
+  // 桩只拦目标路径，队列、快照、原子写全部走真实实现。
+  const relPrev = 'prompts/testing/sec-prevread.md';
+  const relPrevNew = 'prompts/testing/sec-prevread-new.md';
+  const fullPrev = safeJoinWritable(relPrev);
+  const mkPrevDoc = (body) => ['---', 'title: sec-prevread', '---', body].join('\n');
+  const realReadFile = fsp.readFile;
+  // 只对 fullPrev 抛指定错误码，其他读一律放行。返回命中计数器，
+  // 前置断言要靠它确认桩真的被走到了（否则用例什么都没测到）。
+  const stubReadFailure = (code, msg) => {
+    const hits = { n: 0 };
+    fsp.readFile = function (p, ...rest) {
+      let same = false;
+      try { same = path.resolve(String(p)) === path.resolve(fullPrev); } catch {}
+      if (same) {
+        hits.n++;
+        const err = new Error(code + ': ' + msg + ', open ' + String(p));
+        err.code = code;
+        return Promise.reject(err);
+      }
+      return realReadFile.call(this, p, ...rest);
+    };
+    return hits;
+  };
+  try {
+    const madePrev = await viaIpc('window.promptFlowApi.createFile(' + J(relPrev) + ', ' + J(mkPrevDoc('ORIGINAL-BODY')) + ')');
+    check('读失败用例前置：创建文件', madePrev.ok === true, JSON.stringify(madePrev).slice(0, 160));
+
+    // 再存一次，让 version 涨到 2 并留下一条快照，这样"快照数没变"才有对照价值
+    await viaIpc('window.promptFlowApi.saveFile(' + J(relPrev) + ', ' + J(mkPrevDoc('ORIGINAL-BODY-v2')) + ')');
+    const onDiskBefore = await realReadFile.call(fsp, fullPrev, 'utf8');
+    let snapsBefore = [];
+    try { snapsBefore = (await fsp.readdir(versionDirFor(relPrev))).filter(f => f.endsWith('.md')); } catch {}
+    check('读失败用例前置：已有快照可作对照', snapsBefore.length >= 1, '快照 ' + snapsBefore.length + ' 条');
+
+    const hitsSave = stubReadFailure('EBUSY', 'resource busy or locked');
+    const saved = await viaIpc('window.promptFlowApi.saveFile(' + J(relPrev) + ', ' + J(mkPrevDoc('OVERWRITTEN-BODY')) + ')');
+    fsp.readFile = realReadFile;
+
+    check('读失败用例前置：桩真的被调用到了', hitsSave.n > 0, '命中 ' + hitsSave.n + ' 次');
+    check('读旧正文失败时 save-file 报 E_PREV_READ 而不是返回成功',
+      saved.ok === false && /E_PREV_READ/.test(String(saved.message)),
+      JSON.stringify(saved).slice(0, 200));
+    check('E_PREV_READ 带上真实系统错误码，用户能看出是被占用',
+      /EBUSY/.test(String(saved.message)), String(saved.message).slice(0, 200));
+
+    // 最关键的一条：磁盘上的旧正文必须还在
+    const onDiskAfter = await realReadFile.call(fsp, fullPrev, 'utf8');
+    check('读旧正文失败后磁盘正文没有被覆盖',
+      onDiskAfter === onDiskBefore && !/OVERWRITTEN-BODY/.test(onDiskAfter),
+      '盘上现在是 ' + JSON.stringify(onDiskAfter.slice(0, 120)));
+
+    let snapsAfter = [];
+    try { snapsAfter = (await fsp.readdir(versionDirFor(relPrev))).filter(f => f.endsWith('.md')); } catch {}
+    check('保存被拒后不该留下半途的快照',
+      snapsAfter.length === snapsBefore.length,
+      '之前 ' + snapsBefore.length + ' 条，现在 ' + snapsAfter.length + ' 条');
+
+    // 另一半同样重要：ENOENT 仍要当成"新文件"放行，不能把新建路径一起堵死
+    const newSaved = await viaIpc('window.promptFlowApi.saveFile(' + J(relPrevNew) + ', ' + J(mkPrevDoc('BRAND-NEW')) + ')');
+    check('文件不存在（ENOENT）时保存照旧成功，没有被误拦',
+      newSaved.ok === true && /BRAND-NEW/.test(String(newSaved.value && newSaved.value.content)),
+      JSON.stringify(newSaved).slice(0, 200));
+
+    // rollback-version 走同一个 helper，一起验一遍
+    const versions = await viaIpc('window.promptFlowApi.listVersions(' + J(relPrev) + ')');
+    const vList = versions.ok && Array.isArray(versions.value) ? versions.value : [];
+    const vFile = vList.length ? (typeof vList[0] === 'string' ? vList[0] : vList[0].file) : null;
+    check('回滚用例前置：拿到一个可回滚的快照名',
+      typeof vFile === 'string' && /\.md$/.test(vFile), JSON.stringify(versions).slice(0, 200));
+    if (typeof vFile === 'string') {
+      const hitsRoll = stubReadFailure('EACCES', 'permission denied');
+      const rolled = await viaIpc('window.promptFlowApi.rollbackVersion(' + J(relPrev) + ', ' + J(vFile) + ')');
+      fsp.readFile = realReadFile;
+      check('读旧正文失败时 rollback-version 同样报 E_PREV_READ',
+        rolled.ok === false && /E_PREV_READ/.test(String(rolled.message)) && hitsRoll.n > 0,
+        JSON.stringify(rolled).slice(0, 200) + ' 桩命中 ' + hitsRoll.n);
+      const afterRollback = await realReadFile.call(fsp, fullPrev, 'utf8');
+      check('回滚被拒后磁盘正文没有被覆盖', afterRollback === onDiskBefore,
+        '盘上现在是 ' + JSON.stringify(afterRollback.slice(0, 120)));
+    }
+  } catch (e) {
+    check('读旧正文失败用例执行完成', false, e && e.message);
+  } finally {
+    fsp.readFile = realReadFile;
+    for (const r of [relPrev, relPrevNew]) {
+      try { await fsp.rm(path.join(DATA_ROOT, r), { force: true }); } catch {}
+      try { await fsp.rm(versionDirFor(r), { recursive: true, force: true }); } catch {}
+    }
+  }
 
   return out;
 }
