@@ -41,7 +41,12 @@ const dialogQueue = [
   // 13a 取消 → 13b 不保存 → 13c 保存。
   { kind: 'message', response: 2 },                          // 13a 取消
   { kind: 'message', response: 1 },                          // 13b 不保存
-  { kind: 'message', response: 0 }                           // 13c 保存
+  { kind: 'message', response: 0 },                          // 13c 保存
+  // 切到英文后的原生对话框探针（见主进程语言自检那一段）。原生框不在 DOM 里，
+  // "clone body 查残留中文"看不到它们，所以真的弹一次、由桩记下实际参数再断言。
+  // 两条都返回取消：探针只关心弹出时的按钮/标题文案，不该真导出文件。
+  { kind: 'message', response: 0 },                          // 探针：confirm
+  { canceled: true }                                         // 探针：exportZip（不写文件）
 ];
 const dialogQueuePath = path.join(dataDir, '__dialogs.json');
 fs.writeFileSync(dialogQueuePath, JSON.stringify(dialogQueue), 'utf8');
@@ -111,7 +116,11 @@ child.on('exit', (code) => {
     /\[selftest:fn\] PASS 未保存三选一点不保存：切过去了/,
     /\[selftest:fn\] PASS 未保存三选一点不保存：version 没有自增/,
     /\[selftest:fn\] PASS 未保存三选一点保存：草稿真的落盘了/,
-    /\[selftest:fn\] PASS 未保存三选一点保存：version 自增到 2/
+    /\[selftest:fn\] PASS 未保存三选一点保存：version 自增到 2/,
+    // 原生对话框的本地化。这两条必须在清单里：它们在 if (lang === 'en' &&
+    // PFM_SELFTEST_DIALOGS) 里，条件不成立时整段被跳过，只靠"没有 FAIL"是绿的。
+    /\[selftest\] PASS 英文界面下原生确认框走了 i18n/,
+    /\[selftest\] PASS 英文界面下文件对话框标题走了 i18n/
   ];
   const missing = mustHave.filter(re => !re.test(out));
   if (missing.length) console.error('[test:fn] 缺少必需的检查项: ' + missing.map(String).join(', '));

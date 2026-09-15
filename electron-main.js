@@ -99,7 +99,14 @@ const FRONTMATTER = require('./src/frontmatter.js');
 let menuLang = null;
 function mt(key) {
   const tbl = I18N_TABLE[menuLang === 'en' ? 'en' : 'zh'] || I18N_TABLE.zh;
-  return tbl[key] != null ? tbl[key] : (I18N_TABLE.zh[key] != null ? I18N_TABLE.zh[key] : key);
+  if (tbl[key] != null) return tbl[key];
+  if (I18N_TABLE.zh[key] != null) return I18N_TABLE.zh[key];
+  // 查不到就回退成键名本身，界面上会露出 dlgExportZip 这样的字符串。
+  // 这个回退很容易骗过检查：键名里没有中文，所以"英文界面下没有残留中文"
+  // 那条断言照样是绿的（写这段时就真的这样漏过去一次——四个对话框标题全是
+  // 键名，测试全绿）。所以这里必须吼一声，让自检的 FAIL 匹配能抓到。
+  console.error('[i18n] 主进程用了不存在的键: ' + key);
+  return key;
 }
 
 // 某些 Windows 环境 GPU 驱动/运行库缺失，禁用 GPU 硬件加速避免 GPU 进程崩溃。
@@ -1228,13 +1235,17 @@ ipcMain.handle('reload-window', () => {
   return true;
 });
 
+// 按钮和标题都走 mt()：原先写死中文，英文界面下会弹出一个中英混排的框——
+// 提示内容是渲染进程按当前语言传来的英文，按钮却是"取消 / 确定"。
+// 主进程能直接读同一份 i18n 表（见文件开头的 I18N_TABLE），不必让渲染进程
+// 把每个按钮文案都通过 IPC 传一遍。
 ipcMain.handle('confirm', async (e, message) => {
   const res = await dialog.showMessageBox(win, {
     type: 'question',
-    buttons: ['取消', '确定'],
+    buttons: [mt('cancel_'), mt('ok')],
     defaultId: 1,
     cancelId: 0,
-    message: '确认',
+    message: mt('confirm'),
     detail: message
   });
   return res.response === 1;
@@ -1244,16 +1255,16 @@ ipcMain.handle('confirm', async (e, message) => {
 // confirm 只有两个按钮，表达不了"不保存但继续"这个选项——而切文件/切标签时
 // 用户真正需要的就是它（见渲染进程的 leaveEditForSwitch）。
 //
-// 按钮文案由渲染进程传进来：主进程没有 i18n 字典，写死中文的话英文界面下
-// 会弹出一个中英混排的框（现有的 confirm 就是这样，属于已知欠账）。
+// 文案仍接受渲染进程传入（它有完整的 t() 上下文），但兜底值改成 mt() 而不是
+// 写死中文：漏传时至少跟着界面语言走，不会突然冒出一个中文按钮。
 // cancelId 指向"取消"，所以按 Esc 或点窗口关闭按钮都等于取消——
 // 默认取最安全的那个分支，不会把草稿丢掉。
 ipcMain.handle('confirm-unsaved', async (e, opts) => {
   const o = opts || {};
   const labels = [
-    String(o.save || '保存'),
-    String(o.discard || '不保存'),
-    String(o.cancel || '取消')
+    String(o.save || mt('saveChanges')),
+    String(o.discard || mt('discardChanges')),
+    String(o.cancel || mt('cancel'))
   ];
   const res = await dialog.showMessageBox(win, {
     type: 'warning',
@@ -1262,7 +1273,7 @@ ipcMain.handle('confirm-unsaved', async (e, opts) => {
     cancelId: 2,
     // noLink 防止 Windows 把三个按钮渲染成命令链接样式，和应用里其他对话框不一致
     noLink: true,
-    message: String(o.title || '有未保存的修改'),
+    message: String(o.title || mt('unsavedTitle')),
     detail: String(o.detail || '')
   });
   return ['save', 'discard', 'cancel'][res.response] || 'cancel';
@@ -1273,7 +1284,7 @@ ipcMain.handle('export-zip', async () => {
   const p = n => String(n).padStart(2, '0');
   const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
   const res = await dialog.showSaveDialog(win, {
-    title: '导出备份',
+    title: mt('dlgExportZip'),
     defaultPath: `prompt-backup-${stamp}.zip`,
     filters: [{ name: 'ZIP', extensions: ['zip'] }]
   });
@@ -1309,7 +1320,7 @@ ipcMain.handle('export-single', async (e, rel) => {
   const meta = parseFrontmatter(await fsp.readFile(full, 'utf8')).meta;
   const fileName = (meta.title || path.basename(rel, '.md')) + '.md';
   const res = await dialog.showSaveDialog(win, {
-    title: '导出提示词',
+    title: mt('dlgExportSingle'),
     defaultPath: fileName,
     filters: [{ name: 'Markdown', extensions: ['md'] }]
   });
@@ -1345,7 +1356,7 @@ async function importMarkdown(fileName, content) {
 
 ipcMain.handle('import-single', async () => {
   const res = await dialog.showOpenDialog(win, {
-    title: '导入提示词',
+    title: mt('dlgImportSingle'),
     filters: [{ name: 'Markdown', extensions: ['md'] }],
     properties: ['openFile']
   });
@@ -1358,7 +1369,7 @@ ipcMain.handle('import-single', async () => {
 
 ipcMain.handle('import-zip', async () => {
   const res = await dialog.showOpenDialog(win, {
-    title: '导入备份包',
+    title: mt('dlgImportZip'),
     filters: [{ name: 'ZIP', extensions: ['zip'] }],
     properties: ['openFile']
   });
@@ -1471,6 +1482,12 @@ async function runSearchBench(count) {
 // 往中间插一个消息框应答就会把后面四个导出/导入的应答全错位一格。
 // 不带 kind 的条目算文件对话框，保持既有队列不用改。
 const selfTestDialogCalls = { file: 0, messageBox: 0 };
+// 最近一次消息框的实际参数。原生对话框不在 DOM 里，渲染进程那段"切到英文后
+// clone body 查残留中文"根本看不到它，所以主进程留一份给自检断言用——
+// 否则"按钮写死中文"这类缺陷在自动化里是完全不可见的。
+let selfTestLastMessageBox = null;
+// 同理留一份文件对话框的标题（导出备份 / 导出提示词 / 导入提示词 / 导入备份包）。
+let selfTestLastFileDialog = null;
 function installSelfTestDialogStubs() {
   const queuePath = process.env.PFM_SELFTEST_DIALOGS;
   const takeNext = (kind, fallback) => {
@@ -1489,12 +1506,18 @@ function installSelfTestDialogStubs() {
       return fallback;
     }
   };
-  dialog.showSaveDialog = async () => {
+  const recordFile = (args) => {
+    const opts = (args.length > 1 ? args[1] : args[0]) || {};
+    selfTestLastFileDialog = { title: opts.title == null ? '' : String(opts.title) };
+  };
+  dialog.showSaveDialog = async (...args) => {
     selfTestDialogCalls.file++;
+    recordFile(args);
     return takeNext('file', { canceled: true });
   };
-  dialog.showOpenDialog = async () => {
+  dialog.showOpenDialog = async (...args) => {
     selfTestDialogCalls.file++;
+    recordFile(args);
     return takeNext('file', { canceled: true, filePaths: [] });
   };
   // 消息框（确认 / 三选一的未保存提示）。回退值取调用方自己声明的 cancelId，
@@ -1503,6 +1526,11 @@ function installSelfTestDialogStubs() {
   dialog.showMessageBox = async (...args) => {
     const opts = (args.length > 1 ? args[1] : args[0]) || {};
     selfTestDialogCalls.messageBox++;
+    selfTestLastMessageBox = {
+      buttons: Array.isArray(opts.buttons) ? opts.buttons.slice() : [],
+      message: opts.message == null ? '' : String(opts.message),
+      detail: opts.detail == null ? '' : String(opts.detail)
+    };
     return takeNext('message', { response: Number.isInteger(opts.cancelId) ? opts.cancelId : 0 });
   };
   console.log('[selftest] 已启用对话框桩，队列文件: ' + queuePath);
@@ -3105,6 +3133,54 @@ function attachSelfTest(targetWin) {
               else fail('切换到英文后界面外壳仍有中文（' + res.total + ' 处）: ' + res.chunks.join(' | '));
             } else {
               console.log('[selftest] 语言已切到 ' + res.lang);
+            }
+            // 原生对话框（系统弹的确认框 / 文件选择框）不在 DOM 里，上面那段
+            // clone body 查中文的检查根本看不到它们。而主进程原先把按钮和标题
+            // 写死成中文，英文用户看到的是"提示是英文、按钮是取消/确定"的混排框——
+            // 这个缺陷在自动化里一直是完全不可见的。
+            //
+            // 这里真的走一遍 IPC 让对话框弹出来（桩会拦下并记下实际参数），
+            // 再断言参数里没有中文。不能只静态查源码有没有 mt()：
+            // 传错键、mt() 查不到键回退成中文，源码看着都是对的。
+            if (lang === 'en' && process.env.PFM_SELFTEST_DIALOGS) {
+              const cjk = /[\u4e00-\u9fa5]/;
+              await targetWin.webContents.executeJavaScript(
+                'window.promptFlowApi.confirm("probe")', true);
+              const mb = selfTestLastMessageBox;
+              if (!mb) {
+                fail('英文界面下没能捕获到确认框的实际参数');
+              } else {
+                // 同样不能只查中文：键名里没有中文，弹成 'cancel_' 也会过。
+                // 直接和表里的英文原文逐个比对。
+                const wantButtons = [I18N_TABLE.en.cancel_, I18N_TABLE.en.ok];
+                const wantMessage = I18N_TABLE.en.confirm;
+                const sameButtons = mb.buttons.length === wantButtons.length
+                  && mb.buttons.every((b, i) => b === wantButtons[i]);
+                if (sameButtons && mb.message === wantMessage) {
+                  console.log('[selftest] PASS 英文界面下原生确认框走了 i18n（按钮: ' + mb.buttons.join(' / ') + '）');
+                } else {
+                  fail('英文界面下原生确认框文案不等于表里的英文原文（中文残留或在弹键名）：'
+                    + '按钮 ' + JSON.stringify(mb.buttons) + ' 应为 ' + JSON.stringify(wantButtons)
+                    + '，标题 ' + JSON.stringify(mb.message) + ' 应为 ' + JSON.stringify(wantMessage));
+                }
+              }
+              await targetWin.webContents.executeJavaScript(
+                'window.promptFlowApi.exportZip()', true);
+              const fd = selfTestLastFileDialog;
+              // 只查"有没有中文"是不够的：mt() 查不到键时会回退成键名本身，
+              // 而 'dlgExportZip' 这种键名里一个中文都没有，照样过。
+              // 实测就是这么漏的——四个标题一度全在弹键名，断言还是绿的。
+              // 所以这里直接和表里的英文原文比对。
+              const wantTitle = I18N_TABLE.en.dlgExportZip;
+              if (!fd) {
+                fail('英文界面下没能捕获到文件对话框的实际参数');
+              } else if (cjk.test(fd.title)) {
+                fail('英文界面下文件对话框标题仍是中文: ' + fd.title);
+              } else if (fd.title !== wantTitle) {
+                fail('文件对话框标题不等于表里的英文原文（可能在弹键名）: 实际 ' + JSON.stringify(fd.title) + '，应为 ' + JSON.stringify(wantTitle));
+              } else {
+                console.log('[selftest] PASS 英文界面下文件对话框标题走了 i18n（' + fd.title + '）');
+              }
             }
           }
         }

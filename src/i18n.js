@@ -243,6 +243,12 @@ const I18N = {
     importPickTitle: '选择导入方式',
     importSingleMd: '导入单个 .md',
     importZipBackup: '导入 ZIP 备份',
+    // 系统对话框的标题（主进程 dialog.show*Dialog 用，和菜单一样走 mt()）。
+    // 原先这四个标题和 confirm 的按钮都写死中文，英文界面下弹出的是中英混排的框。
+    dlgExportZip: '导出备份',
+    dlgExportSingle: '导出提示词',
+    dlgImportSingle: '导入提示词',
+    dlgImportZip: '导入备份包',
     // 通用
     sep: '：',
     confirm: '确认',
@@ -488,6 +494,12 @@ const I18N = {
     importPickTitle: 'Choose import method',
     importSingleMd: 'Import a single .md',
     importZipBackup: 'Import ZIP backup',
+    // 系统对话框的标题（主进程 dialog.show*Dialog 用，和菜单一样走 mt()）。
+    // 原先这四个标题和 confirm 的按钮都写死中文，英文界面下弹出的是中英混排的框。
+    dlgExportZip: 'Export Backup',
+    dlgExportSingle: 'Export Prompt',
+    dlgImportSingle: 'Import Prompt',
+    dlgImportZip: 'Import Backup',
     // 通用
     sep: ': ',
     confirm: 'Confirm',

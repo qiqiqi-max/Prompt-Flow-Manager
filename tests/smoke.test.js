@@ -291,6 +291,17 @@ assert(shadow.length === 0, '没有在遮蔽了 t 的回调里调用 t()' + (sha
   for (const m of rendererSrc.matchAll(/\bt(?:Err)?\('([^']+)'/g)) used.add(m[1]);
   const missingR = [...used].filter(k => !(k in I18N.zh));
   assert(missingR.length === 0, 'renderer.js 引用的 i18n 键都存在' + (missingR.length ? '，缺失：' + missingR.join(', ') : ''));
+  // 主进程的 mt() 同样要查。它查不到键时回退成键名本身，而键名里没有中文，
+  // 所以"英文界面下无残留中文"那条运行时断言抓不到——写这段时就真漏过一次：
+  // 四个文件对话框的标题全是 dlgExportBackup 这样的键名，测试却全绿。
+  const mtUsed = new Set();
+  for (const m of mainSrc.matchAll(/\bmt\('([^']+)'\)/g)) mtUsed.add(m[1]);
+  assert(mtUsed.size >= 15, '收集到主进程用的 mt() 键（' + mtUsed.size + ' 个）');
+  const missingMt = [...mtUsed].filter(k => !(k in I18N.zh) || !(k in I18N.en));
+  assert(missingMt.length === 0,
+    '主进程 mt() 引用的键中英都存在' + (missingMt.length ? '，缺失：' + missingMt.join(', ') : ''));
+  assert(/console\.error\('\[i18n\] 主进程用了不存在的键/.test(mainSrc),
+    'mt() 查不到键时会报错（否则界面上只是露出键名，静默且检查抓不到）');
   assert(htmlKeys.size >= 40, 'index.html 上挂了足够多的 data-i18n（' + htmlKeys.size + ' 个）');
 }
 
