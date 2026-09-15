@@ -2006,9 +2006,17 @@ async function init() {
   $('btn-settings-close').onclick = () => $('settings-drawer').classList.add('hidden');
   $('btn-empty-trash').onclick = async () => {
     if (await confirmDialog(t('emptyTrashConfirm'))) {
-      await api.emptyTrash();
-      openTrash();
-      toast(t('trashCleared'), 'success');
+      // 失败时同样要重画抽屉：删不掉的条目主进程会留在索引里，
+      // 用户得看见还剩哪些没清掉。原先没有 catch，主进程抛错只在控制台里，
+      // 界面照样弹"已清空"，而回收站其实一条都没少。
+      try {
+        await api.emptyTrash();
+        openTrash();
+        toast(t('trashCleared'), 'success');
+      } catch (e) {
+        openTrash();
+        toast(tErr('emptyTrashFailed', e), 'error');
+      }
     }
   };
 
@@ -2067,7 +2075,12 @@ async function init() {
     else if (action === 'export') exportZip();
     else if (action === 'empty-trash') {
       confirmDialog(t('emptyTrashConfirmShort')).then(ok => {
-        if (ok) { api.emptyTrash().then(() => toast(t('trashCleared'), 'success')); }
+        if (!ok) return;
+        // 菜单入口没有抽屉可刷新，但失败必须报出来，不能只弹"已清空"
+        api.emptyTrash().then(
+          () => toast(t('trashCleared'), 'success'),
+          (e) => toast(tErr('emptyTrashFailed', e), 'error')
+        );
       });
     }
     else if (action === 'toggle-theme') toggleTheme();

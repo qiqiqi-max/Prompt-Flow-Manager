@@ -575,12 +575,23 @@ function queueConfigWrite(fn) {
 // 环也就构造不出来。
 //
 // 全局约定的获取顺序（跨 key 类别）：ver:*（组内按字典序） → trash → config。
-// 当前所有调用方都符合：save-file/pin/rollback 只占 ver:<rel>；trash 占 trash 后
-// 再占 config；restore/empty-trash 只占 trash；set-config/项目类型只占 config；
-// rename 占两个 ver:* 后再占 config。没有任何一处反向获取，所以无环。
-// 新增写操作时若要占多个 key，必须沿用这个顺序。
+// 当前所有调用方都符合：save-file/pin/rollback 只占 ver:<rel>；trash 和 restore
+// 占 ver:<rel> 后再占 trash（trash 内部还会再占 config）；empty-trash 只占 trash；
+// set-config/项目类型只占 config；rename 占两个 ver:* 后再占 config。
+// 没有任何一处反向获取，所以无环。新增写操作时若要占多个 key，必须沿用这个顺序。
+// 排序不能用裸字典序：'config' < 'trash' < 'ver:'，正好和真实获取顺序相反。
+// 只有 ver:* 一类多 key 时（rename）碰不出问题，一旦有人同时占 ver:* 和 trash，
+// 字典序就会把 trash 排到前面，和 trash handler 内部"ver → trash → config"的
+// 嵌套顺序对着来，环就出现了。所以先按类别 rank 排，再在类别内按字典序。
+function lockRank(key) {
+  if (key === 'config') return 2;
+  if (key === 'trash') return 1;
+  return 0; // ver:<rel>
+}
 function queueWriteMulti(keys, fn) {
-  const uniq = Array.from(new Set(keys)).sort();
+  const uniq = Array.from(new Set(keys)).sort(
+    (a, b) => (lockRank(a) - lockRank(b)) || (a < b ? -1 : a > b ? 1 : 0)
+  );
   const acquire = (i) => (i >= uniq.length ? fn() : queueWrite(uniq[i], () => acquire(i + 1)));
   return acquire(0);
 }
@@ -903,7 +914,13 @@ async function isLocked(rel) {
 // 整个 handler 排进 trash 链：中间的 readTrashIndex → unshift → writeTrashIndex
 // 是 read-modify-write，并发时后写的会覆盖掉前一条记录，而文件已经移进 .trash
 // 成了索引里查不到的孤儿。
-ipcMain.handle('trash', async (e, rel) => queueWrite('trash', async () => {
+//
+// 除了 trash 还要占 ver:<rel>：这个 handler 会把正文和版本目录搬走，而 save-file
+// 只占 ver:<rel>，两边原先在同一个文件上完全不互斥。删除进行中发起的保存
+// （Ctrl+S、切文件时的自动保存都会）会读到删除前的 prev、写回同一个路径，
+// 然后被这里的 fsp.rename 一起卷进 .trash：保存返回成功，内容却不在树里了。
+// 顺序由 queueWriteMulti 统一排（ver:* → trash），内部再占 config 也不成环。
+ipcMain.handle('trash', async (e, rel) => queueWriteMulti(['ver:' + String(rel), 'trash'], async () => {
   // 删除同样是改动库内容：不加白名单就能把 config.json 移进回收站
   const full = safeJoinWritable(rel);
   if (await isLocked(rel)) throw appError('E_LOCKED', rel);
@@ -939,7 +956,27 @@ ipcMain.handle('trash', async (e, rel) => queueWrite('trash', async () => {
     versionStore = path.basename(vStorePath);
   }
   index.items.unshift({ id, originalRel: rel, name: path.basename(rel), trashedAt: new Date().toISOString(), store: storeName, versionStore });
-  await writeTrashIndex(index);
+  // 索引写失败必须把文件搬回原处。原先是直接把异常抛出去：正文已经躺在 .trash 里，
+  // 索引里却没有对应条目，于是文件树看不到、回收站列不出、empty-trash 也不会碰它，
+  // 等于永久丢失，而用户看到的只是一句"删除失败"——照字面理解文件应该还在。
+  try {
+    await writeTrashIndex(index);
+  } catch (err) {
+    let back = true;
+    try {
+      await fsp.rename(storePath, full);
+      dropFromCache(full);
+    } catch (e2) {
+      back = false;
+      console.error('删除回滚失败，正文留在回收站但索引没有条目:', storePath, e2.message);
+    }
+    if (versionStore) {
+      try { await fsp.rename(trashStorePath(versionStore), vDir); } catch (e2) {
+        console.error('删除回滚：版本目录没能搬回:', versionStore, e2.message);
+      }
+    }
+    throw appError(back ? 'E_TRASH_INDEX_WRITE' : 'E_TRASH_ORPHANED', rel);
+  }
   // 清掉锁列表里的残留条目。和 rename 同理：读改写整个进配置队列，
   // 失败只记日志——文件已经在回收站里了，抛出去会显示"删除失败"但东西确实删了。
   try {
@@ -957,8 +994,25 @@ ipcMain.handle('trash', async (e, rel) => queueWrite('trash', async () => {
 
 ipcMain.handle('list-trash', async () => readTrashIndex());
 
+// 恢复也要动库里的文件（正文搬回 originalRel、还原版本目录），所以除了 trash
+// 还得占 ver:<originalRel>。否则并发的 save-file 能插在"判断目标是否存在"和
+// fsp.rename 之间：那次保存返回成功，随后被 rename 无声覆盖（rename 不看目标
+// 存不存在）。
+//
+// 锁 key 只能从索引里问出来，所以先在锁外读一遍。这一遍纯粹用来挑 key，
+// 没有任何校验依赖它：条目在拿到锁之前被并发的 empty-trash 摘掉时，
+// 锁内的 find 会返回 undefined，照旧抛 E_TRASH_ITEM_MISSING。
+async function restoreLockKeys(id) {
+  try {
+    const idx = await readTrashIndex();
+    const it = idx.items.find(i => i.id === id);
+    if (it && it.originalRel != null) return ['ver:' + String(it.originalRel), 'trash'];
+  } catch {}
+  return ['trash'];
+}
+
 // 同样排进 trash 链：restore 也是 read-modify-write（读索引 → 移回文件 → 删条目）。
-ipcMain.handle('restore', async (e, id) => queueWrite('trash', async () => {
+ipcMain.handle('restore', async (e, id) => queueWriteMulti(await restoreLockKeys(id), async () => {
   const index = await readTrashIndex();
   const item = index.items.find(i => i.id === id);
   if (!item) throw appError('E_TRASH_ITEM_MISSING');
@@ -1036,18 +1090,47 @@ ipcMain.handle('restore', async (e, id) => queueWrite('trash', async () => {
 ipcMain.handle('empty-trash', async () => queueWrite('trash', async () => {
   const index = await readTrashIndex();
   // 用 rm(recursive) 而不是 unlink：早期版本允许把目录搬进回收站，
-  // unlink 删目录会 EPERM 失败，而索引在下面被无条件清空，
-  // 结果那棵树永久留在 .trash 里且再也没有入口。
-  // 校验放在 try 里：store 名越界时抛错被记日志并跳过这一条，
-  // 而不是中断整个清空——否则后面的 writeTrashIndex 执行不到，
-  // 已经删掉的条目还留在索引里，回收站里全是点不动的幽灵记录。
+  // unlink 删目录会 EPERM 失败。
+  //
+  // 一条删不掉不能拖垮整轮清空（否则后面的 writeTrashIndex 执行不到，已经删掉的
+  // 条目还留在索引里，回收站里全是点不动的幽灵记录），但也不能像原先那样"记条日志
+  // 然后无条件清空索引"：文件还在 .trash 占着磁盘，索引里的条目却没了，UI 再也
+  // 看不到它、下一次清空也不会再碰它。所以删失败的条目原样留在索引里，
+  // 并把失败抛给渲染进程——用户至少知道回收站没清干净，还能重试。
+  const kept = [];
+  const failedNames = [];
   for (const item of index.items) {
-    try { await fsp.rm(trashStorePath(item.store), { recursive: true, force: true }); } catch (e) { console.error('清空回收站条目失败:', item.store, e.message); }
+    // store 名越界/损坏说明索引被写坏了，.trash 里并没有这个名字对应的文件。
+    // 留着条目会让回收站永远清不掉，所以摘掉它，只记日志。
+    let storePath;
+    try { storePath = trashStorePath(item.store); } catch (e) {
+      console.error('清空回收站跳过损坏条目:', item.store, e.message);
+      continue;
+    }
+    let ok = true;
+    try { await fsp.rm(storePath, { recursive: true, force: true }); } catch (e) {
+      ok = false;
+      console.error('清空回收站条目失败:', item.store, e.message);
+    }
     if (item.versionStore) {
-      try { await fsp.rm(trashStorePath(item.versionStore), { recursive: true, force: true }); } catch (e) { console.error('清空回收站版本目录失败:', item.versionStore, e.message); }
+      let vPath = null;
+      try { vPath = trashStorePath(item.versionStore); } catch (e) {
+        console.error('清空回收站跳过损坏的版本目录名:', item.versionStore, e.message);
+      }
+      if (vPath) {
+        try { await fsp.rm(vPath, { recursive: true, force: true }); } catch (e) {
+          ok = false;
+          console.error('清空回收站版本目录失败:', item.versionStore, e.message);
+        }
+      }
+    }
+    if (!ok) {
+      kept.push(item);
+      failedNames.push(item.name || item.originalRel || item.id);
     }
   }
-  await writeTrashIndex({ items: [] });
+  await writeTrashIndex({ items: kept });
+  if (kept.length) throw appError('E_TRASH_EMPTY_PARTIAL', failedNames.join(', '));
   return true;
 }));
 
@@ -2038,6 +2121,311 @@ async function runSecurityRegression(targetWin) {
       try { await fsp.rm(path.join(DATA_ROOT, r), { force: true }); } catch {}
       try { await fsp.rm(versionDirFor(r), { recursive: true, force: true }); } catch {}
     }
+  }
+
+  // ---- 10. 回收站的写锁缺口与静默失败 ----
+  // 三个独立问题，共用一批构造手法，所以放在同一节里：
+  //   a) trash / restore 只占 trash 键，没占 ver:<rel>。这两个 handler 都在搬库里的
+  //      正文和版本目录，而 save-file 只占 ver:<rel>——同一个文件上两边完全不互斥。
+  //   b) empty-trash 删不掉某一条时只记日志，然后无条件把索引清空：文件还在 .trash
+  //      里占着磁盘，索引条目却没了，UI 再也看不到它，下次清空也不会再碰它。
+  //   c) trash 写索引失败时直接抛错，而正文已经躺在 .trash 里了：索引没有条目，
+  //      文件树看不到、回收站列不出，等于永久丢失，而用户只看到一句"删除失败"。
+  //
+  // 并发那两条靠"把窗口撑宽"来做成可判定的：给关键那一次 fsp.rename 前面塞一段
+  // 固定延时，再在延时中间发起 save-file。修复在 → save-file 被锁挡在外面，等
+  // 前一个操作做完才跑，内容完好；修复不在 → save-file 必然落进窗口里，写完的正文
+  // 被随后的 rename 搬走或覆盖，而两边都返回成功。延时只影响耗时，不改变任何语义。
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const realRename = fsp.rename;
+  const realRm = fsp.rm;
+  const realWriteFile = fsp.writeFile;
+  // 只延迟指定的那一次 rename（按源/目标全路径精确匹配），其余 rename 原样放行。
+  // 尤其不能误伤 writeFileAtomic 写 index.json 的 tmp→正式名那一次，
+  // 否则测的就不是同一件事了。
+  const stubRenameDelay = (matchFn, ms) => {
+    const hits = { n: 0 };
+    fsp.rename = async function (src, dst, ...rest) {
+      let hit = false;
+      try { hit = matchFn(path.resolve(String(src)), path.resolve(String(dst))); } catch {}
+      if (hit) { hits.n++; await sleep(ms); }
+      return realRename.call(this, src, dst, ...rest);
+    };
+    return hits;
+  };
+  const mkTrashDoc = (body) => ['---', 'title: sec-trashlock', '---', body].join('\n');
+
+  // ---- 10a. 删除进行中的保存不能被一起卷进回收站 ----
+  const relRace = 'prompts/testing/sec-trash-race.md';
+  const fullRace = safeJoinWritable(relRace);
+  try {
+    const made = await viaIpc('window.promptFlowApi.createFile(' + J(relRace) + ', ' + J(mkTrashDoc('OLD-BODY')) + ')');
+    check('删除并发用例前置：创建文件', made.ok === true, JSON.stringify(made).slice(0, 160));
+
+    // 只拦"把这个文件搬进 .trash"那一次 rename
+    const hits = stubRenameDelay(
+      (src, dst) => src === path.resolve(fullRace) && path.dirname(dst) === path.resolve(TRASH_DIR_NORM),
+      500
+    );
+    const both = await targetWin.webContents.executeJavaScript(
+      '(async () => { const api = window.promptFlowApi;' +
+      '  const settle = (p) => p.then(v => ({ ok: true, value: v }), e => ({ ok: false, message: String(e && e.message || e) }));' +
+      '  const pTrash = settle(api.trash(' + J(relRace) + '));' +
+      '  await new Promise(r => setTimeout(r, 80));' +
+      '  const pSave = settle(api.saveFile(' + J(relRace) + ', ' + J(mkTrashDoc('SAVED-BODY')) + '));' +
+      '  return { trash: await pTrash, save: await pSave }; })()', true);
+    fsp.rename = realRename;
+
+    check('删除并发用例前置：延时窗口真的生效了', hits.n > 0, '命中 ' + hits.n + ' 次');
+    check('删除并发用例前置：删除本身成功', both.trash.ok === true, JSON.stringify(both.trash).slice(0, 160));
+    // 保存报成功是这个 bug 之所以危险的原因：失败会被用户看见，成功不会。
+    check('删除并发用例前置：保存也报成功', both.save.ok === true, JSON.stringify(both.save).slice(0, 160));
+
+    // 核心断言：那次保存的正文必须仍然在库里，而不是被 rename 一起搬进 .trash。
+    // 修复在 → save-file 排在 trash 后面执行，把文件重新建出来；
+    // 修复不在 → save-file 写完的正文被 trash 的 rename 搬走，这里读不到任何东西。
+    let onDisk = null;
+    try { onDisk = await fsp.readFile(fullRace, 'utf8'); } catch {}
+    check('删除进行中完成的保存没有被一起搬进回收站',
+      onDisk != null && /SAVED-BODY/.test(onDisk),
+      onDisk == null ? '文件已不在库里（正文只剩 .trash 里那份）' : JSON.stringify(onDisk.slice(0, 120)));
+
+    // 另一头的对照：回收站里那份应该是删除时刻的旧正文。
+    // 若它变成了 SAVED-BODY，说明保存插进了 rename 之前，两边确实交叉了。
+    const idx = await readTrashIndex();
+    const it = idx.items.find(i => i.originalRel === relRace);
+    check('删除并发用例前置：回收站有对应条目', !!it, JSON.stringify(idx.items).slice(0, 160));
+    if (it) {
+      let stored = null;
+      try { stored = await fsp.readFile(trashStorePath(it.store), 'utf8'); } catch {}
+      check('回收站里存的是删除时刻的旧正文，不是并发保存的新正文',
+        stored != null && /OLD-BODY/.test(stored) && !/SAVED-BODY/.test(stored),
+        stored == null ? 'store 读不到' : JSON.stringify(stored.slice(0, 120)));
+    }
+  } catch (e) {
+    check('删除并发用例执行完成', false, e && e.message);
+  } finally {
+    fsp.rename = realRename;
+    try { await fsp.rm(fullRace, { force: true }); } catch {}
+    try { await fsp.rm(versionDirFor(relRace), { recursive: true, force: true }); } catch {}
+    try { await writeTrashIndex({ items: [] }); } catch {}
+    try { for (const f of await fsp.readdir(TRASH_DIR)) if (f !== 'index.json') await fsp.rm(path.join(TRASH_DIR, f), { recursive: true, force: true }); } catch {}
+  }
+
+  // ---- 10b. 恢复进行中的保存不能被 rename 无声覆盖 ----
+  // restore 先 existsSync 判断目标在不在，再 rename。判断和 rename 之间插进一次
+  // save-file，那次保存会写出文件、返回成功，紧接着被 rename 覆盖掉（rename 不看
+  // 目标存不存在）。占上 ver:<originalRel> 之后 save-file 只能排在后面。
+  const relRestore = 'prompts/testing/sec-restore-race.md';
+  const fullRestore = safeJoinWritable(relRestore);
+  try {
+    const made = await viaIpc('window.promptFlowApi.createFile(' + J(relRestore) + ', ' + J(mkTrashDoc('TRASHED-BODY')) + ')');
+    check('恢复并发用例前置：创建文件', made.ok === true, JSON.stringify(made).slice(0, 160));
+    const trashed = await viaIpc('window.promptFlowApi.trash(' + J(relRestore) + ')');
+    check('恢复并发用例前置：文件已进回收站', trashed.ok === true, JSON.stringify(trashed).slice(0, 160));
+    const idx0 = await readTrashIndex();
+    const item0 = idx0.items.find(i => i.originalRel === relRestore);
+    check('恢复并发用例前置：拿到回收站条目', !!item0, JSON.stringify(idx0.items).slice(0, 160));
+
+    if (item0) {
+      // 只拦"从 .trash 搬回原位置"那一次 rename
+      const hits = stubRenameDelay(
+        (src, dst) => dst === path.resolve(fullRestore) && path.dirname(src) === path.resolve(TRASH_DIR_NORM),
+        500
+      );
+      const both = await targetWin.webContents.executeJavaScript(
+        '(async () => { const api = window.promptFlowApi;' +
+        '  const settle = (p) => p.then(v => ({ ok: true, value: v }), e => ({ ok: false, message: String(e && e.message || e) }));' +
+        '  const pRestore = settle(api.restore(' + J(item0.id) + '));' +
+        '  await new Promise(r => setTimeout(r, 80));' +
+        '  const pSave = settle(api.saveFile(' + J(relRestore) + ', ' + J(mkTrashDoc('RESTORE-SAVED-BODY')) + '));' +
+        '  return { restore: await pRestore, save: await pSave }; })()', true);
+      fsp.rename = realRename;
+
+      check('恢复并发用例前置：延时窗口真的生效了', hits.n > 0, '命中 ' + hits.n + ' 次');
+      check('恢复并发用例前置：恢复本身成功', both.restore.ok === true, JSON.stringify(both.restore).slice(0, 160));
+      check('恢复并发用例前置：保存也报成功', both.save.ok === true, JSON.stringify(both.save).slice(0, 160));
+
+      // 核心断言：保存是后发的，它的正文必须是最终结果。
+      // 修复不在 → 盘上留下的是 TRASHED-BODY，那次成功的保存被 rename 悄悄吃掉。
+      let onDisk = null;
+      try { onDisk = await fsp.readFile(fullRestore, 'utf8'); } catch {}
+      check('恢复进行中完成的保存没有被 rename 覆盖',
+        onDisk != null && /RESTORE-SAVED-BODY/.test(onDisk),
+        onDisk == null ? '文件不存在' : JSON.stringify(onDisk.slice(0, 120)));
+    }
+  } catch (e) {
+    check('恢复并发用例执行完成', false, e && e.message);
+  } finally {
+    fsp.rename = realRename;
+    try { await fsp.rm(fullRestore, { force: true }); } catch {}
+    try { await fsp.rm(versionDirFor(relRestore), { recursive: true, force: true }); } catch {}
+    try { await writeTrashIndex({ items: [] }); } catch {}
+    try { for (const f of await fsp.readdir(TRASH_DIR)) if (f !== 'index.json') await fsp.rm(path.join(TRASH_DIR, f), { recursive: true, force: true }); } catch {}
+  }
+
+  // ---- 10c. 清空回收站删不掉的条目必须留在索引里并报错 ----
+  // 用桩让某一条的 rm 失败，是因为真构造一个"删不掉的文件"在 CI 上不可靠：
+  // Linux 下把 .trash 设成只读会连 index.json 都写不了，测的就不是同一件事了。
+  // 桩只拦那一个 store 路径，索引读写、其余条目全走真实实现。
+  const relKeep = 'prompts/testing/sec-empty-keep.md';
+  try {
+    const made = await viaIpc('window.promptFlowApi.createFile(' + J(relKeep) + ', ' + J(mkTrashDoc('KEEP-BODY')) + ')');
+    check('清空失败用例前置：创建文件', made.ok === true, JSON.stringify(made).slice(0, 160));
+    const trashed = await viaIpc('window.promptFlowApi.trash(' + J(relKeep) + ')');
+    check('清空失败用例前置：文件已进回收站', trashed.ok === true, JSON.stringify(trashed).slice(0, 160));
+    const idx0 = await readTrashIndex();
+    const item0 = idx0.items.find(i => i.originalRel === relKeep);
+    check('清空失败用例前置：拿到回收站条目', !!item0, JSON.stringify(idx0.items).slice(0, 160));
+
+    if (item0) {
+      const storeFull = trashStorePath(item0.store);
+      const hits = { n: 0 };
+      fsp.rm = function (p, ...rest) {
+        let same = false;
+        try { same = path.resolve(String(p)) === path.resolve(storeFull); } catch {}
+        if (same) {
+          hits.n++;
+          const err = new Error('EPERM: operation not permitted, rm ' + String(p));
+          err.code = 'EPERM';
+          return Promise.reject(err);
+        }
+        return realRm.call(this, p, ...rest);
+      };
+      const emptied = await viaIpc('window.promptFlowApi.emptyTrash()');
+      fsp.rm = realRm;
+
+      check('清空失败用例前置：桩真的被调用到了', hits.n > 0, '命中 ' + hits.n + ' 次');
+      check('清空回收站删不掉条目时报错而不是返回成功',
+        emptied.ok === false && /E_TRASH_EMPTY_PARTIAL/.test(String(emptied.message)),
+        JSON.stringify(emptied).slice(0, 200));
+
+      // 最关键的一条：文件还在 .trash 里，索引条目就必须留着，否则它彻底失去入口。
+      const idx1 = await readTrashIndex();
+      check('删不掉的条目留在索引里，回收站还能看到它',
+        idx1.items.some(i => i.id === item0.id),
+        '索引现在有 ' + idx1.items.length + ' 条: ' + JSON.stringify(idx1.items.map(i => i.originalRel)));
+      check('删不掉的条目对应的文件确实还占着磁盘', fs.existsSync(storeFull), storeFull);
+
+      // 另一半：rm 恢复正常后必须能真的清干净，不能因为上面那次失败卡住
+      const again = await viaIpc('window.promptFlowApi.emptyTrash()');
+      check('恢复可删后再清空一次能成功', again.ok === true, JSON.stringify(again).slice(0, 200));
+      check('第二次清空后索引真的空了', (await readTrashIndex()).items.length === 0);
+      check('第二次清空后文件也真的删掉了', !fs.existsSync(storeFull), storeFull);
+    }
+  } catch (e) {
+    check('清空回收站失败用例执行完成', false, e && e.message);
+  } finally {
+    fsp.rm = realRm;
+    try { await realRm.call(fsp, path.join(DATA_ROOT, relKeep), { force: true }); } catch {}
+    try { await writeTrashIndex({ items: [] }); } catch {}
+  }
+
+  // ---- 10d. 删除时索引写失败必须把文件搬回原处 ----
+  // 桩只拦 writeFileAtomic 给 .trash/index.json 用的那个临时文件，
+  // 回滚要用的 rename 完全没被动过。
+  const relRollback = 'prompts/testing/sec-trash-rollback.md';
+  const fullRollback = safeJoinWritable(relRollback);
+  try {
+    const made = await viaIpc('window.promptFlowApi.createFile(' + J(relRollback) + ', ' + J(mkTrashDoc('ROLLBACK-BODY')) + ')');
+    check('删除回滚用例前置：创建文件', made.ok === true, JSON.stringify(made).slice(0, 160));
+    // 再存一次，让它有版本目录，这样"版本目录也搬回来了"才有对照价值
+    await viaIpc('window.promptFlowApi.saveFile(' + J(relRollback) + ', ' + J(mkTrashDoc('ROLLBACK-BODY-v2')) + ')');
+    const bodyBefore = await fsp.readFile(fullRollback, 'utf8');
+    let snapsBefore = [];
+    try { snapsBefore = (await fsp.readdir(versionDirFor(relRollback))).filter(f => f.endsWith('.md')); } catch {}
+    check('删除回滚用例前置：已有版本目录可作对照', snapsBefore.length >= 1, '快照 ' + snapsBefore.length + ' 条');
+
+    const hits = { n: 0 };
+    fsp.writeFile = function (p, ...rest) {
+      let hit = false;
+      try {
+        const rp = path.resolve(String(p));
+        hit = path.dirname(rp) === path.resolve(TRASH_DIR_NORM) && /^\.tmp-.*-index\.json\.part$/.test(path.basename(rp));
+      } catch {}
+      if (hit) {
+        hits.n++;
+        const err = new Error('EACCES: permission denied, open ' + String(p));
+        err.code = 'EACCES';
+        return Promise.reject(err);
+      }
+      return realWriteFile.call(this, p, ...rest);
+    };
+    const res = await viaIpc('window.promptFlowApi.trash(' + J(relRollback) + ')');
+    fsp.writeFile = realWriteFile;
+
+    check('删除回滚用例前置：桩真的被调用到了', hits.n > 0, '命中 ' + hits.n + ' 次');
+    check('索引写失败时删除报 E_TRASH_INDEX_WRITE 而不是裸系统错误',
+      res.ok === false && /E_TRASH_INDEX_WRITE/.test(String(res.message)),
+      JSON.stringify(res).slice(0, 200));
+
+    // 核心断言：文件必须回到原处。修复不在 → 正文留在 .trash 里而索引没有条目，
+    // 文件树、回收站、下次清空都碰不到它，等于永久丢失。
+    let bodyAfter = null;
+    try { bodyAfter = await fsp.readFile(fullRollback, 'utf8'); } catch {}
+    check('索引写失败后正文回到原位置且内容未变',
+      bodyAfter === bodyBefore,
+      bodyAfter == null ? '文件不在原位置（只剩 .trash 里那份孤儿）' : JSON.stringify(bodyAfter.slice(0, 120)));
+
+    let snapsAfter = [];
+    try { snapsAfter = (await fsp.readdir(versionDirFor(relRollback))).filter(f => f.endsWith('.md')); } catch {}
+    check('索引写失败后版本目录也搬回了原处',
+      snapsAfter.length === snapsBefore.length,
+      '之前 ' + snapsBefore.length + ' 条，现在 ' + snapsAfter.length + ' 条');
+
+    check('索引里没有留下半条记录', !(await readTrashIndex()).items.some(i => i.originalRel === relRollback));
+    let leftover = [];
+    try { leftover = (await fsp.readdir(TRASH_DIR)).filter(f => f !== 'index.json' && !f.startsWith('.tmp-')); } catch {}
+    check('.trash 里没有留下孤儿文件', leftover.length === 0, JSON.stringify(leftover));
+
+    // 复原后照旧能正常删除，证明上面那次失败没把状态弄坏
+    const ok2 = await viaIpc('window.promptFlowApi.trash(' + J(relRollback) + ')');
+    check('恢复可写后删除重新正常工作', ok2.ok === true, JSON.stringify(ok2).slice(0, 200));
+  } catch (e) {
+    check('删除回滚用例执行完成', false, e && e.message);
+  } finally {
+    fsp.writeFile = realWriteFile;
+    try { await fsp.rm(fullRollback, { force: true }); } catch {}
+    try { await fsp.rm(versionDirFor(relRollback), { recursive: true, force: true }); } catch {}
+    try { await writeTrashIndex({ items: [] }); } catch {}
+    try { for (const f of await fsp.readdir(TRASH_DIR)) if (f !== 'index.json') await fsp.rm(path.join(TRASH_DIR, f), { recursive: true, force: true }); } catch {}
+  }
+
+  // ---- 10e. 多 key 获取顺序必须是 ver:* → trash → config ----
+  // trash/restore 现在同时占 ver:<rel> 和 trash，而 trash handler 内部还会再占
+  // config。queueWriteMulti 原先用裸 sort()，而字典序是 config < trash < ver:*，
+  // 正好和真实获取顺序相反——一旦有第二处按 ver → trash 的方向拿锁（比如以后给
+  // save-file 加一次回收站查重），两边就构成环，双方都不会释放。
+  // 这一条测的是那个不变量本身：先占住 trash，再发一个 ['ver:probe','trash'] 的
+  // 多 key 请求，然后看 ver:probe 有没有被它先占走。
+  //   顺序正确（ver 先） → 探针排在后面，此刻跑不了
+  //   顺序反了（trash 先）→ 多 key 请求还卡在 trash 上，ver:probe 是空的，探针立刻跑
+  try {
+    let releaseTrash;
+    const gate = new Promise(r => { releaseTrash = r; });
+    const holder = queueWrite('trash', () => gate);
+    await sleep(30);
+
+    let multiDone = false;
+    const multi = queueWriteMulti(['ver:sec-lock-probe', 'trash'], async () => { multiDone = true; });
+    await sleep(30);
+    check('锁顺序用例前置：多 key 请求此刻确实被 trash 挡住', multiDone === false);
+
+    let probeRan = false;
+    const probe = queueWrite('ver:sec-lock-probe', async () => { probeRan = true; });
+    await sleep(30);
+    check('多 key 请求先占 ver:*，再等 trash（顺序没被字典序倒过来）',
+      probeRan === false,
+      probeRan ? 'ver:sec-lock-probe 还是空的，说明先去抢 trash 了' : '');
+
+    releaseTrash();
+    await holder;
+    await multi;
+    await probe;
+    check('放开 trash 后多 key 请求和探针都能跑完（没有死锁）', multiDone === true && probeRan === true,
+      'multi=' + multiDone + ' probe=' + probeRan);
+  } catch (e) {
+    check('锁顺序用例执行完成', false, e && e.message);
   }
 
   return out;

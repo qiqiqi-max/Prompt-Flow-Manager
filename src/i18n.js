@@ -162,6 +162,7 @@ const I18N = {
     restore: '恢复',
     restoreSuccess: '已恢复',
     restoreFailed: '恢复失败',
+    emptyTrashFailed: '清空回收站失败',
     // 设置
     settings: '设置',
     projectTypes: '工程类型',
@@ -199,6 +200,9 @@ const I18N = {
     // 键名必须逐字等于主进程 appError() 里的错误码，否则 describeError 查不到，
     // 界面上会直接露出 E_XXX。这三条曾因为码名改过、文案没跟着改而失配。
     err_E_TRASH_STORE_MISSING: '回收站里的文件已不存在（可能被手动删除）：{detail}',
+    err_E_TRASH_EMPTY_PARTIAL: '这些条目没能删掉，已留在回收站里：{detail}',
+    err_E_TRASH_INDEX_WRITE: '回收站索引写入失败，文件已放回原处：{detail}',
+    err_E_TRASH_ORPHANED: '删除中断且文件没能放回原处，请在数据目录的 .trash 里手工找回：{detail}',
     err_E_WRITE_FORBIDDEN: '不允许写入该位置：{detail}',
     err_E_EXPORT_WRITE: '写入导出文件失败：{detail}',
     err_E_EXPORT_ARCHIVE: '生成备份包失败：{detail}',
@@ -407,6 +411,7 @@ const I18N = {
     restore: 'Restore',
     restoreSuccess: 'Restored',
     restoreFailed: 'Restore failed',
+    emptyTrashFailed: 'Failed to empty the trash',
     // 设置
     settings: 'Settings',
     projectTypes: 'Project Types',
@@ -440,6 +445,9 @@ const I18N = {
     err_E_TOO_MANY_DUPES: 'Too many duplicates, cannot generate a new name: {detail}',
     err_E_TRASH_DIR_UNSUPPORTED: 'Trash does not support folders; delete files inside individually: {detail}',
     err_E_TRASH_STORE_MISSING: 'The trashed file no longer exists (possibly deleted manually): {detail}',
+    err_E_TRASH_EMPTY_PARTIAL: 'These items could not be deleted and are still in the trash: {detail}',
+    err_E_TRASH_INDEX_WRITE: 'Failed to write the trash index; the file was moved back: {detail}',
+    err_E_TRASH_ORPHANED: 'Delete was interrupted and the file could not be moved back; recover it manually from .trash in the data folder: {detail}',
     err_E_WRITE_FORBIDDEN: 'Writing to this location is not allowed: {detail}',
     err_E_EXPORT_WRITE: 'Failed to write the export file: {detail}',
     err_E_EXPORT_ARCHIVE: 'Failed to build the backup archive: {detail}',
