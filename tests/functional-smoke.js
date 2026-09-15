@@ -109,6 +109,9 @@ child.on('exit', (code) => {
   // 而 FAIL 那条只能证明"没有失败"，证明不了"这一条真的跑到了"——
   // 断言被整段跳过（比如包在 if 里而条件没成立）时它是绿的。
   const mustHave = [
+    // 占位符替换的回显检查。放进清单是因为它包在 if (PFM_SELFTEST_LANG) 里，
+    // 环境变量没传时整段跳过，"没有 FAIL"照样是绿的。
+    /\[selftest\] PASS lang\.js 的 __LANG__ 占位符全部替换成 en/,
     /\[selftest:fn\] PASS 导出 ZIP 返回成功/,
     // 三选一对话框的三条分支各自都要落到磁盘断言上，见 functionalScript 第 13 节
     /\[selftest:fn\] PASS 未保存三选一点取消：没有切走/,

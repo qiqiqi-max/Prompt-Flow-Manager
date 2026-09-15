@@ -431,8 +431,14 @@ assert(/menu\.classList\.remove\('ctx-centered'\); \/\/ 右键菜单按坐标定
 section('UI 点击自检');
 // 之前所有测试都直接调 IPC，绕过了 UI，所以"点了没反应"一路没被发现。
 assert(/PFM_SELFTEST_UI/.test(mainSrc), '主进程支持 UI 点击自检（PFM_SELFTEST_UI）');
-assert(/dispatchEvent\(new MouseEvent\(type/.test(mainSrc), '用真实事件序列 mousedown→mouseup→click 点击');
-assert(/r\.bottom <= window\.innerHeight \+ 1/.test(mainSrc), '弹层可见性判定包含"矩形在视口内"，不只看 hidden 类');
+// 这两条查的是点击逻辑本身，而它已经从主进程的模板字符串搬到了
+// src/selftest/ui.js。继续查 mainSrc 的话两条恒为假——搬代码时就是这么红的。
+// 反过来说，如果当时这两条写成"宽松匹配"，搬完还是绿的，就再也没人知道它们已经空了。
+{
+  const uiScriptSrc = fs.readFileSync(path.join(root, 'src/selftest/ui.js'), 'utf8');
+  assert(/dispatchEvent\(new MouseEvent\(type/.test(uiScriptSrc), '用真实事件序列 mousedown→mouseup→click 点击');
+  assert(/r\.bottom <= window\.innerHeight \+ 1/.test(uiScriptSrc), '弹层可见性判定包含"矩形在视口内"，不只看 hidden 类');
+}
 assert(/拒绝在真实库上点/.test(mainSrc), 'UI 自检未设 PFM_DATA_DIR 时拒绝执行');
 {
   const uiSrc = fs.readFileSync(path.join(root, 'tests/ui-smoke.js'), 'utf8');
@@ -460,8 +466,14 @@ assert(/else break;/.test(rendererSrc), '遇到顶格行才结束 flow 段');
 
 section('只读体检');
 assert(/PFM_SELFTEST_READONLY/.test(mainSrc), '主进程支持只读体检（PFM_SELFTEST_READONLY）');
-assert(/renderFlowDiagram\(steps/.test(mainSrc), '只读体检会真的渲染一遍流程图并数节点');
-assert(/brokenLinks/.test(mainSrc), '只读体检会检查流程图节点指向的文件是否存在');
+// 探测逻辑本身已经搬到 src/selftest/readonly.js（见"自检脚本是真实文件"一节），
+// 所以要查那个文件而不是主进程。查错文件的话断言只是"在 mainSrc 里找不到"，
+// 会变成永远红或者（把模式放宽后）永远绿，两种都不再指向真实行为。
+{
+  const roSrc = fs.readFileSync(path.join(root, 'src/selftest/readonly.js'), 'utf8');
+  assert(/renderFlowDiagram\(steps/.test(roSrc), '只读体检会真的渲染一遍流程图并数节点');
+  assert(/brokenLinks/.test(roSrc), '只读体检会检查流程图节点指向的文件是否存在');
+}
 {
   const uiSrc = fs.readFileSync(path.join(root, 'tests/ui-smoke.js'), 'utf8');
   assert(/PFM_SELFTEST_READONLY/.test(uiSrc), 'test:ui 会跑只读体检');
@@ -563,6 +575,101 @@ section('CI 覆盖');
   // 启动器解压失败也可能返回 0。必须用磁盘副作用证明它真跑到了业务逻辑。
   assert(/ensureSeedData/.test(pkgTest), '验证了只在打包模式执行的首启种子拷贝');
   assert(/portable 产物失败时返回非零/.test(pkgTest), '验证了打包产物失败时确实非零（否则 exit=0 无意义）');
+}
+
+section('自检脚本是真实文件（不是模板字符串）');
+// 这三段一共 415 行真代码。写成主进程里的 `...` 模板字符串时，对所有静态检查
+// 都是不透明的——实测在里面塞一个 `const const x = 1`，node --check、eslint、
+// 冒烟测试三层全绿，而它一运行必炸。
+// 拆成真实 .js 之后 eslint 立刻抓出两个真问题：一个死变量，
+// 以及 `new RegExp('\b' + code + '\b')` —— 模板层里那两个 \b 被转义吃掉一层，
+// 实际构造出的是退格符（码位 8）而不是词边界，于是 4 条"错误码已本地化"
+// 恒为绿，永远不可能失败。
+{
+  const dir = path.join(root, 'src/selftest');
+  assert(fs.existsSync(dir), '存在 src/selftest 目录');
+  for (const f of ['probe.js', 'functional.js', 'ui.js', 'readonly.js', 'lang.js']) {
+    const p = path.join(dir, f);
+    assert(fs.existsSync(p), '存在 src/selftest/' + f);
+    if (!fs.existsSync(p)) continue;
+    const body = fs.readFileSync(p, 'utf8');
+    // 每个文件都必须是单个可求值表达式：executeJavaScript 要的是表达式，
+    // 不是语句序列。写成 `const x = 1; ...` 会直接 SyntaxError。
+    assert(/^\(async \(\) => \{/.test(body.trim()), f + ' 是 executeJavaScript 能直接求值的表达式');
+    assert(/\}\)\(\)$/.test(body.trim()), f + ' 以 })() 结尾（立即执行）');
+    // 退格符（\b 少转义一层的产物）在这些脚本里没有任何正当用途。
+    // 它出现过一次，而且让 4 条断言彻底失效。
+    assert(!body.includes('\b'), f + ' 里没有退格符（\\b 少转义一层的产物）');
+  }
+  // 主进程只能剩下 loader 调用，不能再有内联的大段脚本
+  assert(/function loadSelfTestScript\(/.test(mainSrc), '主进程有 loadSelfTestScript');
+  assert(/loadSelfTestScript\('probe\.js'\)/.test(mainSrc), 'probe 从文件读');
+  assert(/loadSelfTestScript\('functional\.js'\)/.test(mainSrc), 'functional 从文件读');
+  assert(/loadSelfTestScript\('ui\.js'\)/.test(mainSrc), 'ui 从文件读');
+  // 从 CODE_ROOT 读而不是 DATA_ROOT：这是代码资源，打包后在 asar 内，
+  // 数据目录里没有这些文件（这正是当年"打包后白屏"的成因）。
+  assert(/path\.join\(CODE_ROOT, 'src', 'selftest', name\)/.test(mainSrc),
+    '自检脚本从 CODE_ROOT 读（DATA_ROOT 里没有这些文件）');
+  // 防回归：不能再把脚本写回模板字符串。
+  //
+  // 这条守卫的第一版只扫 /executeJavaScript\(`/ —— 也就是"模板字符串直接当参数传"
+  // 那一种写法。反向对照当场证明它是空的：把 133 行的 ui.js 塞回主进程写成
+  // `const uiScript = \`...\`;`，守卫依然全绿。而这恰好就是原来的形状。
+  // 所以改成扫所有未转义反引号、按配对切出每一段模板字符串，不管它被赋给谁。
+  {
+    const longTemplates = [];
+    const lines = mainSrc.split('\n');
+    let open = null;              // 当前模板字符串的起始行号
+    for (let li = 0; li < lines.length; li++) {
+      const line = lines[li];
+      for (let ci = 0; ci < line.length; ci++) {
+        if (line[ci] !== '`') continue;
+        // 数前面连续的反斜杠：偶数个才说明这个反引号没被转义
+        let bs = 0;
+        for (let k = ci - 1; k >= 0 && line[k] === '\\'; k--) bs++;
+        if (bs % 2 === 1) continue;
+        if (open === null) open = li;
+        else { if (li - open + 1 > 10) longTemplates.push((open + 1) + ' 行起共 ' + (li - open + 1) + ' 行'); open = null; }
+      }
+    }
+    // 上限取 10 行：短的内联 DOM 探测（两三行）是合理的，没必要一律禁止；
+    // 但十行以上的逻辑就该是真实文件，否则又变回检查盲区。
+    assert(longTemplates.length === 0,
+      '主进程里没有超过 10 行的内联脚本模板字符串' +
+      (longTemplates.length ? '（发现：' + longTemplates.join('；') + '）' : ''));
+  }
+  // eslint 必须真的覆盖这个目录，否则拆文件就只是搬了个位置
+  {
+    const lintCfg = fs.readFileSync(path.join(root, 'eslint.config.js'), 'utf8');
+    assert(/files: \['src\/selftest\/\*\.js'\]/.test(lintCfg), 'eslint 配了 src/selftest/*.js');
+    const at = lintCfg.indexOf("files: ['src/selftest/*.js']");
+    const block = at === -1 ? '' : lintCfg.slice(at, at + 400);
+    assert(/globals\.browser/.test(block), '自检脚本按浏览器环境 lint（它们在页面上下文里跑）');
+    // selftestRendererGlobals 是手写的白名单：自检脚本用的那些渲染进程全局
+    // （state / openFile / setLang …）在这里被声明成"存在"，no-undef 才会放行。
+    // 风险是它会和 renderer.js 静默脱节——renderer.js 把 openFile 改名了，
+    // 白名单还留着旧名字，于是自检脚本里那个已经失效的调用反而不报错，
+    // 要等真跑到那一行才炸。所以这里逐个回查 renderer.js 是否真有顶层声明。
+    const listed = [];
+    {
+      const at2 = lintCfg.indexOf('const selftestRendererGlobals = {');
+      const end2 = at2 === -1 ? -1 : lintCfg.indexOf('};', at2);
+      const block2 = at2 === -1 ? '' : lintCfg.slice(at2, end2);
+      for (const m of block2.matchAll(/^\s{2}(\$|[A-Za-z_][\w$]*):/gm)) listed.push(m[1]);
+    }
+    assert(listed.length >= 8, '取到了自检脚本的全局白名单（' + listed.length + ' 个）');
+    const notInRenderer = listed.filter(name => {
+      const esc = name.replace(/[$]/g, '\\$&');
+      // 结尾不能用 \b：$ 是非单词字符，`const $ = ...` 里 $ 后面跟的是空格，
+      // 两侧都非单词就不存在词边界，于是 \b 永远匹配不上——这条断言第一版
+      // 就是这么把 $ 误报成"renderer.js 里没有"的。改成"后面不接标识符字符"。
+      const re = new RegExp('^(?:const|let|var|function|async function)\\s+' + esc + '(?![\\w$])', 'm');
+      return !re.test(rendererSrc);
+    });
+    assert(notInRenderer.length === 0,
+      '白名单里的全局在 renderer.js 里都有顶层声明' +
+      (notInRenderer.length ? '，查不到：' + notInRenderer.join(', ') : ''));
+  }
 }
 
 section('调试残留');

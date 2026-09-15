@@ -27,6 +27,30 @@ const rendererGlobals = {
   FRONTMATTER: 'readonly'
 };
 
+// src/selftest/*.js 是由主进程读成文本、丢进页面上下文执行的，所以 renderer.js
+// 顶层声明的那些函数/状态对它们就是全局变量。
+//
+// 这里逐个列出来，而不是图省事把 no-undef 关掉：关掉的话就等于放弃了拆文件的
+// 主要收益——自检脚本里把 state 打成 stat、把 openFile 打成 openfile，
+// 都要等真跑到那一步才炸，而这几段脚本本身就是"跑到那一步"的最后一道防线。
+// 列白名单则只放行确实存在的名字，拼错照样红。
+//
+// 每个名字都在 src/renderer.js 里核对过（顶层 const / function 声明）。
+// 如果哪天 renderer.js 把其中某个改名了，这里不会自动跟着变——
+// 但 tests/smoke.test.js 有一条断言专门盯这件事（见"自检脚本外置"一节）。
+const selftestRendererGlobals = {
+  $: 'readonly',              // renderer.js: const $ = (id) => ...
+  state: 'readonly',          // renderer.js: const state = { ... }
+  openFile: 'readonly',
+  enterEditMode: 'readonly',
+  isDirty: 'readonly',
+  describeError: 'readonly',
+  renderMarkdown: 'readonly',
+  setLang: 'readonly',
+  parseWorkflowFlow: 'readonly',
+  renderFlowDiagram: 'readonly'
+};
+
 // 只保留能指向真实缺陷的规则。每条都注明了它在这个项目里能抓到什么。
 const correctnessRules = {
   // 拼错的变量名、忘了声明的变量。渲染进程里最值钱的一条：
@@ -121,6 +145,24 @@ module.exports = [
       ecmaVersion: 2023,
       sourceType: 'script',
       globals: { ...globals.browser, ...rendererGlobals }
+    },
+    rules: correctnessRules
+  },
+  {
+    // 自检脚本：这几个文件不是被 <script> 加载的，而是由主进程读成文本、
+    // 交给 webContents.executeJavaScript 在页面上下文里跑。所以环境是浏览器，
+    // 而且整个文件就是一个表达式 `(async () => {...})()`。
+    //
+    // 这一段是拆文件的全部意义所在。原先它们是主进程里的模板字符串，
+    // 415 行代码对静态检查完全不透明——实测在里面塞一个 `const const x = 1`，
+    // node --check、eslint、冒烟测试三层全绿，而它一运行必炸。
+    //
+    // 里面用了 I18N（切语言的断言要查字典原文），走 rendererGlobals。
+    files: ['src/selftest/*.js'],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'script',
+      globals: { ...globals.browser, ...rendererGlobals, ...selftestRendererGlobals }
     },
     rules: correctnessRules
   },

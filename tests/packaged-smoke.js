@@ -81,6 +81,52 @@ function runExe(exe, env, timeoutMs) {
 
 console.log('[test:packaged] 被测产物: ' + path.basename(unpackedExe));
 
+// ---------- 0) 自检脚本必须被打进 asar ----------
+// 自检脚本从模板字符串改成 src/selftest/*.js 真实文件之后，主进程是
+// readFileSync(CODE_ROOT/src/selftest/...) 去读的。build.files 的
+// src/**/* 目前覆盖到了它，但这是个隐式依赖：谁把白名单收窄成
+// src/*.js 或者显式排除掉这个子目录，打包产物一进自检就在 readFileSync
+// 上抛 ENOENT。那种失败下面第 1 组也会红，但报出来的是一堆"没有 PASS"，
+// 得翻半天才能定位到根因，所以这里先直接对 asar 目录做一次断言。
+{
+  const asar = path.join(unpackedDir, 'resources', 'app.asar');
+  assert(fs.existsSync(asar), 'app.asar 存在');
+  if (fs.existsSync(asar)) {
+    // 自己解 asar 头，不 require('asar')：那个包并不是本项目的直接依赖，
+    // 只是 electron-builder 底下的 @electron/asar，包名和路径都随上游变。
+    // 头部格式是固定的 pickle：偏移 12 处的 UInt32LE 是 JSON 长度，正文从 16 开始。
+    let norm = [];
+    try {
+      const fd = fs.openSync(asar, 'r');
+      const head = Buffer.alloc(16);
+      fs.readSync(fd, head, 0, 16, 0);
+      const jsonLen = head.readUInt32LE(12);
+      const jsonBuf = Buffer.alloc(jsonLen);
+      fs.readSync(fd, jsonBuf, 0, jsonLen, 16);
+      fs.closeSync(fd);
+      const tree = JSON.parse(jsonBuf.toString('utf8'));
+      const walkTree = (node, prefix) => {
+        for (const [name, v] of Object.entries(node.files || {})) {
+          const p = prefix + '/' + name;
+          if (v.files) walkTree(v, p);
+          else norm.push(p);
+        }
+      };
+      walkTree(tree, '');
+    } catch (e) {
+      fail('读不出 app.asar 目录清单: ' + e.message);
+    }
+    const localScripts = fs.readdirSync(path.join(root, 'src', 'selftest'))
+      .filter(n => n.endsWith('.js'));
+    assert(localScripts.length >= 5, '本地自检脚本数量符合预期', localScripts.length + ' 个');
+    // 逐个比对，而不是只看目录在不在：漏掉单个文件同样是运行时 ENOENT
+    const missing = localScripts.filter(n => !norm.includes('/src/selftest/' + n));
+    assert(missing.length === 0,
+      'src/selftest/*.js 全部打进了 asar（主进程要 readFileSync 它们）',
+      missing.length ? '缺失：' + missing.join(', ') : localScripts.join(', '));
+  }
+}
+
 // ---------- 1) 打包产物能真正加载页面 ----------
 // 这一组直指"白屏"故障：CODE_ROOT 现在是 asar 内路径，DATA_ROOT 是临时目录，
 // 两者已经分叉，preload / index.html / vendor 脚本任何一个解析错都会红。
