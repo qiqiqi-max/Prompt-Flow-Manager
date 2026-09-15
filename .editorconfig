@@ -1,0 +1,28 @@
+# 编辑器基础约定。这里只是把仓库里**已经在用**的写法写下来，不引入新规范：
+# 全库 LF、2 空格缩进、无 BOM、文件末尾留一个换行（逐个文件量过）。
+#
+# 为什么需要它：.gitattributes 管的是"提交进仓库时统一成什么"，
+# 编辑器仍可能按自己的默认值写 CRLF 或 tab，于是本地看着没改、
+# git diff 里整个文件都是改动。两个文件各管一段，不重复。
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Windows 批处理必须 CRLF，cmd 解析 LF 会出问题（与 .gitattributes 保持一致）
+[*.{bat,cmd,ps1}]
+end_of_line = crlf
+
+# Markdown 里行尾两个空格是硬换行语法，去掉会改变渲染结果
+[*.md]
+trim_trailing_whitespace = false
+
+# 第三方库的原样副本，由 npm run sync-vendor 生成，不要让编辑器重新格式化
+[src/vendor/**]
+trim_trailing_whitespace = false
+insert_final_newline = false

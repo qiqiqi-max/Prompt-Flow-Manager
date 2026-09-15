@@ -50,6 +50,7 @@ function extract(startMarker, endMarker) {
 const guardSrc = extract('const MAX_EMPHASIS_PER_LINE', '\n}\n');
 // eslint-disable-next-line no-eval
 const emphasisTooCostly = eval('(function(){' + guardSrc + '; return emphasisTooCostly; })()');
+// eslint-disable-next-line no-eval
 const limits = eval('(function(){' + guardSrc + '; return { perLine: MAX_EMPHASIS_PER_LINE, total: MAX_EMPHASIS_TOTAL }; })()');
 
 const results = [];

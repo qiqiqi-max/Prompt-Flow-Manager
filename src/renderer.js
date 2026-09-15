@@ -1057,7 +1057,6 @@ async function newPrompt() {
   if (!name) return;
   const projectType = (await pickProjectType()) || '其他'; // i18n-exempt: 用户数据默认值
   const rel = `prompts/${stage}/${name}.md`;
-  const stageLabel = dirLabel(stage);
   const content = `---
 title: ${name}
 stage: ${stage}

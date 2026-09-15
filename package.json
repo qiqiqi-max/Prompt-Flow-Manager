@@ -12,7 +12,9 @@
     "test:debounce": "node tests/debounce.test.js",
     "test:close": "node tests/close-flush.test.js",
     "test:render": "node tests/render-guard.test.js",
-    "test:all": "npm test && npm run test:ui && npm run test:fn && npm run test:tabs && npm run test:debounce && npm run test:close && npm run test:render",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test:all": "npm run lint && npm test && npm run test:ui && npm run test:fn && npm run test:tabs && npm run test:debounce && npm run test:close && npm run test:render",
     "bench": "node tests/search-bench.js",
     "sync-vendor": "node scripts/sync-vendor.js",
     "prebuild": "node scripts/sync-vendor.js",
@@ -46,6 +48,7 @@
     "dompurify": "3.4.14",
     "electron": "^28.0.0",
     "electron-builder": "^24.9.1",
+    "eslint": "9.39.1",
     "marked": "11.2.0"
   },
   "dependencies": {

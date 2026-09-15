@@ -465,6 +465,38 @@ assert(fs.existsSync(path.join(root, 'tests/ui-smoke.js')), '存在 tests/ui-smo
 assert(fs.existsSync(path.join(root, 'tests/functional-smoke.js')), '存在 tests/functional-smoke.js');
 assert(!!pkg.scripts['test:fn'] && !!pkg.scripts['test:ui'], '有 test:ui / test:fn 脚本');
 
+section('静态检查（lint）');
+// node --check 只看语法，抓不到拼错的变量名、改名后残留的死变量、新增的 eval——
+// 而渲染进程里打错一个函数名不会有任何提示，要点到那个按钮才炸。
+assert(fs.existsSync(path.join(root, 'eslint.config.js')), '存在 eslint.config.js');
+assert(!!pkg.scripts.lint, '有 npm run lint');
+// lint 必须挂进 test:all，否则它只是个"需要记得手动跑"的脚本，等于没有。
+assert(/\bnpm run lint\b/.test(pkg.scripts['test:all'] || ''), 'test:all 里包含 lint');
+assert(/^\d+\.\d+\.\d+$/.test((pkg.devDependencies || {}).eslint || ''),
+  'eslint 锁定到确定版本（当前 ' + ((pkg.devDependencies || {}).eslint || '无') + '）');
+{
+  const lintCfg = fs.readFileSync(path.join(root, 'eslint.config.js'), 'utf8');
+  // 三种运行环境的 global 必须分开配：混成一份，no-undef 要么把渲染进程里的
+  // window 判成未定义，要么把主进程里拼错的名字当成浏览器全局放过去。
+  assert(/files: \['src\/renderer\.js'\]/.test(lintCfg), 'renderer.js 单独配置（浏览器环境，无 require）');
+  // 必须只在 renderer 那一段里找 sourceType，不能全文匹配：
+  // 双用模块（i18n / frontmatter）那段也写着 sourceType: 'script'，
+  // 全文匹配的话把 renderer 改成 module 依然是绿的——那条断言就是空的。
+  {
+    const at = lintCfg.indexOf("files: ['src/renderer.js']");
+    const block = at === -1 ? '' : lintCfg.slice(at, at + 400);
+    assert(/sourceType: 'script'/.test(block),
+      '渲染进程按 script 解析（顶层 const 是全局声明，不是模块作用域）');
+  }
+  assert(/'src\/i18n\.js', 'src\/frontmatter\.js'/.test(lintCfg), '双用模块两套 global 都给');
+  assert(/ignores: \['src\/vendor\/\*\*'/.test(lintCfg), 'vendor 副本不 lint（第三方原样文件，改了也会被 sync-vendor 覆盖）');
+  // 几条真正指向缺陷的规则必须是 error，降成 warn 等于关掉（lint 退出码会变 0）
+  for (const rule of ['no-undef', 'no-unused-vars', 'no-redeclare', 'no-dupe-keys', 'no-eval']) {
+    assert(new RegExp("'" + rule + "':\\s*\\[?'error'").test(lintCfg), rule + ' 是 error 级别');
+  }
+}
+assert(fs.existsSync(path.join(root, '.editorconfig')), '存在 .editorconfig');
+
 section('调试残留');
   // 防回归：buildSubTree/listTree 每次调用都同步 appendFileSync，日志无限增长
   assert(!/appendFileSync\(path\.join\(DATA_ROOT, 'debug\.log'\)/.test(mainSrc), '不再往数据目录写 debug.log');
