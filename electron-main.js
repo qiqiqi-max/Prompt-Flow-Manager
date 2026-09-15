@@ -1465,22 +1465,46 @@ async function runSearchBench(count) {
 // 这里在自检模式下把 dialog 换成"按队列返回预设结果"的桩，队列放在
 // PFM_SELFTEST_DIALOGS 指向的 JSON 文件里（每次取走一项，写回剩余项）。
 // 两个开关都不设时这段完全不生效，生产行为不受影响。
+//
+// 队列按 kind 分流而不是一条流水线：文件对话框（save/open）和消息框
+// （confirm / confirm-unsaved）的调用时机互不相干，混在一条队列里的话，
+// 往中间插一个消息框应答就会把后面四个导出/导入的应答全错位一格。
+// 不带 kind 的条目算文件对话框，保持既有队列不用改。
+const selfTestDialogCalls = { file: 0, messageBox: 0 };
 function installSelfTestDialogStubs() {
   const queuePath = process.env.PFM_SELFTEST_DIALOGS;
-  const takeNext = (fallback) => {
+  const takeNext = (kind, fallback) => {
     try {
       const queue = JSON.parse(fs.readFileSync(queuePath, 'utf8'));
-      const item = queue.shift();
+      const at = queue.findIndex(q => (q && q.kind ? q.kind : 'file') === kind);
+      const item = at === -1 ? null : queue.splice(at, 1)[0];
       fs.writeFileSync(queuePath, JSON.stringify(queue), 'utf8');
-      if (item) console.log('[selftest] 对话框桩返回: ' + JSON.stringify(item));
+      if (item) console.log('[selftest] 对话框桩返回(' + kind + '): ' + JSON.stringify(item));
+      // 队列里没有对应条目说明测试没料到这次弹框。不能静默放行：
+      // 走 fallback（取消）才不会让"多弹了一个框"看起来像成功。
+      else console.error('[selftest] 对话框桩：' + kind + ' 队列已空，按取消处理');
       return item || fallback;
     } catch (e) {
       console.error('[selftest] 读取对话框队列失败:', e.message);
       return fallback;
     }
   };
-  dialog.showSaveDialog = async () => takeNext({ canceled: true });
-  dialog.showOpenDialog = async () => takeNext({ canceled: true, filePaths: [] });
+  dialog.showSaveDialog = async () => {
+    selfTestDialogCalls.file++;
+    return takeNext('file', { canceled: true });
+  };
+  dialog.showOpenDialog = async () => {
+    selfTestDialogCalls.file++;
+    return takeNext('file', { canceled: true, filePaths: [] });
+  };
+  // 消息框（确认 / 三选一的未保存提示）。回退值取调用方自己声明的 cancelId，
+  // 这样"队列没料到的弹框"一律等于用户按了取消——对 confirm-unsaved 就是
+  // 保住草稿、中止切换，是最安全的那个分支。
+  dialog.showMessageBox = async (...args) => {
+    const opts = (args.length > 1 ? args[1] : args[0]) || {};
+    selfTestDialogCalls.messageBox++;
+    return takeNext('message', { response: Number.isInteger(opts.cancelId) ? opts.cancelId : 0 });
+  };
   console.log('[selftest] 已启用对话框桩，队列文件: ' + queuePath);
 }
 
@@ -2625,6 +2649,101 @@ function attachSelfTest(targetWin) {
       probe.remove();
       check('注入 id="editor" 后 getElementById 仍命中真正的 textarea',
         hitTag === 'TEXTAREA', hitTag);
+
+      // 13. 未保存改动的三选一对话框：保存 / 不保存 / 取消
+      // 为什么必须测：切文件、切标签原先走的是 exitEditMode(true)，不问一声就把
+      // 草稿写进磁盘——主进程每次 save-file 都会 bumpAutoFields 并生成版本快照，
+      // 所以手滑点一下树里另一个文件，version 就自增一格、多一条快照，撤不回来。
+      // 改成三选一之后，三条分支各自都有一种静默的坏法：
+      //   取消 → 调用方不看返回值就照切，确认框形同虚设，草稿照样丢；
+      //   不保存 → 顺手写了盘，用户明确说了不要还是写了；
+      //   保存 → 只退出编辑没真写盘，用户以为存了。
+      // 所以三条都要断言到磁盘上，不能只看界面。
+      //
+      // 走真实点击（标签栏 click → switchTab → leaveEditForSwitch），不直接调
+      // leaveEditForSwitch：那样测不到调用方是否尊重了它的返回值，而"不尊重返回值"
+      // 恰好是这里最容易犯且后果最重的错。
+      if (window.__pfmDialogStubs) {
+        const relA = 'prompts/testing/自检未保存A.md';
+        const relB = 'prompts/testing/自检未保存B.md';
+        await api.createFile(relA, '---\\ntitle: 未保存A\\nstage: testing\\n---\\nA 的原始正文');
+        await api.createFile(relB, '---\\ntitle: 未保存B\\nstage: testing\\n---\\nB 的原始正文');
+        const clickTab = (rel) => {
+          const el = [...document.querySelectorAll('#tabs-bar .tab')].find(x => x.dataset.rel === rel);
+          if (!el) return false;
+          for (const type of ['mousedown', 'mouseup', 'click']) {
+            el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+          }
+          return true;
+        };
+        const waitFor = async (fn, ms) => {
+          const t0 = Date.now();
+          while (Date.now() - t0 < (ms || 3000)) {
+            if (fn()) return true;
+            await new Promise(r => setTimeout(r, 50));
+          }
+          return false;
+        };
+        const MARK = ' 草稿标记不该静默落盘';
+        await openFile(relA);
+        await openFile(relB);
+        const backToA = clickTab(relA) && await waitFor(() => state.activeTab === relA, 3000);
+        check('三选一前置：两个标签都在，已切回 A 且不在编辑态',
+          backToA && !state.editMode, 'active=' + state.activeTab + ' editMode=' + state.editMode);
+
+        // 13a. 取消：切换必须被中止，草稿必须原样还在，磁盘不能动
+        await enterEditMode();
+        $('editor').value = state.currentContent + MARK;
+        check('三选一前置：编辑器已经脏了', isDirty() === true);
+        clickTab(relB);
+        // 取消分支没有"状态变化"可以等，只能给足时间再断言什么都没发生
+        await new Promise(r => setTimeout(r, 900));
+        check('未保存三选一点取消：没有切走', state.activeTab === relA, 'active=' + state.activeTab);
+        check('未保存三选一点取消：还留在编辑模式', state.editMode === true);
+        // 光看 $('editor').value 是空断言：退出编辑只是把 editor-wrap 藏起来，
+        // 没人会去清 textarea 的值，所以三条分支怎么错这一条都是绿的。
+        // 要断言的是"草稿还摆在用户面前、能接着改"，所以连编辑器是否还显示一起看。
+        check('未保存三选一点取消：草稿还摆在编辑器里且编辑器还显示着',
+          $('editor').value.includes(MARK) && !$('editor-wrap').classList.contains('hidden'),
+          'hidden=' + $('editor-wrap').classList.contains('hidden'));
+        const aCancel = await api.readFile(relA);
+        check('未保存三选一点取消：磁盘正文没被动过',
+          !aCancel.content.includes(MARK) && aCancel.meta.version === 1, 'version=' + aCancel.meta.version);
+
+        // 13b. 不保存：切过去，但磁盘正文、version、版本快照都不能变
+        // 这条前置不能省：13b 全靠"此刻仍在编辑态且脏着"才有意义。13a 若把编辑态
+        // 弄丢了，下面的 clickTab 根本不会走到 leaveEditForSwitch，切换照样成功，
+        // "不保存：切过去了"就会因为压根没弹框而变成绿的假象。
+        check('三选一前置：13b 开始前仍在编辑态且草稿还脏着',
+          state.editMode === true && isDirty() === true,
+          'editMode=' + state.editMode + ' dirty=' + isDirty());
+        clickTab(relB);
+        const wentB = await waitFor(() => state.activeTab === relB, 3000);
+        check('未保存三选一点不保存：切过去了', wentB, 'active=' + state.activeTab);
+        check('未保存三选一点不保存：已退出编辑模式', state.editMode === false);
+        const aDiscard = await api.readFile(relA);
+        check('未保存三选一点不保存：磁盘正文没被写入草稿',
+          !aDiscard.content.includes(MARK), aDiscard.content.slice(0, 40));
+        check('未保存三选一点不保存：version 没有自增',
+          aDiscard.meta.version === 1, 'version=' + aDiscard.meta.version);
+        check('未保存三选一点不保存：没有多出版本快照',
+          (await api.listVersions(relA)).length === 0);
+
+        // 13c. 保存：切过去，且草稿真的落到磁盘上
+        clickTab(relA);
+        await waitFor(() => state.activeTab === relA, 3000);
+        await enterEditMode();
+        $('editor').value = state.currentContent + MARK;
+        clickTab(relB);
+        const savedThenB = await waitFor(() => state.activeTab === relB, 3000);
+        check('未保存三选一点保存：切过去了', savedThenB, 'active=' + state.activeTab);
+        check('未保存三选一点保存：已退出编辑模式', state.editMode === false);
+        const aSaved = await api.readFile(relA);
+        check('未保存三选一点保存：草稿真的落盘了',
+          aSaved.content.includes(MARK), aSaved.content.slice(0, 60));
+        check('未保存三选一点保存：version 自增到 2',
+          aSaved.meta.version === 2, 'version=' + aSaved.meta.version);
+      }
 
       // 清理
       const leftovers = (await api.getMetaList()).filter(mm => mm.rel !== renamed && mm.top === 'prompts');

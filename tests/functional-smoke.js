@@ -23,7 +23,9 @@ console.log('[test:fn] 临时数据目录: ' + dataDir);
 
 // 导出/导入要弹系统对话框，自动化跑不了。主进程在自检模式下会把 dialog 换成
 // 按队列返回结果的桩（见 installSelfTestDialogStubs），队列就是下面这个文件。
-// 顺序必须与 functionalScript 里的调用顺序严格一致。
+// 桩按 kind 取件：不带 kind 的是文件对话框（save/open），kind:'message' 的是
+// 消息框。两类各自按先后顺序消费，互不干扰——所以下面插进来的三个未保存应答
+// 不会把导出/导入那四项挪位。同类内部的顺序必须与调用顺序严格一致。
 const outDir = path.join(dataDir, '__export');
 fs.mkdirSync(outDir, { recursive: true });
 const exportedMd = path.join(outDir, 'exported.md');
@@ -33,7 +35,13 @@ const dialogQueue = [
   { canceled: false, filePath: exportedZip },                // exportZip
   { canceled: false, filePaths: [exportedMd] },              // importSingle
   { canceled: false, filePaths: [exportedZip] },             // importZip
-  { canceled: true }                                         // exportZip（验证取消分支）
+  { canceled: true },                                        // exportZip（验证取消分支）
+  // 未保存改动的三选一（confirm-unsaved）：buttons 是 [保存, 不保存, 取消]，
+  // 所以 response 0/1/2 分别对应三条分支。顺序 = functionalScript 第 13 节
+  // 13a 取消 → 13b 不保存 → 13c 保存。
+  { kind: 'message', response: 2 },                          // 13a 取消
+  { kind: 'message', response: 1 },                          // 13b 不保存
+  { kind: 'message', response: 0 }                           // 13c 保存
 ];
 const dialogQueuePath = path.join(dataDir, '__dialogs.json');
 fs.writeFileSync(dialogQueuePath, JSON.stringify(dialogQueue), 'utf8');
@@ -89,10 +97,28 @@ child.on('exit', (code) => {
     if (!ok) artifactsOk = false;
   }
   cleanup();
+  // 必须出现在输出里的检查项。一律带上 PASS 前缀去匹配：
+  // 光写 /导出 ZIP 返回成功/ 是个空断言——失败时打的是
+  // "[selftest] FAIL [fn] 导出 ZIP 返回成功"，同一个正则照样命中，
+  // 通过与失败两种情况都为真，实际只靠下面那条 FAIL 兜着。
+  // 而 FAIL 那条只能证明"没有失败"，证明不了"这一条真的跑到了"——
+  // 断言被整段跳过（比如包在 if 里而条件没成立）时它是绿的。
+  const mustHave = [
+    /\[selftest:fn\] PASS 导出 ZIP 返回成功/,
+    // 三选一对话框的三条分支各自都要落到磁盘断言上，见 functionalScript 第 13 节
+    /\[selftest:fn\] PASS 未保存三选一点取消：没有切走/,
+    /\[selftest:fn\] PASS 未保存三选一点取消：磁盘正文没被动过/,
+    /\[selftest:fn\] PASS 未保存三选一点不保存：切过去了/,
+    /\[selftest:fn\] PASS 未保存三选一点不保存：version 没有自增/,
+    /\[selftest:fn\] PASS 未保存三选一点保存：草稿真的落盘了/,
+    /\[selftest:fn\] PASS 未保存三选一点保存：version 自增到 2/
+  ];
+  const missing = mustHave.filter(re => !re.test(out));
+  if (missing.length) console.error('[test:fn] 缺少必需的检查项: ' + missing.map(String).join(', '));
   const passed = code === 0
     && /\[selftest\] 全部通过/.test(out)
-    && /切换到英文后界面外壳无残留中文/.test(out)
-    && /导出 ZIP 返回成功/.test(out)
+    && /PASS 切换到英文后界面外壳无残留中文/.test(out)
+    && missing.length === 0
     && !/\[selftest[^\]]*\] FAIL/.test(out)
     && artifactsOk;
   console.log('\n[test:fn] ' + (passed ? '通过' : '失败（exit=' + code + '）'));

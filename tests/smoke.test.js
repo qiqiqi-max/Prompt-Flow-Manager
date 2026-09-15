@@ -342,10 +342,40 @@ assert(/function installSelfTestDialogStubs\(/.test(mainSrc), '有自检用的�
 assert(/PFM_SELFTEST_DIALOGS/.test(mainSrc), '对话框桩由 PFM_SELFTEST_DIALOGS 队列驱动');
 assert(/process\.env\.PFM_SELFTEST === '1' && process\.env\.PFM_SELFTEST_DIALOGS/.test(mainSrc),
   '对话框桩只在自检模式生效（生产行为不变）');
+// 消息框也要能桩：confirm-unsaved 是三选一的"保存/不保存/取消"，
+// 没有桩就只能人工点，于是三条分支各自的静默坏法（取消照切、不保存却写盘、
+// 保存却没落盘）一直没有自动化覆盖。
+assert(/dialog\.showMessageBox = async/.test(mainSrc), '消息框（确认/未保存三选一）也有桩');
+// 按 kind 分流是必须的：文件对话框和消息框的调用时机互不相干，
+// 混在一条流水线里，插一个消息框应答就会把导出/导入四项全错位一格。
+assert(/q\.kind \? q\.kind : 'file'/.test(mainSrc), '对话框队列按 kind 分流，两类互不错位');
+assert(/Number\.isInteger\(opts\.cancelId\) \? opts\.cancelId : 0/.test(mainSrc),
+  '队列没料到的消息框按调用方的 cancelId 回退（对未保存提示＝保住草稿）');
 {
   const fnSrc = fs.readFileSync(path.join(root, 'tests/functional-smoke.js'), 'utf8');
   assert(/dialogQueue/.test(fnSrc), '功能测试准备了对话框队列');
   assert(/exportedZip/.test(fnSrc) && /PK/.test(fnSrc), '功能测试校验导出的 ZIP 是真 ZIP');
+  assert(/kind: 'message'/.test(fnSrc), '功能测试队列里备了未保存三选一的应答');
+  // 断言只写关键词（/导出 ZIP 返回成功/）是空断言：失败时打的是
+  // "[selftest] FAIL [fn] 导出 ZIP 返回成功"，同一个正则照样命中，
+  // 通过与失败两种情况都为真，实际只靠单独那条 FAIL 兜着。必须锚定 PASS 前缀。
+  //
+  // 两处都要查：内联的 /.../.test(out)，以及 mustHave 清单里的正则字面量。
+  // 只查内联那几条的话守卫自己就是空断言——分支断言全写在 mustHave 里，
+  // 而空断言最容易出现的地方恰好就是那份清单。
+  // 也不能按行首匹配：内联那几条实际写成 "&& /.../.test(out)"，一条都找不到。
+  const reSrc = fnSrc.split(/\r?\n/).filter(l => !/^\s*\/\//.test(l)).join('\n');
+  const outTests = [...reSrc.matchAll(/\/((?:[^/\\\n]|\\.)+)\/\.test\(out\)/g)].map(m => m[0]);
+  const mustBlock = reSrc.match(/const mustHave = \[([\s\S]*?)\n\s*\];/);
+  assert(!!mustBlock, '功能测试有 mustHave 必需检查项清单');
+  const mustRes = [...(mustBlock ? mustBlock[1] : '').matchAll(/\/((?:[^/\\\n]|\\.)+)\//g)].map(m => m[0]);
+  const outAsserts = outTests.concat(mustRes);
+  assert(outTests.length >= 3 && mustRes.length >= 7,
+    '找到了 out 断言可供检查（内联 ' + outTests.length + ' 条，mustHave ' + mustRes.length + ' 条）');
+  const bare = outAsserts.filter(s => !/PASS|FAIL|全部通过/.test(s));
+  assert(bare.length === 0, '功能测试没有不带 PASS 前缀的裸关键词断言（空断言）' +
+    (bare.length ? '：' + bare.join(' | ') : ''));
+  assert(/\[selftest:fn\\\] PASS 未保存三选一/.test(fnSrc), '三选一的分支断言锚定了 PASS 前缀');
 }
 
 section('日志不能把应用打挂');
