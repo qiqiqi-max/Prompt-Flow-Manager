@@ -37,6 +37,9 @@ const api = {
   importZip: () => ipcRenderer.invoke('import-zip'),
   // 菜单的"重新加载"先问渲染进程有没有未保存改动，确认后再由主进程真的重载。
   reloadWindow: () => ipcRenderer.invoke('reload-window'),
+  // 启动自愈的报告（摘掉了哪些幽灵条目、收养了哪些孤立正文、删了哪些残留临时文件）。
+  // 只读，不触发任何写操作。
+  getHealReport: () => ipcRenderer.invoke('get-heal-report'),
   onMenuAction: (cb) => {
     const handler = (e, action) => cb(action);
     ipcRenderer.on('menu-action', handler);

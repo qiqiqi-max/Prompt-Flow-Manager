@@ -1001,6 +1001,11 @@ ipcMain.handle('trash', async (e, rel) => queueWriteMulti(['ver:' + String(rel),
 
 ipcMain.handle('list-trash', async () => readTrashIndex());
 
+// 启动自愈的报告。渲染进程本身不显示它（自愈是静默的，正常情况下没什么可说），
+// 但必须有个把手能读到：否则"修了什么"只存在于 console 里，用户报障时拿不出来，
+// 自检也没法断言修复真的发生过。第 9 项的诊断信息导出会直接用这份数据。
+ipcMain.handle('get-heal-report', async () => lastHealReport);
+
 // 恢复也要动库里的文件（正文搬回 originalRel、还原版本目录），所以除了 trash
 // 还得占 ver:<originalRel>。否则并发的 save-file 能插在"判断目标是否存在"和
 // fsp.rename 之间：那次保存返回成功，随后被 rename 无声覆盖（rename 不看目标
@@ -1439,6 +1444,224 @@ async function ensureDirs() {
   }
   // 确保阶段子目录存在
   for (const s of STAGES) await ensureDir(path.join(PROMPTS_DIR, s));
+}
+
+// ---------- 启动自愈 ----------
+// 崩溃、断电、同步盘冲突、外部编辑之后，数据目录会留下几类"程序自己再也碰不到"
+// 的残留。它们的共同点是**不报错**：界面看着正常，东西却已经找不回来了。
+//
+//   1. 回收站索引里有条目、.trash 里的文件没了 → 幽灵记录，每次点恢复都失败，
+//      而且永远删不掉（restore 里虽然会顺手摘掉，但得先有人去点它）。
+//   2. .trash 里有文件、索引里没有对应条目 → 反过来的情况，后果重得多：
+//      文件树看不到（已从原位置移走）、回收站列不出、清空回收站也不会碰它，
+//      等于永久丢失且占着磁盘。trash handler 的回滚失败分支就会留下这种残留
+//      （E_TRASH_ORPHANED），日志里有一行，用户什么也看不到。
+//   3. .tmp-<pid>-<seq>-*.part → writeFileAtomic 写到一半进程被杀留下的。
+//      单个文件不大，但每次崩溃攒一个，且永远没人清。
+//   4. store 名越界（"../OUTSIDE" 这种）→ 索引被写坏的证据。这类条目
+//      empty-trash 会跳过、restore 会抛错，留着只是让回收站永远清不干净。
+//
+// 三条原则：
+//   - **只做加法和摘引用，不删用户内容。** 唯一会被删掉的是 .part 临时文件
+//     （按定义就是半截文件，没有任何完整内容）。孤立的正文一律"收养"成回收站
+//     条目让它重新可见，而不是清理掉。
+//   - **自愈失败绝不能拖垮启动。** 整段包在 try 里，最坏情况是什么都没修，
+//     而不是应用起不来——那比原来的问题严重得多。
+//   - **做过什么必须留痕。** 返回一份报告，写进日志，也供诊断导出使用。
+let lastHealReport = null;
+
+// .part 临时文件的判定必须严格按 writeFileAtomic 生成的形态来，
+// 不能宽到 /\.part$/：用户自己的 .part 文件（下载工具的半成品之类）不该被删。
+const TMP_PART_RE = /^\.tmp-\d+-\d+-.*\.part$/;
+// 只清理"明显不是正在写"的：本进程刚生成的、以及 60 秒内动过的都跳过。
+// 自检会同时拉起多个 Electron，但它们各自 PFM_DATA_DIR 不同，不会互相看见。
+const TMP_PART_MIN_AGE_MS = 60 * 1000;
+
+async function healDataDir() {
+  const report = {
+    ranAt: new Date().toISOString(),
+    droppedGhostEntries: [],   // 索引里有、文件没了
+    adoptedOrphanFiles: [],    // 文件在、索引里没有 → 收养成条目
+    droppedBadStore: [],       // store 名越界
+    orphanVersionDirs: [],     // 孤立的版本目录（只报告，不动）
+    unrestorableEntries: [],   // originalRel 现在已不允许写入（只报告，不动）
+    removedTempFiles: [],
+    errors: []
+  };
+
+  // 和 IPC 用同一把 trash 锁。启动时还没有窗口、理论上没有并发，但自检会在
+  // 页面加载完之后再触发一次，那时 IPC 是活的。
+  await queueWrite('trash', async () => {
+    // readTrashIndex 内部就带损坏处理：解析不出来会把坏文件改名留档并返回空清单。
+    const index = await readTrashIndex();
+    const before = index.items.length;
+    const kept = [];
+    const referenced = new Set();
+
+    for (const item of index.items) {
+      // store 名越界 = 索引被写坏。这类条目谁都处理不了，摘掉并大声记录。
+      let storePath = null;
+      try {
+        storePath = trashStorePath(item.store);
+      } catch (e) {
+        report.droppedBadStore.push({ store: String(item.store), reason: e.message });
+        continue;
+      }
+      if (!fs.existsSync(storePath)) {
+        report.droppedGhostEntries.push({ id: item.id, name: item.name, store: item.store });
+        continue;
+      }
+      referenced.add(path.basename(storePath));
+      if (item.versionStore) {
+        try { referenced.add(path.basename(trashStorePath(item.versionStore))); } catch {}
+      }
+      // 还原口按 safeJoinWritable 卡：老索引里若有 "config.json" 这种越界值，
+      // 点恢复会抛 E_WRITE_FORBIDDEN。不动它（正文还在，可人工找回），只报告。
+      try { safeJoinWritable(item.originalRel); } catch (e) {
+        report.unrestorableEntries.push({ id: item.id, originalRel: String(item.originalRel), reason: e.message });
+      }
+      kept.push(item);
+    }
+
+    // 反向：.trash 里有正文、索引里没条目。收养成新条目让它重新可见。
+    //
+    // originalRel 是**恢复不出来的**——store 名只有 id + 扩展名，不含原路径。
+    // 所以指到 prompts/recovered/ 下面：这个位置一定通得过 safeJoinWritable，
+    // 用户点恢复就能拿回文件，再自己移到想要的地方。
+    // 比"报告一句然后什么都不做"强，也比删掉安全。
+    let entries = [];
+    try {
+      entries = await fsp.readdir(TRASH_DIR, { withFileTypes: true });
+    } catch (e) {
+      report.errors.push('读 .trash 失败: ' + e.message);
+    }
+    for (const e of entries) {
+      const name = e.name;
+      if (name === 'index.json') continue;
+      if (name.startsWith('index.json.corrupt-')) continue; // 损坏留档，保留证据
+      if (TMP_PART_RE.test(name)) continue;                  // 下面统一处理
+      if (referenced.has(name)) continue;
+      if (e.isDirectory()) {
+        // 孤立的版本目录：里面是历史快照，不删也不收养（收养需要配一份正文）。
+        report.orphanVersionDirs.push(name);
+        continue;
+      }
+      if (!name.toLowerCase().endsWith('.md')) {
+        report.errors.push('.trash 下有无法识别的孤立文件，未处理: ' + name);
+        continue;
+      }
+      const id = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+      let recoveredRel = 'prompts/recovered/' + name;
+      let n = 1;
+      while (fs.existsSync(path.join(DATA_ROOT, recoveredRel))) {
+        recoveredRel = 'prompts/recovered/' + name.replace(/\.md$/i, '') + '-' + n + '.md';
+        n++;
+      }
+      kept.push({
+        id,
+        originalRel: recoveredRel,
+        name,
+        trashedAt: new Date().toISOString(),
+        store: name,
+        versionStore: null,
+        recovered: true
+      });
+      report.adoptedOrphanFiles.push({ store: name, originalRel: recoveredRel });
+    }
+
+    const changed = report.droppedGhostEntries.length || report.adoptedOrphanFiles.length
+      || report.droppedBadStore.length || kept.length !== before;
+    if (changed) {
+      try {
+        await writeTrashIndex({ ...index, items: kept });
+      } catch (e) {
+        // 写不回去就当什么都没修：索引还是旧的那份，下次启动再试。
+        report.errors.push('回写回收站索引失败: ' + e.message);
+      }
+    }
+  });
+
+  // .part 清理只扫 writeFileAtomic 真正会写的那几个位置，**不能**从 DATA_ROOT
+  // 递归下去：开发模式下 DATA_ROOT 就是仓库根目录，那样每次启动都要爬一遍
+  // node_modules / .git / dist（本机 node_modules 就有十万级条目），
+  // 白白把启动拖慢，而那些目录里根本不可能有本程序的临时文件。
+  //
+  // 写入点对照（grep writeFileAtomic 的调用方）：
+  //   config.json        → DATA_ROOT 顶层，不需要递归
+  //   .trash/index.json  → TRASH_DIR 一层
+  //   版本快照和索引      → .versions/** 递归
+  //   正文               → prompts / workflows / templates 递归
+  const now = Date.now();
+  let scanned = 0;
+
+  const sweepFile = async (dir, name) => {
+    if (!TMP_PART_RE.test(name)) return;
+    // 名字里的 pid 是本进程 = 我们自己正在写，绝不能删。
+    const m = name.match(/^\.tmp-(\d+)-/);
+    if (m && Number(m[1]) === process.pid) return;
+    const full = path.join(dir, name);
+    let st;
+    try { st = await fsp.stat(full); } catch { return; }
+    if (now - st.mtimeMs < TMP_PART_MIN_AGE_MS) return; // 可能是别人正在写
+    try {
+      await fsp.unlink(full);
+      report.removedTempFiles.push(path.relative(DATA_ROOT, full).replace(/\\/g, '/'));
+    } catch (err) {
+      report.errors.push('删临时文件失败 ' + name + ': ' + err.message);
+    }
+  };
+
+  const walk = async (dir, recurse) => {
+    if (scanned > 50000) return; // 上限防病态目录把启动拖住
+    let list;
+    try { list = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of list) {
+      scanned++;
+      if (e.isDirectory()) {
+        if (recurse) await walk(path.join(dir, e.name), true);
+        continue;
+      }
+      await sweepFile(dir, e.name);
+    }
+  };
+
+  await walk(DATA_ROOT, false);
+  for (const d of [TRASH_DIR, VERSIONS_DIR, PROMPTS_DIR, WORKFLOWS_DIR, TEMPLATES_DIR]) {
+    await walk(d, true);
+  }
+
+  return report;
+}
+
+// 启动时跑一次，任何异常都吞掉：自愈是尽力而为，不能成为新的启动失败原因。
+async function runStartupHeal() {
+  try {
+    const r = await healDataDir();
+    lastHealReport = r;
+    const counts = [
+      ['幽灵条目', r.droppedGhostEntries.length],
+      ['收养孤立正文', r.adoptedOrphanFiles.length],
+      ['越界 store', r.droppedBadStore.length],
+      ['残留临时文件', r.removedTempFiles.length]
+    ].filter(([, n]) => n > 0);
+    if (counts.length) {
+      console.log('[heal] 已修复: ' + counts.map(([k, n]) => k + ' ' + n).join('，'));
+      for (const g of r.droppedGhostEntries) console.log('[heal] 摘掉幽灵条目（文件已不存在）: ' + g.store);
+      for (const a of r.adoptedOrphanFiles) console.log('[heal] 收养孤立正文 ' + a.store + ' → 可从回收站恢复到 ' + a.originalRel);
+      for (const b of r.droppedBadStore) console.error('[heal] 摘掉越界 store 条目: ' + b.store + '（' + b.reason + '）');
+      for (const t of r.removedTempFiles) console.log('[heal] 删除残留临时文件: ' + t);
+    } else {
+      console.log('[heal] 数据目录检查通过，无需修复');
+    }
+    if (r.orphanVersionDirs.length) console.log('[heal] 注意：.trash 下有孤立版本目录（未处理）: ' + r.orphanVersionDirs.join(', '));
+    if (r.unrestorableEntries.length) console.error('[heal] 注意：有条目的原路径已不允许写入，恢复会失败: ' + r.unrestorableEntries.map(x => x.originalRel).join(', '));
+    for (const err of r.errors) console.error('[heal] ' + err);
+    return r;
+  } catch (e) {
+    console.error('[heal] 自愈过程本身失败（已忽略，不影响启动）:', e && e.stack ? e.stack : e);
+    lastHealReport = { ranAt: new Date().toISOString(), failed: String(e && e.message ? e.message : e) };
+    return lastHealReport;
+  }
 }
 
 // ---------- 搜索压测（PFM_SELFTEST_BENCH=<条数>） ----------
@@ -3131,6 +3354,9 @@ app.whenReady().then(async () => {
   try {
     ensureSeedData();
     await ensureDirs();
+    // 自愈必须在 createWindow 之前：窗口一出来渲染进程就会 list-trash / listTree，
+    // 那时索引应该已经是修好的，否则用户先看到一屏幽灵条目再看到它们消失。
+    await runStartupHeal();
     await createWindow();
   } catch (e) {
     console.error('[bootstrap] 启动失败:', e && e.stack ? e.stack : e);
