@@ -384,6 +384,37 @@ async function writeFileAtomic(fullPath, data) {
   }
 }
 
+// 独占创建：只用于"这个文件必须还不存在"的新建路径。
+//
+// 为什么不能沿用 writeFileAtomic：它结尾是 rename，而 rename 会无条件覆盖目标。
+// 新建路径原先是"先 fs.existsSync 判重，再 writeFileAtomic"，两步之间有窗口，
+// 且两步都不阻止覆盖——并发新建同名文件时两路都通过判重、两路都 rename，
+// 后一次把前一次的正文整个盖掉，而两路都返回成功。
+// 'wx' 把判重和创建合成一个内核级原子操作：文件已存在就直接 EEXIST，
+// 谁抢到名字由内核裁决，不存在"检查完再被人插队"。
+//
+// 写一半失败就把自己刚创建的文件删掉，让结果回到"要么完整、要么不存在"。
+// 残留的风险只剩"open 成功后进程被硬杀"留下 0 字节文件——这是个新文件，
+// 不会毁掉任何已有内容，比原先的静默覆盖轻得多。
+async function writeFileExclusive(fullPath, data, relForError) {
+  await ensureDir(path.dirname(fullPath));
+  let fh;
+  try {
+    fh = await fsp.open(fullPath, 'wx');
+  } catch (e) {
+    if (e && e.code === 'EEXIST') throw appError('E_FILE_EXISTS', relForError);
+    throw e;
+  }
+  try {
+    await fh.writeFile(data, 'utf8');
+  } catch (e) {
+    try { await fh.close(); } catch {}
+    try { await fsp.unlink(fullPath); } catch {}
+    throw e;
+  }
+  await fh.close();
+}
+
 // 快照名撞了就往后挪一毫秒重算，而不是覆盖或直接失败。
 //
 // 为什么需要：文件名精度只到毫秒，而快照名不能随便换格式——list-versions、
@@ -738,10 +769,10 @@ ipcMain.handle('save-file', async (e, rel, content) => queueWrite('ver:' + Strin
 async function createFileAt(rel, content) {
   const full = safeJoinWritable(rel);
   if (typeof content !== 'string') throw appError('E_CONTENT_NOT_STRING', typeof content);
-  if (fs.existsSync(full)) throw appError('E_FILE_EXISTS', rel);
-  await ensureDir(path.dirname(full));
   const toWrite = bumpAutoFields(content, null);
-  await writeFileAtomic(full, toWrite);
+  // 判重交给独占创建，不再自己 existsSync：见 writeFileExclusive 的说明。
+  // 文件已存在时照旧抛 E_FILE_EXISTS，对调用方语义不变。
+  await writeFileExclusive(full, toWrite, rel);
   dropFromCache(full);
   return { content: toWrite, meta: parseFrontmatter(toWrite).meta };
 }
@@ -1106,9 +1137,23 @@ async function importMarkdown(fileName, content) {
   const { meta } = parseFrontmatter(content);
   const title = sanitizeTitle(meta.title || path.basename(fileName, '.md'));
   const stage = (meta.stage && STAGES.includes(meta.stage)) ? meta.stage : 'project-init';
-  const rel = uniqueRel(`prompts/${stage}/${title}.md`, (r) => fs.existsSync(safeJoin(r)));
-  await createFileAt(rel, content);
-  return rel;
+  const base = `prompts/${stage}/${title}.md`;
+  // uniqueRel 只能按"此刻磁盘上有什么"挑名字，挑完到真正创建之间仍有窗口。
+  // 而且这一段到 await 之前全是同步的：并发导入几个同名文件时，每一路都在
+  // 别人落盘之前跑完 uniqueRel，于是全都挑中同一个名字。
+  // createFileAt 现在是独占创建，撞上只会抛 E_FILE_EXISTS 而不会覆盖，
+  // 所以这里重挑一次名字再试——导入的既有语义是"自动改名，不覆盖"。
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const rel = uniqueRel(base, (r) => fs.existsSync(safeJoin(r)));
+    try {
+      await createFileAt(rel, content);
+      return rel;
+    } catch (e) {
+      if (e && typeof e.message === 'string' && e.message.split('|')[0] === 'E_FILE_EXISTS') continue;
+      throw e;
+    }
+  }
+  throw appError('E_TOO_MANY_DUPES', base);
 }
 
 ipcMain.handle('import-single', async () => {
@@ -1597,6 +1642,79 @@ async function runSecurityRegression(targetWin) {
     for (let i = 0; i < 6; i++) contentCache.delete(path.join(cacheTestDir, 'c' + i + '.md'));
     try { await fsp.rm(cacheTestDir, { recursive: true, force: true }); } catch {}
   }
+
+  // ---- 7. 新建/导入不能因为 check-then-write 静默覆盖 ----
+  // createFileAt 原先是"fs.existsSync 判重 → writeFileAtomic"。两步之间有窗口，
+  // 而 writeFileAtomic 结尾的 rename 会无条件覆盖目标，所以并发新建同名文件时
+  // 几路都通过判重、几路都 rename，后一次把前一次的正文整个盖掉，且每一路都
+  // 返回成功——用户看到"导入成功 5 条"，磁盘上其实只剩最后一条。
+  // importMarkdown 更糟：它到第一个 await 之前全是同步的，几路必然都跑完
+  // uniqueRel 才有人落盘，于是全都挑中同一个名字，不是窄窗口而是稳定复现。
+  const exRel = 'prompts/project-init/sec-excl-dup.md';
+  const imTitle = 'sec-imp-dup';
+  const cleanupRels = [exRel];
+  try {
+    try { await fsp.rm(safeJoin(exRel), { force: true }); } catch {}
+
+    // 5 路并发新建同一个 rel，各写不同正文
+    const exRes = await Promise.allSettled(
+      [0, 1, 2, 3, 4].map(i => createFileAt(exRel, '# excl ' + i + '\n\nEXCL-BODY-' + i))
+    );
+    const exOk = exRes.filter(r => r.status === 'fulfilled');
+    const exFail = exRes.filter(r => r.status === 'rejected');
+    // 这条才是真正能抓到缺陷的断言：修复前 5 路全部 fulfilled。
+    check('并发新建同名文件只有一路成功',
+      exOk.length === 1, '成功 ' + exOk.length + ' 路，失败 ' + exFail.length + ' 路');
+    check('失败的各路都报 E_FILE_EXISTS',
+      exFail.length === 4 && exFail.every(r =>
+        String(r.reason && r.reason.message).split('|')[0] === 'E_FILE_EXISTS'),
+      JSON.stringify(exFail.map(r => String(r.reason && r.reason.message))));
+
+    // 注意：下面这条单独拿出来是抓不到缺陷的——rename 本身是原子的，
+    // 修复前磁盘上也只会有某一路的完整正文。它的作用是守住"没有半截/混写正文"，
+    // 真正的检测靠上面的成功路数。
+    const exDisk = await fsp.readFile(safeJoin(exRel), 'utf8');
+    const exMarkers = [0, 1, 2, 3, 4].filter(i => exDisk.includes('EXCL-BODY-' + i));
+    check('磁盘上只有一路的完整正文，没有混写',
+      exMarkers.length === 1, '匹配到标记 ' + JSON.stringify(exMarkers));
+
+    // 5 路并发导入同一个标题：既有语义是"自动改名，不覆盖"，所以 5 路都该成功，
+    // 但必须落到 5 个不同的文件上，5 份正文一份都不能丢。
+    const imRes = await Promise.allSettled([0, 1, 2, 3, 4].map(i => importMarkdown(
+      imTitle + '.md',
+      '---\ntitle: ' + imTitle + '\nstage: project-init\n---\n\nIMP-BODY-' + i
+    )));
+    const imOk = imRes.filter(r => r.status === 'fulfilled').map(r => r.value);
+    for (const r of imOk) cleanupRels.push(r);
+    check('并发导入全部成功', imOk.length === 5,
+      JSON.stringify(imRes.map(r => r.status === 'fulfilled' ? r.value
+        : String(r.reason && r.reason.message))));
+
+    const imUniq = [...new Set(imOk)];
+    check('并发导入分配到的路径互不相同',
+      imUniq.length === imOk.length, JSON.stringify(imOk));
+
+    const imFound = new Set();
+    for (const rel of imUniq) {
+      let c = '';
+      try { c = await fsp.readFile(safeJoin(rel), 'utf8'); } catch {}
+      for (let i = 0; i < 5; i++) if (c.includes('IMP-BODY-' + i)) imFound.add(i);
+    }
+    check('并发导入的 5 份正文都完整落盘',
+      imFound.size === 5, '只找到 ' + JSON.stringify([...imFound]) + '，落盘路径 ' + JSON.stringify(imUniq));
+  } catch (e) {
+    check('新建/导入独占创建用例执行完成', false, e && e.message);
+  } finally {
+    // 顺带把 uniqueRel 可能挑出的 -1..-9 变体一起清掉，别留给后面的用例
+    for (let n = 1; n <= 9; n++) cleanupRels.push('prompts/project-init/' + imTitle + '-' + n + '.md');
+    cleanupRels.push('prompts/project-init/' + imTitle + '.md');
+    for (const rel of new Set(cleanupRels)) {
+      const f = safeJoin(rel);
+      try { await fsp.rm(f, { force: true }); } catch {}
+      dropFromCache(f);
+    }
+  }
+
 
 
   return out;
