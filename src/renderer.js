@@ -236,6 +236,38 @@ async function confirmDialog(msg) {
 }
 
 // ===== Markdown 渲染 =====
+// 渲染成本上限。marked 的行内强调扫描在"一行里有大量未闭合 * / _"时是二次复杂度，
+// 而正文全部来自用户导入的 .md，此前没有任何上限。实测（仓库里这份 marked 11.2.0，
+// 渲染进程主线程）：单行 2 万个分隔符 1.3 秒，4 万个 5.4 秒，8 万个约 20 秒。
+// 渲染是同步的，期间界面完全冻住——没有 toast，也没法取消或关窗。
+//
+// 真正致命的是它会跨重启复发：init() 结尾会自动打开上次的标签，于是
+// "导入恶意文件 → 打开 → 卡死 → 强杀进程 → 重启又自动打开同一个文件 → 再卡死"，
+// 普通用户唯一的出路是手动去删 config.json。所以这不只是一次卡顿，是能把应用变砖。
+//
+// 阈值必须按"单行"卡而不是按总长度，这一点是实测出来的：真实内容里每行最多 4 个
+// 分隔符，一份 104KB 的重格式 markdown（2000 行、总共 16000 个分隔符）只要 57ms；
+// 而单行 78KB 的恶意输入要 5.4 秒。按总长度卡会两头落空——既拦不住单行攻击，
+// 又会误伤正常的长文件。
+// 总量上限是第二道闸：每行都合规但行数极多时（391KB、40 万分隔符）仍要 3.2 秒。
+// 两道闸都设在实测的安全区内：单行 2000 个约 6ms，总量 5 万个约 114ms。
+const MAX_EMPHASIS_PER_LINE = 2000;
+const MAX_EMPHASIS_TOTAL = 50000;
+function emphasisTooCostly(md) {
+  let inLine = 0;
+  let total = 0;
+  for (let i = 0; i < md.length; i++) {
+    const c = md[i];
+    if (c === '\n') { inLine = 0; continue; }
+    if (c !== '*' && c !== '_') continue;
+    inLine++;
+    total++;
+    // 提前退出：恶意输入通常在前几千字符就超标，不必扫完整个 4MB
+    if (inLine > MAX_EMPHASIS_PER_LINE || total > MAX_EMPHASIS_TOTAL) return true;
+  }
+  return false;
+}
+
 // FORBID_ATTR 里的 id/name 是防 DOM clobbering，不是防 XSS：
 // DOMPurify 默认放行 id，而它的 SANITIZE_DOM 只拦与 document/form 上已有属性
 // 撞名的 id。提示词正文里写 `<div id="editor">` 会被原样保留，插进 #preview
@@ -245,7 +277,14 @@ async function confirmDialog(msg) {
 // 用户的改动无声消失，dirty 检查也因为读不到 value 而认为"没改过"。
 // toast/其他按 id 取的节点同样可以被顶掉。
 function renderMarkdown(md) {
-  const html = marked.parse(md || '', { breaks: true, gfm: true });
+  const src = md || '';
+  // 超出成本上限就不进 marked，直接按纯文本显示。宁可这一个文件显示得朴素，
+  // 也不能让界面冻住到必须强杀进程——正文一个字都没少，用户仍可进编辑模式修。
+  if (emphasisTooCostly(src)) {
+    return '<div class="render-degraded">' + escapeHtml(t('renderDegraded')) + '</div>'
+      + '<pre class="render-plain">' + escapeHtml(src) + '</pre>';
+  }
+  const html = marked.parse(src, { breaks: true, gfm: true });
   return DOMPurify.sanitize(html, { ADD_ATTR: ['target'], FORBID_ATTR: ['id', 'name'] });
 }
 
@@ -1860,7 +1899,25 @@ async function init() {
   if (state.tabs.length) {
     const target = state.activeTab && allRels.has(state.activeTab) ? state.activeTab : state.tabs[0].rel;
     renderTabs();
-    await openFile(target);
+    // 先把 activeTab 落盘成 null，打开成功后再写回真正的目标。
+    //
+    // 这一步是为了掐断一个"能把应用变砖"的循环：自动打开的文件若让渲染卡死或抛错，
+    // 用户只能强杀进程，而重启后这里又会自动打开同一个文件，再次卡死——config.json
+    // 里那条 activeTab 成了永久陷阱，普通用户唯一的出路是手动删配置文件。
+    // 现在崩在 openFile 里的话，磁盘上的 activeTab 已经是 null，下次启动是干净的。
+    //
+    // 渲染成本上限（见 emphasisTooCostly）已经堵掉了已知的卡死输入，但那是按实测
+    // 阈值挡的；这里再兜一层，防的是将来别的原因让首个文件打不开。
+    state.activeTab = null;
+    await saveTabsDebounced.flush();
+    try {
+      await openFile(target);
+    } catch (e) {
+      // openFile 自己有 try/catch，正常不会抛到这里。真抛出来说明是渲染或 DOM 层
+      // 的意外，此时保持 activeTab=null 并让启动流程继续，别让整个界面停在半成品状态。
+      console.error('恢复上次打开的标签失败:', e); // i18n-exempt: 开发日志
+      toast(tErr('openFailed', e), 'error');
+    }
   }
   saveTabsDebounced();
 

@@ -131,6 +131,8 @@ const I18N = {
     typeRemoveFailed: '删除类型失败',
     // 导入部分成功：有条目被跳过（超大小上限 / 同名太多）
     importedPartial: '已导入 {n} 条，跳过 {skipped} 条',
+    // 正文的行内格式符号过多，渲染会长时间冻住界面，改为纯文本显示
+    renderDegraded: '此文件格式符号过多，已按纯文本显示以避免界面卡死。正文未被修改，可进入编辑模式查看。',
     // 确认框
     deleteConfirm: '删除「{name}」？\n文件将移入回收站，可恢复。',
     discardConfirm: '放弃未保存的修改？',
@@ -373,6 +375,8 @@ const I18N = {
     typeRemoveFailed: 'Failed to remove type',
     // 导入部分成功：有条目被跳过（超大小上限 / 同名太多）
     importedPartial: 'Imported {n}, skipped {skipped}',
+    // 正文的行内格式符号过多，渲染会长时间冻住界面，改为纯文本显示
+    renderDegraded: 'This file has too many inline formatting marks and is shown as plain text to keep the app responsive. The content is unchanged; open edit mode to view it.',
     // 确认框
     deleteConfirm: 'Delete "{name}"?\nIt will be moved to trash and can be restored.',
     discardConfirm: 'Discard unsaved changes?',
