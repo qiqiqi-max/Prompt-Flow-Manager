@@ -4,6 +4,7 @@ const { app, BrowserWindow, ipcMain, dialog, Menu, shell, screen } = require('el
 const path = require('path');
 const fs = require('fs');
 const fsp = require('fs/promises');
+const { pathToFileURL } = require('url');
 // 统计读文件次数。搜索是唯一随库规模线性变差的操作，压测时用它量化 I/O。
 let fileReadCount = 0;
 function countedReadFile(fullPath) {
@@ -235,8 +236,15 @@ function safeJoin(relPath) {
   if (rel.includes('\0')) throw appError('E_PATH_BAD_CHAR');
   const resolved = path.resolve(DATA_ROOT_NORM, rel);
   const rel2 = path.relative(DATA_ROOT_NORM, resolved);
-  // 相对路径以 .. 开头说明逃逸出了根目录
-  if (rel2.startsWith('..')) throw appError('E_PATH_ESCAPE', relPath);
+  // 相对路径以 .. 开头说明逃逸出了根目录。
+  // 还必须判 isAbsolute：Windows 上跨盘符时 path.relative 返回的是绝对路径而不是
+  // 一串 ..（实测 path.relative('D:\\a', 'C:\\Windows') === 'C:\\Windows'），
+  // 于是 startsWith('..') 为假，整个包含性检查被绕过。打包后 DATA_ROOT 在 C 盘，
+  // 'D:/x.txt'、'E:/x.txt'、'C:x.txt'（盘符相对）全都能放行。
+  // 可达路径不需要 XSS：工作流 frontmatter 的 flow[].prompt 会被渲染成流程节点的
+  // data-prompt，用户点一下就走 read-file，正文直接显示在预览区。
+  // trashStorePath 早就是这么判的，这里和 versionDirFor 漏了同一条。
+  if (rel2.startsWith('..') || path.isAbsolute(rel2)) throw appError('E_PATH_ESCAPE', relPath);
   return resolved;
 }
 
@@ -330,7 +338,9 @@ function versionDirFor(relPath) {
   if (!rel) throw appError('E_PATH_EMPTY');
   if (rel.includes('\0')) throw appError('E_PATH_BAD_CHAR');
   const resolved = path.resolve(VERSIONS_DIR, rel);
-  if (path.relative(VERSIONS_DIR, resolved).startsWith('..')) throw appError('E_PATH_ESCAPE', relPath);
+  // isAbsolute 的理由同 safeJoin：跨盘符时 path.relative 返回绝对路径，不是 ..
+  const relV = path.relative(VERSIONS_DIR, resolved);
+  if (relV.startsWith('..') || path.isAbsolute(relV)) throw appError('E_PATH_ESCAPE', relPath);
   return resolved;
 }
 
@@ -1729,6 +1739,115 @@ async function runSecurityRegression(targetWin) {
 
 
 
+  // ---- 8. 路径校验不能被跨盘符绕过，窗口内导航只放行界面自身 ----
+  // safeJoin 原先只判 path.relative(...).startsWith('..')。Windows 上跨盘符时
+  // path.relative 返回的是绝对路径而不是一串 ..（实测
+  // path.relative('D:\\a', 'C:\\Windows') === 'C:\\Windows'），startsWith('..')
+  // 为假，于是整个包含性检查被绕过。versionDirFor 漏的是同一条。
+  // 可达路径不需要 XSS：工作流 frontmatter 的 flow[].prompt 被渲染成流程节点的
+  // data-prompt，用户点一下就走 read-file，库外文件的正文直接显示在预览区。
+  try {
+    // 另一个盘的盘符要按 DATA_ROOT 实际所在盘算，否则在 CI 上（临时目录在 C 盘）
+    // 拿 C: 去测会走"同盘 .. 逃逸"分支，测不到跨盘符这条。
+    const myDrive = String(path.parse(DATA_ROOT_NORM).root || 'C:\\').slice(0, 1).toUpperCase();
+    const other = myDrive === 'C' ? 'D' : 'C';
+    check('用例前置：构造的盘符与 DATA_ROOT 不同盘', other !== myDrive, `DATA_ROOT 在 ${myDrive}:，用 ${other}:`);
+
+    const crossCases = [
+      other + ':\\Windows\\win.ini',
+      other + ':/Windows/win.ini',
+      other + ':x.txt'           // 盘符相对形态
+    ];
+    const notBlocked = [];
+    for (const c of crossCases) {
+      let blocked = false;
+      try { safeJoin(c); } catch (err) {
+        blocked = String(err && err.message).split('|')[0] === 'E_PATH_ESCAPE';
+      }
+      if (!blocked) notBlocked.push(c);
+    }
+    check('safeJoin 拦住跨盘符绝对路径', notBlocked.length === 0, `放行了 ${JSON.stringify(notBlocked)}`);
+
+    const notBlockedV = [];
+    for (const c of crossCases) {
+      let blocked = false;
+      try { versionDirFor(c); } catch (err) {
+        blocked = String(err && err.message).split('|')[0] === 'E_PATH_ESCAPE';
+      }
+      if (!blocked) notBlockedV.push(c);
+    }
+    check('versionDirFor 拦住跨盘符绝对路径', notBlockedV.length === 0, `放行了 ${JSON.stringify(notBlockedV)}`);
+
+    // 走真实 IPC：这才是攻击者实际能碰到的入口（流程节点点击 → read-file）
+    const ipcEsc = await viaIpc(`window.promptFlowApi.readFile(${J(other + ':\\\\Windows\\\\win.ini')})`);
+    check('read-file 对跨盘符路径报 E_PATH_ESCAPE',
+      ipcEsc.ok === false && /E_PATH_ESCAPE/.test(ipcEsc.message), JSON.stringify(ipcEsc));
+
+    // 正常路径不能被误伤。自己造文件，不依赖种子数据：
+    // PFM_DATA_DIR 指向的临时库里没有 templates/ 的随包内容，
+    // 第一版直接读 templates/prompt-template.md，结果是 ENOENT 而不是校验通过，
+    // 断言红得毫无意义（测的是文件在不在，不是路径校验放不放行）。
+    const okRel = 'prompts/project-init/sec-crossdrive-ok.md';
+    await viaIpc(`window.promptFlowApi.createFile(${J(okRel)}, ${J('---\ntitle: ok\n---\nBODY-OK')})`);
+    const okRead = await viaIpc(`window.promptFlowApi.readFile(${J(okRel)})`);
+    check('库内正常路径仍然可读', okRead.ok === true && /BODY-OK/.test(String(okRead.value && okRead.value.content)),
+      JSON.stringify(okRead).slice(0, 160));
+    try { await fsp.rm(safeJoin(okRel), { force: true }); } catch {}
+
+    // ---- 导航守卫 ----
+    // 原先是 url.startsWith('file://') 就放行。marked 默认不给链接加 target，
+    // 所以正文里的相对链接（../../evil.html、//host/share/evil.html）不走
+    // setWindowOpenHandler，正好落进这个放行分支；导航过去后 preload 会重新注入，
+    // promptFlowApi 原样暴露给攻击者页面，而 CSP 只对 index.html 那一个文档生效。
+    //
+    // 这条前置断言很关键：SELF_URL 是用 pathToFileURL 拼的，必须和 Electron 实际
+    // 加载的 URL 完全一致，否则 reload 会被自己的守卫拦掉。拿真实窗口的 URL 来验。
+    const liveUrl = targetWin.webContents.getURL();
+    check('用例前置：界面实际 URL 被 isSelfUrl 认可（reload 不会被误拦）',
+      isSelfUrl(liveUrl), `实际 ${liveUrl}，SELF_URL ${SELF_URL}`);
+
+    check('带 query/hash 的自身 URL 仍算自身（reload 容错）',
+      isSelfUrl(SELF_URL + '?x=1') && isSelfUrl(SELF_URL + '#top'), 'query/hash 变体被拦了');
+
+    // 审计里逐条验证过能通过 DOMPurify 的载荷形态
+    const evilUrls = [
+      'file:///C:/evil.html',
+      pathToFileURL(path.join(CODE_ROOT, 'src', 'evil.html')).href, // 同目录旁路
+      'file://attacker.example/share/evil.html',                     // UNC → 远端 SMB
+      'file:///' + DATA_ROOT_NORM.replace(/\\/g, '/') + '/prompts/x.md'
+    ];
+    const leaked = evilUrls.filter(u => isSelfUrl(u));
+    check('其余 file:// URL 一律不算自身', leaked.length === 0, `被当成自身: ${JSON.stringify(leaked)}`);
+
+    // 上面几条只测 isSelfUrl 这个纯函数，测不到它有没有真的接到 will-navigate 上：
+    // 把守卫改回 startsWith('file://') 时它们全是绿的（分离对照实测过）。
+    // 所以这里真的让页面去导航一次，看拦没拦住——这才是攻击者实际走的那条路。
+    const probePath = path.join(CODE_ROOT, 'src', 'evil-probe.html');
+    try {
+      fs.writeFileSync(probePath, '<html><body>PROBE</body></html>', 'utf8');
+      const probeUrl = pathToFileURL(probePath).href;
+      const urlBefore = targetWin.webContents.getURL();
+      // 用正文里普通链接的等价形态发起窗口内导航（不是 window.open）
+      await targetWin.webContents.executeJavaScript(
+        `(() => { window.location.href = ${JSON.stringify(probeUrl)}; return 1; })()`, true);
+      // 导航是异步的，给它足够时间真的发生
+      await new Promise(r => setTimeout(r, 600));
+      const urlAfter = targetWin.webContents.getURL();
+      check('窗口内导航到其他 file:// 被真的拦住了（守卫已接线）',
+        urlAfter === urlBefore,
+        `导航前 ${urlBefore}，导航后 ${urlAfter}`);
+      // 拦住之后界面必须还是活的，否则等于把应用弄坏了
+      const stillAlive = await targetWin.webContents.executeJavaScript(
+        `(() => typeof window.promptFlowApi === 'object' && !!document.getElementById('tree'))()`, true);
+      check('拦下导航后页面依然正常（bridge 与 DOM 都在）', stillAlive === true, String(stillAlive));
+    } finally {
+      try { fs.unlinkSync(probePath); } catch {}
+    }
+  } catch (e) {
+    check('路径与导航用例执行完成', false, e && e.message);
+  }
+
+
   return out;
 }
 
@@ -2298,6 +2417,23 @@ function attachSelfTest(targetWin) {
 // 链接劫持。导入的第三方 .md 同理。
 // 这里把两条路都堵上：新窗口请求交给系统浏览器，窗口内导航直接拒绝。
 // 只允许 file:// 通过，因为界面本身是 loadFile 加载的（reload 也走这条）。
+// 界面自身的 file:// URL，只有它允许在窗口内导航。
+// 原先是 url.startsWith('file://') 一律放行，这不够：marked 渲染出的相对链接
+// （../../evil.html、//host/share/evil.html）默认不带 target，不走
+// setWindowOpenHandler，正好落进那个放行分支。DOMPurify 拦得住显式写 file: 的
+// 链接，但相对路径是合法 URL，它必须放行。
+// 一旦导航过去，后果不是"界面被劫持"这么轻：preload 在每次文档加载时都会重新注入，
+// promptFlowApi 原样暴露给新页面；而 CSP 是 index.html 里的 <meta>，只对那一个
+// 文档生效，新页面没有任何 CSP。于是一次点击就能调 readFile/exportZip 把整个
+// 提示词库读走再 fetch 外发。UNC 形式还能让内容直接来自远端 SMB。
+const SELF_URL = pathToFileURL(path.join(CODE_ROOT, 'src', 'index.html')).href;
+function isSelfUrl(url) {
+  // 去掉 ?query / #hash 再比：reload 或将来加锚点都不该被误拦
+  const bare = String(url == null ? '' : url).split('#')[0].split('?')[0];
+  // Windows 上同一个文件的 URL 可能盘符大小写不同，统一小写比较
+  return bare.toLowerCase() === SELF_URL.toLowerCase();
+}
+
 function attachNavigationGuard(targetWin) {
   const openExternally = (url) => {
     // 只把 http/https 交给系统浏览器。file:/// 之类的本地协议不转发，
@@ -2313,7 +2449,7 @@ function attachNavigationGuard(targetWin) {
     return { action: 'deny' };
   });
   targetWin.webContents.on('will-navigate', (e, url) => {
-    if (url.startsWith('file://')) return; // 界面自身/reload
+    if (isSelfUrl(url)) return; // 只有界面自身那一个 URL（含 reload）可以在窗口内导航
     e.preventDefault();
     openExternally(url);
   });

@@ -218,7 +218,13 @@ section('ZIP 真实往返（压缩 → 解压）');
   // 防回归：时间戳只到秒，同一秒内两次保存会互相覆盖
   assert(/getMilliseconds\(\)/.test(mainSrc), '版本时间戳带毫秒，避免同秒覆盖');
   // 防回归：versionDirFor 直接 path.join(rel)，可路径穿越
-  assert(/path\.relative\(VERSIONS_DIR, resolved\)\.startsWith\('\.\.'\)/.test(mainSrc), 'versionDirFor 做了越权校验');
+  // 两半都要在：Windows 上跨盘符时 path.relative 返回绝对路径而不是一串 ..，
+  // 只判 startsWith('..') 会被 'D:/x' 这类输入整个绕过（见 safeJoin 的说明）。
+  assert(/path\.relative\(VERSIONS_DIR, resolved\)/.test(mainSrc), 'versionDirFor 做了越权校验');
+  assert(/relV\.startsWith\('\.\.'\) \|\| path\.isAbsolute\(relV\)/.test(mainSrc), 'versionDirFor 同时判了 isAbsolute（跨盘符）');
+  assert(/rel2\.startsWith\('\.\.'\) \|\| path\.isAbsolute\(rel2\)/.test(mainSrc), 'safeJoin 同时判了 isAbsolute（跨盘符）');
+  assert(/function isSelfUrl\(/.test(mainSrc), '导航守卫有 isSelfUrl 白名单判定');
+  assert(!/url\.startsWith\('file:\/\/'\)\) return/.test(mainSrc), 'will-navigate 不再放行任意 file:// URL');
   assert(/VERSION_FILE_RE/.test(mainSrc), '版本文件名有白名单校验');
   assert(!/path\.join\(versionDirFor\(rel\), file\)/.test(mainSrc), 'read-version 不再直接拼接未校验的 file');
 
