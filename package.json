@@ -1,6 +1,6 @@
 {
   "name": "prompt-flow-manager",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "提示词流程管理系统 - 本地桌面应用",
   "main": "electron-main.js",
   "scripts": {
@@ -9,7 +9,10 @@
     "test:ui": "node tests/ui-smoke.js",
     "test:fn": "node tests/functional-smoke.js",
     "test:tabs": "node tests/tab-restore.test.js",
-    "test:all": "npm test && npm run test:ui && npm run test:fn && npm run test:tabs",
+    "test:debounce": "node tests/debounce.test.js",
+    "test:close": "node tests/close-flush.test.js",
+    "test:render": "node tests/render-guard.test.js",
+    "test:all": "npm test && npm run test:ui && npm run test:fn && npm run test:tabs && npm run test:debounce && npm run test:close && npm run test:render",
     "bench": "node tests/search-bench.js",
     "sync-vendor": "node scripts/sync-vendor.js",
     "prebuild": "node scripts/sync-vendor.js",
@@ -35,12 +38,15 @@
   "bugs": {
     "url": "https://github.com/qiqiqi-max/Prompt-Flow-Manager/issues"
   },
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "devDependencies": {
-    "diff-match-patch": "^1.0.5",
-    "dompurify": "^3.0.6",
+    "diff-match-patch": "1.0.5",
+    "dompurify": "3.4.14",
     "electron": "^28.0.0",
     "electron-builder": "^24.9.1",
-    "marked": "^11.1.1"
+    "marked": "11.2.0"
   },
   "dependencies": {
     "archiver": "^6.0.1",

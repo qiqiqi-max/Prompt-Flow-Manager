@@ -25,6 +25,9 @@ const api = {
   getConfig: () => ipcRenderer.invoke('get-config'),
   setConfig: (cfg) => ipcRenderer.invoke('set-config', cfg),
   confirm: (msg) => ipcRenderer.invoke('confirm', msg),
+  // 保存 / 不保存 / 取消三选一。切文件、切标签时草稿还在就问这个，
+  // 而不是像原先那样直接替用户保存。
+  confirmUnsaved: (opts) => ipcRenderer.invoke('confirm-unsaved', opts),
   exportZip: () => ipcRenderer.invoke('export-zip'),
   exportSingle: (rel) => ipcRenderer.invoke('export-single', rel),
   getStages: () => ipcRenderer.invoke('get-stages'),
@@ -32,6 +35,8 @@ const api = {
   removeProjectType: (t) => ipcRenderer.invoke('remove-project-type', t),
   importSingle: () => ipcRenderer.invoke('import-single'),
   importZip: () => ipcRenderer.invoke('import-zip'),
+  // 菜单的"重新加载"先问渲染进程有没有未保存改动，确认后再由主进程真的重载。
+  reloadWindow: () => ipcRenderer.invoke('reload-window'),
   onMenuAction: (cb) => {
     const handler = (e, action) => cb(action);
     ipcRenderer.on('menu-action', handler);

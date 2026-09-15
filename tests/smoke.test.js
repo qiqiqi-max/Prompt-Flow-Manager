@@ -25,7 +25,7 @@ console.log('冒烟测试');
 section('关键文件存在性');
 const required = [
   'electron-main.js', 'preload.js', 'lib/zip-import.js', 'scripts/sync-vendor.js',
-  'src/index.html', 'src/styles.css', 'src/renderer.js', 'src/i18n.js',
+  'src/index.html', 'src/styles.css', 'src/renderer.js', 'src/i18n.js', 'src/frontmatter.js',
   'src/vendor/marked.umd.js', 'src/vendor/purify.min.js', 'src/vendor/diff-match-patch.js',
   'package.json', 'build/icon.png', 'prompt-flow-manager.ico', '.gitignore'
 ];
@@ -61,11 +61,22 @@ assert(!!(pkg.dependencies && pkg.dependencies.archiver), 'archiver 在 dependen
 for (const p of ['lib/**/*', 'src/**/*', 'preload.js']) {
   assert(pkg.build.files.includes(p), 'build.files 包含 ' + p);
 }
+// 会被 sync-vendor 拷进 src/vendor/ 的三个库必须锁死到确定版本。
+// 理由：vendor 副本是提交进仓库的，而 ^x.y.z 允许 npm install 装到别的版本，
+// 于是"package.json 声明的版本"和"实际加载的那份文件"可以静默不一致，
+// 出问题时按声明的版本号去查 changelog 会查错。
+// DOMPurify 尤其重要：sandbox 是关的（见 webPreferences 注释），
+// 它是提示词正文渲染唯一的 XSS 边界，版本必须是确定的。
+for (const dep of ['dompurify', 'marked', 'diff-match-patch']) {
+  const range = (pkg.devDependencies || {})[dep] || '';
+  assert(/^\d+\.\d+\.\d+$/.test(range), dep + ' 锁定到确定版本（当前 ' + range + '）');
+}
+assert(!!(pkg.engines && pkg.engines.node), '声明了 engines.node');
 
 section('JS 语法检查');
 const jsFiles = [
   'electron-main.js', 'preload.js', 'lib/zip-import.js', 'scripts/sync-vendor.js',
-  'src/renderer.js', 'src/i18n.js', 'tests/smoke.test.js',
+  'src/renderer.js', 'src/i18n.js', 'src/frontmatter.js', 'tests/smoke.test.js',
   'src/vendor/marked.umd.js', 'src/vendor/purify.min.js', 'src/vendor/diff-match-patch.js'
 ];
 for (const f of jsFiles) {
@@ -102,7 +113,7 @@ assert(!/\brequire\s*\(/.test(rendererSrc), 'renderer.js 不再使用 require');
 assert(!/^\s*(const|let|var)\s+I18N\b/m.test(rendererSrc), 'renderer.js 未重复声明 I18N');
 const i18nDecls = (fs.readFileSync(path.join(root, 'src/i18n.js'), 'utf8').match(/^\s*(const|let|var)\s+I18N\b/gm) || []).length;
 assert(i18nDecls === 1, 'I18N 全局只声明一次');
-for (const v of ['vendor/marked.umd.js', 'vendor/purify.min.js', 'vendor/diff-match-patch.js', 'i18n.js', 'renderer.js']) {
+for (const v of ['vendor/marked.umd.js', 'vendor/purify.min.js', 'vendor/diff-match-patch.js', 'i18n.js', 'frontmatter.js', 'renderer.js']) {
   assert(htmlSrc.includes('src="' + v + '"'), 'index.html 引入了 ' + v);
 }
 assert(/Content-Security-Policy/.test(htmlSrc), 'index.html 有 CSP');
@@ -147,10 +158,27 @@ try {
 } catch (e) { loopGuard = /^E_TOO_MANY_DUPES\b/.test(e.message); }
 assert(loopGuard, '候选名耗尽时抛错，不会死循环');
 
-// sanitizeTitle：frontmatter 的 title 会变成文件名，必须挡住路径穿越
-assert(sanitizeTitle('../../evil') === '_.._evil' || !sanitizeTitle('../../evil').includes('/'), 'title 中的路径分隔符被清除');
+// sanitizeTitle：frontmatter 的 title 会变成文件名，必须挡住路径穿越。
+// 注意别写成 `A === '具体值' || 弱条件` 那种形式：这里原先第一个子句其实是 false
+// （真实输出是 '__.._evil' 而不是 '_.._evil'），全靠后半句"不含 /"兜着，
+// 于是穿越防护退化成只查一个字符，改坏了也测不出来。改成逐条断言真正的保证。
+{
+  const traversal = sanitizeTitle('../../evil');
+  assert(!/[\\/]/.test(traversal), 'title 中的路径分隔符被清除（得到 ' + traversal + '）');
+  assert(!traversal.startsWith('.'), 'title 不以点开头（否则会变成隐藏文件/被目录遍历跳过）');
+  // 关键性质：清洗后的名字拼进目录里不能跑出这个目录
+  const joined = path.join('/lib/prompts', traversal + '.md');
+  assert(joined.startsWith(path.join('/lib/prompts') + path.sep), '清洗后的名字拼路径不会逃出目标目录');
+  // 纯点号的标题不能产出 "." / ".." 这种在文件系统里有特殊含义的名字
+  for (const raw of ['.', '..', '....']) {
+    const out = sanitizeTitle(raw);
+    assert(out !== '.' && out !== '..', 'title "' + raw + '" 不会产出 . 或 ..（得到 ' + out + '）');
+  }
+}
 assert(!sanitizeTitle('a\\b:c*d?e"f<g>h|i').match(/[\\/:*?"<>|]/), 'Windows 非法字符被清除');
 assert(sanitizeTitle('   ') === '未命名', '空标题回退为默认名');
+// Windows 下文件名结尾的点和空格会被静默吃掉，导致"写入的名字"和"磁盘上的名字"不一致
+assert(!/[. ]$/.test(sanitizeTitle('evil. ')), 'title 结尾的点和空格被清除');
 
 section('ZIP 真实往返（压缩 → 解压）');
 (async () => {
@@ -190,7 +218,13 @@ section('ZIP 真实往返（压缩 → 解压）');
   // 防回归：时间戳只到秒，同一秒内两次保存会互相覆盖
   assert(/getMilliseconds\(\)/.test(mainSrc), '版本时间戳带毫秒，避免同秒覆盖');
   // 防回归：versionDirFor 直接 path.join(rel)，可路径穿越
-  assert(/path\.relative\(VERSIONS_DIR, resolved\)\.startsWith\('\.\.'\)/.test(mainSrc), 'versionDirFor 做了越权校验');
+  // 两半都要在：Windows 上跨盘符时 path.relative 返回绝对路径而不是一串 ..，
+  // 只判 startsWith('..') 会被 'D:/x' 这类输入整个绕过（见 safeJoin 的说明）。
+  assert(/path\.relative\(VERSIONS_DIR, resolved\)/.test(mainSrc), 'versionDirFor 做了越权校验');
+  assert(/relV\.startsWith\('\.\.'\) \|\| path\.isAbsolute\(relV\)/.test(mainSrc), 'versionDirFor 同时判了 isAbsolute（跨盘符）');
+  assert(/rel2\.startsWith\('\.\.'\) \|\| path\.isAbsolute\(rel2\)/.test(mainSrc), 'safeJoin 同时判了 isAbsolute（跨盘符）');
+  assert(/function isSelfUrl\(/.test(mainSrc), '导航守卫有 isSelfUrl 白名单判定');
+  assert(!/url\.startsWith\('file:\/\/'\)\) return/.test(mainSrc), 'will-navigate 不再放行任意 file:// URL');
   assert(/VERSION_FILE_RE/.test(mainSrc), '版本文件名有白名单校验');
   assert(!/path\.join\(versionDirFor\(rel\), file\)/.test(mainSrc), 'read-version 不再直接拼接未校验的 file');
 
@@ -308,10 +342,40 @@ assert(/function installSelfTestDialogStubs\(/.test(mainSrc), '有自检用的�
 assert(/PFM_SELFTEST_DIALOGS/.test(mainSrc), '对话框桩由 PFM_SELFTEST_DIALOGS 队列驱动');
 assert(/process\.env\.PFM_SELFTEST === '1' && process\.env\.PFM_SELFTEST_DIALOGS/.test(mainSrc),
   '对话框桩只在自检模式生效（生产行为不变）');
+// 消息框也要能桩：confirm-unsaved 是三选一的"保存/不保存/取消"，
+// 没有桩就只能人工点，于是三条分支各自的静默坏法（取消照切、不保存却写盘、
+// 保存却没落盘）一直没有自动化覆盖。
+assert(/dialog\.showMessageBox = async/.test(mainSrc), '消息框（确认/未保存三选一）也有桩');
+// 按 kind 分流是必须的：文件对话框和消息框的调用时机互不相干，
+// 混在一条流水线里，插一个消息框应答就会把导出/导入四项全错位一格。
+assert(/q\.kind \? q\.kind : 'file'/.test(mainSrc), '对话框队列按 kind 分流，两类互不错位');
+assert(/Number\.isInteger\(opts\.cancelId\) \? opts\.cancelId : 0/.test(mainSrc),
+  '队列没料到的消息框按调用方的 cancelId 回退（对未保存提示＝保住草稿）');
 {
   const fnSrc = fs.readFileSync(path.join(root, 'tests/functional-smoke.js'), 'utf8');
   assert(/dialogQueue/.test(fnSrc), '功能测试准备了对话框队列');
   assert(/exportedZip/.test(fnSrc) && /PK/.test(fnSrc), '功能测试校验导出的 ZIP 是真 ZIP');
+  assert(/kind: 'message'/.test(fnSrc), '功能测试队列里备了未保存三选一的应答');
+  // 断言只写关键词（/导出 ZIP 返回成功/）是空断言：失败时打的是
+  // "[selftest] FAIL [fn] 导出 ZIP 返回成功"，同一个正则照样命中，
+  // 通过与失败两种情况都为真，实际只靠单独那条 FAIL 兜着。必须锚定 PASS 前缀。
+  //
+  // 两处都要查：内联的 /.../.test(out)，以及 mustHave 清单里的正则字面量。
+  // 只查内联那几条的话守卫自己就是空断言——分支断言全写在 mustHave 里，
+  // 而空断言最容易出现的地方恰好就是那份清单。
+  // 也不能按行首匹配：内联那几条实际写成 "&& /.../.test(out)"，一条都找不到。
+  const reSrc = fnSrc.split(/\r?\n/).filter(l => !/^\s*\/\//.test(l)).join('\n');
+  const outTests = [...reSrc.matchAll(/\/((?:[^/\\\n]|\\.)+)\/\.test\(out\)/g)].map(m => m[0]);
+  const mustBlock = reSrc.match(/const mustHave = \[([\s\S]*?)\n\s*\];/);
+  assert(!!mustBlock, '功能测试有 mustHave 必需检查项清单');
+  const mustRes = [...(mustBlock ? mustBlock[1] : '').matchAll(/\/((?:[^/\\\n]|\\.)+)\//g)].map(m => m[0]);
+  const outAsserts = outTests.concat(mustRes);
+  assert(outTests.length >= 3 && mustRes.length >= 7,
+    '找到了 out 断言可供检查（内联 ' + outTests.length + ' 条，mustHave ' + mustRes.length + ' 条）');
+  const bare = outAsserts.filter(s => !/PASS|FAIL|全部通过/.test(s));
+  assert(bare.length === 0, '功能测试没有不带 PASS 前缀的裸关键词断言（空断言）' +
+    (bare.length ? '：' + bare.join(' | ') : ''));
+  assert(/\[selftest:fn\\\] PASS 未保存三选一/.test(fnSrc), '三选一的分支断言锚定了 PASS 前缀');
 }
 
 section('日志不能把应用打挂');

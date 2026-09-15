@@ -190,6 +190,9 @@
   <script src="vendor/purify.min.js"></script>
   <script src="vendor/diff-match-patch.js"></script>
   <script src="i18n.js"></script>
+  <!-- frontmatter 解析与主进程共用同一份实现（src/frontmatter.js），
+       必须在 renderer.js 之前加载。 -->
+  <script src="frontmatter.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

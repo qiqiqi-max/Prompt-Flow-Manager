@@ -76,6 +76,7 @@ const state = {
   currentContent: '',      // 文件原始内容（含 frontmatter）
   currentMeta: {},
   editMode: false,
+  editBaseline: '',           // 进入编辑时的内容快照，用于脏判断（见 isDirty）
   historyRel: null,
   filter: { stage: '', type: '', tag: '' },
   expandedPaths: new Set(),  // 文件树展开状态记忆（存目录的 rel）
@@ -88,7 +89,65 @@ const state = {
 
 // ===== 工具 =====
 const $ = (id) => document.getElementById(id);
-const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
+// 返回的函数会返回一个 promise，它在这次防抖真正执行完之后才 resolve，
+// 并额外挂一个 .flush()：立即执行待处理的那次调用（没有待处理的就等在飞的那次）。
+//
+// 原先返回 undefined。两个后果：
+//   - toggleLockFile 里的 `await saveLockedDebounced()` 实际是 await undefined，
+//     一个 tick 就过去了，锁状态还在 400ms 窗口里躺着没落盘。
+//   - 关窗时五个配置 debounce（tabs/recent/locked/sidebarWidth/expandedPaths）
+//     只要有一个还在窗口里，那次改动就跟着窗口一起没了：拖完侧边栏立刻关窗，
+//     下次打开宽度是旧的。计时器没有任何对外把手，主进程也没法催它落盘。
+//
+// 只保留最后一次的参数（防抖语义本来就是这样），但每次调用各自拿到一个 promise，
+// 全部在同一次执行后一起结算。
+const debounce = (fn, ms) => {
+  let timer = null;
+  let lastArgs = null;
+  let waiters = [];
+  let running = null;
+  const run = () => {
+    timer = null;
+    const args = lastArgs || [];
+    lastArgs = null;
+    const w = waiters;
+    waiters = [];
+    const p = (async () => {
+      // 这里不让异常逃出去：running 会被 flush() 返回给主进程的关窗流程，
+      // 一次保存失败不该把关窗卡住。等待者仍然按原样收到 reject。
+      try {
+        const r = await fn(...args);
+        w.forEach(x => x.resolve(r));
+      } catch (e) {
+        w.forEach(x => x.reject(e));
+      }
+    })();
+    // 注意比的是 settled 而不是 p：running 存的是 p.then(...) 的返回值，
+    // 和 p 不是同一个 promise，写成 if (running === p) 那句永远为假、running 永不清空。
+    const settled = p.then(() => { if (running === settled) running = null; });
+    running = settled;
+    return running;
+  };
+  const wrapped = (...a) => {
+    lastArgs = a;
+    if (timer) clearTimeout(timer);
+    const p = new Promise((resolve, reject) => { waiters.push({ resolve, reject }); });
+    timer = setTimeout(run, ms);
+    // 大多数调用方是 fire-and-forget（migrateLock、addRecent、switchTab 等）。
+    // 挂一个空 catch 把 promise 标记成已处理，免得这些地方冒出 unhandledrejection；
+    // 之后真的 await 这个 p 的调用方照旧能拿到异常。
+    p.catch(() => {});
+    return p;
+  };
+  wrapped.flush = () => {
+    if (timer) {
+      clearTimeout(timer);
+      return run();
+    }
+    return running || Promise.resolve();
+  };
+  return wrapped;
+};
 const escapeHtml = (s) => String(s).replace(/[&<>"'`]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '`': '&#96;' }[c]));
 // 保存展开状态（防抖）
 const saveExpandedPathsDebounced = debounce(async () => {
@@ -97,27 +156,11 @@ const saveExpandedPathsDebounced = debounce(async () => {
   } catch (e) { console.error('保存展开状态失败:', e); } // i18n-exempt: 开发日志
 }, 600);
 
+// frontmatter 解析由 src/frontmatter.js 提供（FRONTMATTER 全局，index.html 里先加载）。
+// 主进程 require 的是同一个文件，所以两边的解析结果永远一致——
+// 原先这里和 electron-main.js 各有一份逐字复制的实现，改一边不会同步到另一边。
 function parseFrontmatter(content) {
-  const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
-  if (!m) return { meta: {}, body: content };
-  const yaml = m[1];
-  const body = m[2];
-  const meta = {};
-  for (const line of yaml.split(/\r?\n/)) {
-    if (!line.trim() || line.trim().startsWith('#')) continue;
-    const idx = line.indexOf(':');
-    if (idx === -1) continue;
-    const key = line.slice(0, idx).trim();
-    let val = line.slice(idx + 1).trim();
-    if (val.startsWith('[') && val.endsWith(']')) {
-      val = val.slice(1, -1).split(',').map(s => s.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
-    } else if (val === 'true') val = true;
-    else if (val === 'false') val = false;
-    else if (/^-?\d+$/.test(val)) val = parseInt(val, 10);
-    else val = val.replace(/^["']|["']$/g, '');
-    meta[key] = val;
-  }
-  return { meta, body };
+  return FRONTMATTER.parse(content);
 }
 
 function parseWorkflowFlow(content) {
@@ -193,9 +236,56 @@ async function confirmDialog(msg) {
 }
 
 // ===== Markdown 渲染 =====
+// 渲染成本上限。marked 的行内强调扫描在"一行里有大量未闭合 * / _"时是二次复杂度，
+// 而正文全部来自用户导入的 .md，此前没有任何上限。实测（仓库里这份 marked 11.2.0，
+// 渲染进程主线程）：单行 2 万个分隔符 1.3 秒，4 万个 5.4 秒，8 万个约 20 秒。
+// 渲染是同步的，期间界面完全冻住——没有 toast，也没法取消或关窗。
+//
+// 真正致命的是它会跨重启复发：init() 结尾会自动打开上次的标签，于是
+// "导入恶意文件 → 打开 → 卡死 → 强杀进程 → 重启又自动打开同一个文件 → 再卡死"，
+// 普通用户唯一的出路是手动去删 config.json。所以这不只是一次卡顿，是能把应用变砖。
+//
+// 阈值必须按"单行"卡而不是按总长度，这一点是实测出来的：真实内容里每行最多 4 个
+// 分隔符，一份 104KB 的重格式 markdown（2000 行、总共 16000 个分隔符）只要 57ms；
+// 而单行 78KB 的恶意输入要 5.4 秒。按总长度卡会两头落空——既拦不住单行攻击，
+// 又会误伤正常的长文件。
+// 总量上限是第二道闸：每行都合规但行数极多时（391KB、40 万分隔符）仍要 3.2 秒。
+// 两道闸都设在实测的安全区内：单行 2000 个约 6ms，总量 5 万个约 114ms。
+const MAX_EMPHASIS_PER_LINE = 2000;
+const MAX_EMPHASIS_TOTAL = 50000;
+function emphasisTooCostly(md) {
+  let inLine = 0;
+  let total = 0;
+  for (let i = 0; i < md.length; i++) {
+    const c = md[i];
+    if (c === '\n') { inLine = 0; continue; }
+    if (c !== '*' && c !== '_') continue;
+    inLine++;
+    total++;
+    // 提前退出：恶意输入通常在前几千字符就超标，不必扫完整个 4MB
+    if (inLine > MAX_EMPHASIS_PER_LINE || total > MAX_EMPHASIS_TOTAL) return true;
+  }
+  return false;
+}
+
+// FORBID_ATTR 里的 id/name 是防 DOM clobbering，不是防 XSS：
+// DOMPurify 默认放行 id，而它的 SANITIZE_DOM 只拦与 document/form 上已有属性
+// 撞名的 id。提示词正文里写 `<div id="editor">` 会被原样保留，插进 #preview
+// 之后 getElementById('editor') 按文档顺序命中的是这个 div（index.html 里
+// #preview 排在真正的 <textarea id="editor"> 前面），保存逻辑读到的就是
+// div.value === undefined。实测症状：编辑后点保存，写回磁盘的是渲染后的旧正文，
+// 用户的改动无声消失，dirty 检查也因为读不到 value 而认为"没改过"。
+// toast/其他按 id 取的节点同样可以被顶掉。
 function renderMarkdown(md) {
-  const html = marked.parse(md || '', { breaks: true, gfm: true });
-  return DOMPurify.sanitize(html, { ADD_ATTR: ['target'] });
+  const src = md || '';
+  // 超出成本上限就不进 marked，直接按纯文本显示。宁可这一个文件显示得朴素，
+  // 也不能让界面冻住到必须强杀进程——正文一个字都没少，用户仍可进编辑模式修。
+  if (emphasisTooCostly(src)) {
+    return '<div class="render-degraded">' + escapeHtml(t('renderDegraded')) + '</div>'
+      + '<pre class="render-plain">' + escapeHtml(src) + '</pre>';
+  }
+  const html = marked.parse(src, { breaks: true, gfm: true });
+  return DOMPurify.sanitize(html, { ADD_ATTR: ['target'], FORBID_ATTR: ['id', 'name'] });
 }
 
 // 给预览区代码块加复制按钮（后处理）
@@ -434,7 +524,7 @@ function labelForDir(node) {
 // ===== 打开文件 =====
 async function openFile(rel) {
   if (!rel) return;
-  if (state.editMode && !(await exitEditMode(true))) return;
+  if (state.editMode && !(await leaveEditForSwitch())) return;
   try {
     // 多标签页：若已存在标签则激活，否则新建。
     // 注意判的是 loaded 而不是"标签存不存在"：启动时从 config 恢复的标签是
@@ -515,7 +605,7 @@ function renderTabs() {
 }
 
 async function switchTab(rel) {
-  if (state.editMode && !(await exitEditMode(true))) return;
+  if (state.editMode && !(await leaveEditForSwitch())) return;
   const tab = state.tabs.find(t => t.rel === rel);
   if (!tab) return;
   // 恢复出来的占位标签还没有正文，切过去之前先补读（理由同 openFile）
@@ -548,8 +638,12 @@ async function switchTab(rel) {
 async function closeTab(rel) {
   const idx = state.tabs.findIndex(t => t.rel === rel);
   if (idx === -1) return;
-  // 若关的是当前标签且在编辑，先退出
-  if (rel === state.activeTab && state.editMode) { exitEditMode(false); }
+  // 若关的是当前标签且在编辑，先退出。
+  // 必须 await 并尊重返回值：用户在"放弃未保存的修改？"里选取消时，
+  // 标签不能继续关掉（否则确认框形同虚设，草稿照样丢）。
+  if (rel === state.activeTab && state.editMode) {
+    if (!(await exitEditMode(false))) return;
+  }
   state.tabs.splice(idx, 1);
   if (state.activeTab === rel) {
     // 切到相邻标签
@@ -690,32 +784,41 @@ function renderFlowDiagram(steps, title) {
       if (byId.has(n)) indeg.set(n, (indeg.get(n) || 0) + 1);
     }
   }
-  // 层级 = 所有前驱层级最大值 + 1（最长前导路径）
+  // 层级 = 所有前驱层级最大值 + 1（最长前导路径）。
+  // Kahn 拓扑排序：出队时直接把层级推给后继，一趟 O(V+E) 完成。
+  // 原先的写法是"排序后再对每个节点回扫全部 steps 找前驱"，O(V·E)。
   const level = new Map();
-  const queue = steps.filter(s => (indeg.get(s.id) || 0) === 0).map(s => s.id);
-  // 拓扑排序求最长路径
   const indeg2 = new Map(indeg);
-  const sorted = [];
-  while (queue.length) {
-    const id = queue.shift();
-    sorted.push(id);
+  const queue = steps.filter(s => (indeg.get(s.id) || 0) === 0).map(s => s.id);
+  for (const id of queue) level.set(id, 0);
+  let visited = 0;
+  for (let head = 0; head < queue.length; head++) {
+    const id = queue[head];
+    visited++;
+    const lv = level.get(id) || 0;
     for (const n of byId.get(id).next) {
       if (!byId.has(n)) continue;
+      // 后继层级取所有前驱的最大值 + 1
+      level.set(n, Math.max(level.get(n) == null ? 0 : level.get(n), lv + 1));
       indeg2.set(n, indeg2.get(n) - 1);
       if (indeg2.get(n) === 0) queue.push(n);
     }
   }
-  for (const id of sorted) {
-    const s = byId.get(id);
-    let lv = 0;
-    // 找所有指向 id 的前驱的最大 level
-    for (const p of steps) {
-      if (p.next.includes(id) && level.has(p.id)) lv = Math.max(lv, level.get(p.id) + 1);
-    }
-    level.set(id, lv);
+  // 环里的节点入度永远降不到 0，拿不到层级。
+  // 不能放着不管：Math.max(...空) 是 -Infinity，Array.from({length:-Infinity})
+  // 得到零长数组，下面 layers[...].push 就会抛错，而这个异常会被 openFile 的
+  // catch 吞掉并把 currentRel 置空，留下"有标签页却没有当前文件"的坏状态，
+  // 之后任何走到 renderBreadcrumb 的操作都会在 null 上再炸一次，只能重启。
+  // 这里把成环的节点按原始顺序追加到末层，图仍然画得出来，用户也能看到它们。
+  const hasCycle = visited < steps.length;
+  if (hasCycle) {
+    // 全图成环时没有任何入口节点，level 是空的，末层要从 -1 起算，
+    // 否则所有节点都落到第 1 层、第 0 层空着，画出来是一条空白层。
+    let tail = -1;
+    for (const lv of level.values()) tail = Math.max(tail, lv);
+    for (const s of steps) if (!level.has(s.id)) level.set(s.id, tail + 1);
   }
-  // 无入边且未被分配（孤立）的放第 0 层
-  const maxLevel = steps.length ? Math.max(...level.values()) : 0;
+  const maxLevel = steps.length ? Math.max(0, ...level.values()) : 0;
   // 分层
   const layers = Array.from({ length: maxLevel + 1 }, () => []);
   for (const s of steps) layers[level.get(s.id) || 0].push(s);
@@ -779,23 +882,49 @@ function drawFlowEdges() {
 }
 
 // ===== 编辑模式 =====
+// 脏状态：编辑器内容与进入编辑时的快照不一致就算脏。
+// 原先完全没有这个概念，于是丢弃和保存两种相反行为都是静默的——
+// 按 Esc / 点取消 / 关标签直接丢掉草稿，而点树里另一个文件或切标签
+// 反而把未完成的草稿强制写进磁盘。i18n 里的 discardConfirm 文案
+// （zh/en 都有）就是为这个确认框准备的，之前一直没接上。
+function isDirty() {
+  if (!state.editMode) return false;
+  const ed = $('editor');
+  return !!ed && ed.value !== state.editBaseline;
+}
+
+function markDirtyIndicator() {
+  const btn = $('btn-edit');
+  if (btn) btn.textContent = isDirty() ? t('editing') + ' *' : t('editing');
+}
+
 async function enterEditMode() {
   if (!state.currentRel) return;
   state.editMode = true;
   $('preview-wrap').classList.add('hidden');
   $('editor-wrap').classList.remove('hidden');
   $('editor').value = state.currentContent;
+  state.editBaseline = state.currentContent; // 脏判断的基准
   $('editor').focus();
   $('btn-edit').textContent = t('editing');
 }
 
-async function exitEditMode(save) {
+// save=true 保存后退出；save=false 丢弃退出。
+// 丢弃且有未保存改动时先确认，避免草稿无声消失。
+// 返回 false = 用户取消，调用方必须中止自己的后续动作（切文件/切标签等）。
+// opts.skipConfirm：调用方已经用别的对话框问过了，别再弹第二个框。
+// leaveEditForSwitch 的"不保存"分支就是这样——用户刚在三选一里点了"不保存"，
+// 紧接着再弹一个"放弃未保存的修改？"是在质问用户刚才的选择。
+async function exitEditMode(save, opts) {
   if (!state.editMode) return true;
+  const skipConfirm = !!(opts && opts.skipConfirm);
   if (save) {
     const ok = await saveCurrent();
     if (!ok) return false;
   } else {
+    if (!skipConfirm && isDirty() && !(await confirmDialog(t('discardConfirm')))) return false;
     state.editMode = false;
+    state.editBaseline = '';
     $('preview-wrap').classList.remove('hidden');
     $('editor-wrap').classList.add('hidden');
     $('btn-edit').textContent = t('edit');
@@ -803,10 +932,50 @@ async function exitEditMode(save) {
     return true;
   }
   state.editMode = false;
+  state.editBaseline = '';
   $('preview-wrap').classList.remove('hidden');
   $('editor-wrap').classList.add('hidden');
   $('btn-edit').textContent = t('edit');
   return true;
+}
+
+// 切文件 / 切标签时离开编辑模式。返回 false = 用户取消，调用方必须中止切换。
+//
+// 原先这两处是 exitEditMode(true)：不问一声就把草稿写进磁盘。这不是"保守的默认"，
+// 而是把一次误点变成不可逆的写入——主进程每次 save-file 都会 bumpAutoFields 并
+// 生成版本快照，所以手滑点到树上另一个文件，就多一条版本、version 自增一格，
+// 撤不回来。半句没写完的草稿也会成为"正式内容"。
+//
+// 而 Esc / 关标签走的是 exitEditMode(false)，会弹确认。同一份草稿两条离开路径，
+// 一条静默保存一条弹框询问，用户没法形成稳定预期。
+//
+// 用三选一而不是沿用两按钮的 discardConfirm：这里用户真正需要的第三个选项是
+// "不保存，但还是切过去"，两个按钮表达不了。取消是 cancelId，按 Esc 等于取消。
+async function leaveEditForSwitch() {
+  if (!state.editMode) return true;
+  // 没改动就没什么可问也没什么可存的。走 skipConfirm 分支直接退出编辑：
+  // 传 true 会白写一次盘并多一条内容完全相同的版本快照。
+  if (!isDirty()) return exitEditMode(false, { skipConfirm: true });
+  const choice = await api.confirmUnsaved({
+    title: t('unsavedTitle'),
+    detail: t('unsavedPrompt'),
+    save: t('saveChanges'),
+    discard: t('discardChanges'),
+    cancel: t('cancel')
+  });
+  if (choice === 'save') return exitEditMode(true);
+  if (choice === 'discard') return exitEditMode(false, { skipConfirm: true });
+  return false;
+}
+
+// 菜单里的"重新加载"走这里而不是 role:'reload'。
+// 原先是 role:'reload'，Ctrl+R 直接重载，编辑中的草稿无声消失。
+// 也不能靠 beforeunload：Electron 里它不会像浏览器那样弹原生确认，
+// 而是静默取消这次重载——按下 Ctrl+R 什么都不发生，比丢草稿更让人困惑。
+// 所以明确问一次，用户确认了才让主进程重载。
+async function requestReload() {
+  if (isDirty() && !(await confirmDialog(t('discardConfirm')))) return;
+  await api.reloadWindow();
 }
 
 async function saveCurrent() {
@@ -816,6 +985,10 @@ async function saveCurrent() {
     const { content: saved, meta } = await api.saveFile(state.currentRel, content);
     state.currentContent = saved;
     state.currentMeta = meta;
+    // 存盘成功即视为不脏。基准用编辑器里的原文而不是 saved：
+    // 主进程会回写 version/updatedAt，saved 和输入框内容天生不同，
+    // 拿 saved 当基准会让保存后立刻又显示未保存。
+    state.editBaseline = content;
     // 同步到标签
     const tab = state.tabs.find(t => t.rel === state.currentRel);
     if (tab) { tab.content = saved; tab.meta = meta; tab.loaded = true; }
@@ -913,19 +1086,21 @@ async function newWorkflow() {
   const rel = `workflows/${name}.md`;
   // i18n-exempt-start: 这是写入 .md 的文件内容，不是界面文案；
   // 且 prompt 路径指向种子提示词的中文文件名，翻译会让流程图节点全部失效。
+  // prompt 必须是库根起算的完整相对路径（含 prompts/ 前缀）：
+  // 节点点击走 openFile(rel) → 主进程 safeJoin(rel)，少了前缀就解析不到文件。
   const content = `---
 title: ${name}
 flow:
   - id: step1
-    prompt: project-init/需求分析.md
+    prompt: prompts/project-init/需求分析.md
     label: 需求分析
     next: step2
   - id: step2
-    prompt: code-generation/功能实现.md
+    prompt: prompts/code-generation/功能实现.md
     label: 功能实现
     next: step3
   - id: step3
-    prompt: code-review/代码审查.md
+    prompt: prompts/code-review/代码审查.md
     label: 代码审查
 ---
 
@@ -968,6 +1143,19 @@ async function pickStage(title = t('pickStageTitle')) {
   return found || state.stages[0];
 }
 
+// 当前挂起的 promptInput 的 resolve 包装。
+// 弹层有三条"正常"关闭路径（确定/取消/回车）和两条"外部"关闭路径
+// （点弹层外面、按 Esc）。外部路径原先只是把弹层藏起来，Promise 永远不 settle，
+// 于是 await promptInput 的 newPrompt/rename/duplicate/newFolder 全部永久卡死。
+// 统一登记在这里，让 hideCtxMenu() 兜底 resolve(null)。
+let pendingPromptDone = null;
+function settlePendingPrompt() {
+  if (!pendingPromptDone) return;
+  const fn = pendingPromptDone;
+  pendingPromptDone = null; // 先清空再调用，避免 done() 里的 hideCtxMenu 递归回来
+  fn(null);
+}
+
 function promptInput(title, placeholder) {
   return new Promise(resolve => {
     const menu = $('ctx-menu');
@@ -983,7 +1171,13 @@ function promptInput(title, placeholder) {
     showCenteredMenu();
     const inp = $('ctx-input');
     inp.focus();
-    const done = (v) => { hideCtxMenu(); menu.innerHTML = ''; resolve(v); };
+    const done = (v) => {
+      pendingPromptDone = null;
+      hideCtxMenu();
+      menu.innerHTML = '';
+      resolve(v);
+    };
+    pendingPromptDone = done;
     $('ctx-ok').onclick = () => done(inp.value.trim());
     $('ctx-cancel').onclick = () => done(null);
     inp.onkeydown = (e) => {
@@ -1127,11 +1321,16 @@ async function toggleLockFile(rel) {
     state.lockedFiles.add(rel);
     toast(t('locked'), 'success');
   }
-  await saveLockedDebounced();
-  // 更新树上的锁定标记
+  // 先更新树上的锁定标记，再落盘。顺序反过来会让点一下锁要等 400ms 防抖 +
+  // 一次 IPC 才看到图标变化（debounce 现在返回真 promise 了，await 是真的在等）。
   document.querySelectorAll('.tree-row.file').forEach(r => {
     r.classList.toggle('locked', state.lockedFiles.has(r.__rel));
   });
+  // 用 flush() 立刻写，不等那 400ms。锁定是"防误删"开关，必须尽快变成磁盘上的
+  // 事实：主进程的 trash 会读 config 判锁，而它看不见渲染进程这边还在计时的防抖。
+  // "点锁定 → 立刻按删除"这个连招下，等 400ms 的话主进程读到的仍是没有该文件的
+  // 旧快照，锁形同虚设。防抖留给 migrateLock 那种事后记账的路径。
+  await saveLockedDebounced.flush();
 }
 const saveLockedDebounced = debounce(async () => {
   try { await api.setConfig({ lockedFiles: Array.from(state.lockedFiles) }); }
@@ -1142,6 +1341,8 @@ function migrateLock(oldRel, newRel) {
   if (state.lockedFiles.has(oldRel)) {
     state.lockedFiles.delete(oldRel);
     state.lockedFiles.add(newRel);
+    // 不 await：调用方（改名/移动）已经把文件动完了，锁列表是事后记账。
+    // 真正需要保证落盘的是关窗那一下，由 __pfmFlushPending 兜。
     saveLockedDebounced();
   }
 }
@@ -1171,8 +1372,13 @@ function showCtxMenu(x, y, node) {
   menu.classList.remove('hidden');
   menu.style.left = Math.min(x, window.innerWidth - 160) + 'px';
   menu.style.top = Math.min(y, window.innerHeight - 40) + 'px';
-  menu.querySelectorAll('.ctx-item').forEach((el, i) => {
-    el.onclick = () => { hideCtxMenu(); items[i].act(); };
+  // 下标必须从 data-i 读回来。分隔符渲染成 .ctx-sep 而不是 .ctx-item，
+  // 用 forEach 的序号会跳过它，导致分隔符之后的每一项都偏移一格
+  // （表现是点"删除"实际拿到分隔符对象，抛 act is not a function）。
+  menu.querySelectorAll('.ctx-item').forEach((el) => {
+    const it = items[Number(el.dataset.i)];
+    if (!it || typeof it.act !== 'function') return;
+    el.onclick = () => { hideCtxMenu(); it.act(); };
   });
 }
 
@@ -1219,6 +1425,10 @@ function hideCtxMenu() {
   const menu = $('ctx-menu');
   menu.classList.add('hidden');
   menu.classList.remove('ctx-centered');
+  // 关闭弹层必须同时结算 promptInput 的 Promise，否则 await 它的
+  // 新建/重命名/复制/新建目录流程会永久挂起（界面看着空闲，实际回不来了）。
+  // done() 会先把 pendingPromptDone 置空再调用这里，所以不会递归。
+  settlePendingPrompt();
 }
 
 // 居中显示弹层。showCtxMenu 会写内联 left/top，这里必须清掉，
@@ -1341,7 +1551,7 @@ async function openHistory() {
   }
   vl.innerHTML = list.map(v => `
     <div class="version-item" data-file="${escapeHtml(v.file)}">
-      <span class="vi-time">${formatVersionTime(v.timestamp)}<small>${escapeHtml(v.pinned ? t('pinned') : t('versionNth', { n: list.length - list.indexOf(v) }))}</small></span>
+      <span class="vi-time">${escapeHtml(formatVersionTime(v.timestamp))}<small>${escapeHtml(v.pinned ? t('pinned') : t('versionNth', { n: list.length - list.indexOf(v) }))}</small></span>
       <span class="vi-actions">
         <button class="pin-btn ${v.pinned ? 'pinned' : ''}" data-pin="${escapeHtml(v.file)}">${v.pinned ? '⭐' : '☆'}</button>
         <button class="btn-link" data-view="${escapeHtml(v.file)}">${escapeHtml(t('view'))}</button>
@@ -1447,7 +1657,7 @@ async function openTrash() {
   }
   list.innerHTML = index.items.map(it => `
     <div class="version-item">
-      <span class="vi-time">${escapeHtml(it.name)}<small>${escapeHtml(it.originalRel)} · ${String(it.trashedAt).slice(0, 16).replace('T', ' ')}</small></span>
+      <span class="vi-time">${escapeHtml(it.name)}<small>${escapeHtml(it.originalRel)} · ${escapeHtml(String(it.trashedAt).slice(0, 16).replace('T', ' '))}</small></span>
       <span class="vi-actions">
         <button class="btn-link" data-restore="${escapeHtml(it.id)}">${escapeHtml(t('restore'))}</button>
       </span>
@@ -1492,7 +1702,7 @@ function renderSettingsTypes() {
         toast(t('deleted'), 'success');
         populateFilters();
       } catch (e) {
-        toast(e.message, 'error');
+        toast(tErr('typeRemoveFailed', e), 'error');
       }
     };
   });
@@ -1509,7 +1719,7 @@ $('btn-add-type').onclick = async () => {
     inp.value = '';
     toast(t('added'), 'success');
   } catch (e) {
-    toast(e.message, 'error');
+    toast(tErr('typeAddFailed', e), 'error');
   }
 };
 $('new-type-input').onkeydown = (e) => {
@@ -1518,9 +1728,15 @@ $('new-type-input').onkeydown = (e) => {
 
 // ===== 导出 =====
 async function exportZip() {
-  const res = await api.exportZip();
-   if (res.ok) toast(t('exportedTo') + t('sep') + res.path, 'success');
-  else toast(t('exportCanceled'));
+  // 必须有 try/catch：导出失败（目标不可写/磁盘满）时主进程现在会 reject，
+  // 不接的话就是一个未处理 rejection，用户那边毫无反馈。
+  try {
+    const res = await api.exportZip();
+    if (res.ok) toast(t('exportedTo') + t('sep') + res.path, 'success');
+    else toast(t('exportCanceled'));
+  } catch (e) {
+    toast(tErr('exportFailed', e), 'error');
+  }
 }
 async function importSingle() {
   try {
@@ -1548,11 +1764,19 @@ async function exportSingle() {
 }
 
 // ===== 主题 =====
+// setConfig 现在会在写盘失败时 reject（主进程抛 E_CONFIG_WRITE）。不接住的话
+// 是个 unhandled rejection：界面照常变色，用户以为存上了，重启后又变回来。
+// 这里不回滚视觉效果——本次会话内切换是真的生效了，只是存不下来，
+// 所以照常切换 + 明确告诉用户"没存住"。
 async function toggleTheme() {
   const cur = state.config.theme === 'dark' ? 'light' : 'dark';
   state.config.theme = cur;
   document.body.className = 'theme-' + cur;
-  await api.setConfig({ theme: cur });
+  try {
+    await api.setConfig({ theme: cur });
+  } catch (e) {
+    toast(describeError(e), 'error');
+  }
 }
 
 // ===== 语言切换 =====
@@ -1567,7 +1791,14 @@ async function setLang(lang) {
   document.documentElement.lang = lang === 'en' ? 'en' : 'zh-CN';
   applyI18n();
   updateLangButtons();
-  await api.setConfig({ lang });
+  // 写盘失败只提示，不 return：界面语言已经切了，中断会让后面那批重渲染漏掉，
+  // 结果半个界面是新语言半个是旧的。落盘失败的后果只是重启后回到旧语言。
+  let langSaveError = null;
+  try {
+    await api.setConfig({ lang });
+  } catch (e) {
+    langSaveError = e;
+  }
   // 重建所有依赖文案的动态内容。漏掉任何一处，切换语言后该区域会残留旧语言，
   // 直到用户重新触发一次渲染才更新。
   renderTree();
@@ -1582,7 +1813,8 @@ async function setLang(lang) {
     renderContent();
   }
   updateStatusInfo(t('ready'));
-  toast(t('langSwitched'), 'success');
+  if (langSaveError) toast(describeError(langSaveError), 'error');
+  else toast(t('langSwitched'), 'success');
 }
 
 // ===== 分隔条拖拽 =====
@@ -1667,7 +1899,25 @@ async function init() {
   if (state.tabs.length) {
     const target = state.activeTab && allRels.has(state.activeTab) ? state.activeTab : state.tabs[0].rel;
     renderTabs();
-    await openFile(target);
+    // 先把 activeTab 落盘成 null，打开成功后再写回真正的目标。
+    //
+    // 这一步是为了掐断一个"能把应用变砖"的循环：自动打开的文件若让渲染卡死或抛错，
+    // 用户只能强杀进程，而重启后这里又会自动打开同一个文件，再次卡死——config.json
+    // 里那条 activeTab 成了永久陷阱，普通用户唯一的出路是手动删配置文件。
+    // 现在崩在 openFile 里的话，磁盘上的 activeTab 已经是 null，下次启动是干净的。
+    //
+    // 渲染成本上限（见 emphasisTooCostly）已经堵掉了已知的卡死输入，但那是按实测
+    // 阈值挡的；这里再兜一层，防的是将来别的原因让首个文件打不开。
+    state.activeTab = null;
+    await saveTabsDebounced.flush();
+    try {
+      await openFile(target);
+    } catch (e) {
+      // openFile 自己有 try/catch，正常不会抛到这里。真抛出来说明是渲染或 DOM 层
+      // 的意外，此时保持 activeTab=null 并让启动流程继续，别让整个界面停在半成品状态。
+      console.error('恢复上次打开的标签失败:', e); // i18n-exempt: 开发日志
+      toast(tErr('openFailed', e), 'error');
+    }
   }
   saveTabsDebounced();
 
@@ -1732,11 +1982,17 @@ async function init() {
     setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1200);
   };
   $('btn-export-single').onclick = exportSingle;
+  // 脏标记：编辑器有输入就更新"编辑中 *"提示。
+  // 这是 isDirty() 唯一的数据来源，少了它所有丢弃确认都不会触发。
+  $('editor').addEventListener('input', markDirtyIndicator);
   $('btn-edit').onclick = async () => {
     if (state.editMode) { await exitEditMode(false); }
     else enterEditMode();
   };
-  $('btn-save').onclick = () => saveCurrent().then(ok => { if (ok) exitEditMode(true); });
+  // saveCurrent() 已经落盘，这里必须传 false。传 true 会让 exitEditMode 再存一次：
+  // 主进程每次 save-file 都生成版本快照并 bumpAutoFields，
+  // 结果一次点击写两遍盘、多一条无差异快照、version 自增 2。
+  $('btn-save').onclick = () => saveCurrent().then(ok => { if (ok) exitEditMode(false); });
   $('btn-cancel').onclick = () => exitEditMode(false);
   $('btn-history').onclick = openHistory;
   $('btn-rename').onclick = renameCurrent;
@@ -1750,9 +2006,17 @@ async function init() {
   $('btn-settings-close').onclick = () => $('settings-drawer').classList.add('hidden');
   $('btn-empty-trash').onclick = async () => {
     if (await confirmDialog(t('emptyTrashConfirm'))) {
-      await api.emptyTrash();
-      openTrash();
-      toast(t('trashCleared'), 'success');
+      // 失败时同样要重画抽屉：删不掉的条目主进程会留在索引里，
+      // 用户得看见还剩哪些没清掉。原先没有 catch，主进程抛错只在控制台里，
+      // 界面照样弹"已清空"，而回收站其实一条都没少。
+      try {
+        await api.emptyTrash();
+        openTrash();
+        toast(t('trashCleared'), 'success');
+      } catch (e) {
+        openTrash();
+        toast(tErr('emptyTrashFailed', e), 'error');
+      }
     }
   };
 
@@ -1769,29 +2033,34 @@ async function init() {
       editor.selectionStart = editor.selectionEnd = start + 2;
       return;
     }
+    // 快捷键归属：一个键只能有一个主人。
+    // 原生菜单的 accelerator 在 Windows 上优先级高于渲染进程的 keydown，
+    // 所以 Ctrl+N（新建提示词）和 Ctrl+E（导出）由菜单负责——它们经
+    // menu-action IPC 回到这里的 onMenuAction，功能不变。
+    // 之前这里也各写了一份，那两个分支实际永远不会执行，属于误导性死代码。
+    // 菜单里没有的键才留在这边：Ctrl+S / Ctrl+Shift+F / Ctrl+I / Ctrl+Shift+L。
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
       if (state.editMode) saveCurrent();
-    } else if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
-      e.preventDefault();
-      newPrompt();
     } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'f') {
       e.preventDefault();
       $('search-box').focus();
-    } else if ((e.ctrlKey || e.metaKey) && e.key === 'e') {
-      e.preventDefault();
-      exportZip();
     } else if ((e.ctrlKey || e.metaKey) && e.key === 'i') {
+      // index.html 的导入按钮 tooltip 写的就是 Ctrl+I，菜单里没有对应项，
+      // 所以这个键归渲染进程。
       e.preventDefault();
       $('btn-import').click();
     } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'l') {
-      // 用 Ctrl+Shift+L 切换主题，避免 Ctrl+T 拦截
+      // 主题切换只有这一个键（菜单项已去掉 CmdOrCtrl+T），
+      // 与 index.html 里 btn-theme 的 tooltip 一致。
       e.preventDefault();
       toggleTheme();
     } else if (e.key === 'Escape') {
       // Esc 依次关闭：上下文菜单 → 抽屉 → 退出编辑
       const ctx = $('ctx-menu');
-      if (!ctx.classList.contains('hidden')) { ctx.classList.add('hidden'); ctx.innerHTML = ''; return; }
+      // 走 hideCtxMenu 而不是自己加 .hidden：它会结算 promptInput 挂起的 Promise。
+      // 直接改 class + innerHTML 会让按 Esc 取消命名框的流程永久卡住。
+      if (!ctx.classList.contains('hidden')) { hideCtxMenu(); ctx.innerHTML = ''; return; }
       const hd = $('history-drawer'), td = $('trash-drawer');
       if (!hd.classList.contains('hidden')) { hd.classList.add('hidden'); return; }
       if (!td.classList.contains('hidden')) { td.classList.add('hidden'); return; }
@@ -1806,14 +2075,40 @@ async function init() {
     else if (action === 'export') exportZip();
     else if (action === 'empty-trash') {
       confirmDialog(t('emptyTrashConfirmShort')).then(ok => {
-        if (ok) { api.emptyTrash().then(() => toast(t('trashCleared'), 'success')); }
+        if (!ok) return;
+        // 菜单入口没有抽屉可刷新，但失败必须报出来，不能只弹"已清空"
+        api.emptyTrash().then(
+          () => toast(t('trashCleared'), 'success'),
+          (e) => toast(tErr('emptyTrashFailed', e), 'error')
+        );
       });
     }
     else if (action === 'toggle-theme') toggleTheme();
+    else if (action === 'request-reload') requestReload();
   });
 
   initResizer();
 }
+
+// 主进程关窗前会先调这个（见 electron-main.js 的 win.on('close')）：
+// 把还在防抖窗口里的配置写入立刻落盘，否则"改完立刻关窗"这一下就丢了。
+// 只收这五个写 config 的，doSearch 也是 debounce 但关窗时再搜一次没有意义。
+//
+// 挂在 window 上而不是走 IPC：主进程本来就用 executeJavaScript 和页面通信
+// （自检那套），再开一条 preload 通道只为关窗握手不划算。
+// 返回值让主进程能区分"flush 完成"和"页面根本没响应"（后者会走超时兜底）。
+window.__pfmFlushPending = async () => {
+  const all = [
+    saveExpandedPathsDebounced,
+    saveTabsDebounced,
+    saveRecentDebounced,
+    saveLockedDebounced,
+    saveSidebarWidthDebounced
+  ];
+  // allSettled 而不是 all：单个失败（磁盘满/配置被占）不该让其余四个不落盘。
+  await Promise.allSettled(all.map(d => d.flush()));
+  return true;
+};
 
 // 启动
 window.addEventListener('DOMContentLoaded', init);
