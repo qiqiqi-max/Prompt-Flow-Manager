@@ -104,6 +104,7 @@ npm run test:debounce # 防抖/flush（自带反向对照）
 npm run test:close    # 关窗落盘握手
 npm run test:render   # markdown 渲染成本上限
 npm run test:heal     # 启动自愈修坏数据目录（自带反向对照）
+npm run test:logger   # 日志滚动/脱敏 + 诊断导出（裸 node，自带两组反向对照）
 npm run test:all      # 以上除 packaged 外全跑
 npm run bench         # 搜索压测（临时目录）
 

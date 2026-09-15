@@ -255,6 +255,41 @@
           aSaved.meta.version === 2, 'version=' + aSaved.meta.version);
       }
 
+      // 14. 诊断信息：采集与导出
+      // 这一节盯的是"诊断包会不会把用户内容带出去"。它不是假想风险：诊断包的用途
+      // 就是贴给别人看，而库里的文件名本身常常是敏感的（「XX 银行需求评审.md」），
+      // 正文更不用说。所以断言不是"字段齐全"，而是**整个 JSON 里搜不到正文和文件名**。
+      // 上面第 1~13 节已经在库里造出了带中文标题的文件，这里直接拿它们当探针。
+      {
+        const diag = await api.getDiagnostics();
+        check('诊断采集返回了 schema 版本', diag && diag.schema === 1, JSON.stringify(diag && diag.schema));
+        check('诊断采集带上了两个根目录',
+          !!(diag.roots && diag.roots.dataRoot && diag.roots.codeRoot),
+          JSON.stringify(diag.roots && Object.keys(diag.roots)));
+        check('诊断采集带上了运行时版本', !!(diag.runtime && diag.runtime.electron && diag.runtime.node),
+          JSON.stringify(diag.runtime));
+        check('诊断采集统计到了 prompts 数量',
+          !!(diag.counts && diag.counts.prompts && typeof diag.counts.prompts.files === 'number'),
+          JSON.stringify(diag.counts && diag.counts.prompts));
+        // 日志模块必须真的启用了，否则下面"日志尾部有内容"只是碰巧
+        check('诊断报告里日志是启用状态', !!(diag.logger && diag.logger.enabled === true),
+          JSON.stringify(diag.logger));
+        check('诊断报告带上了日志尾部', Array.isArray(diag.logTail) && diag.logTail.length > 0,
+          '共 ' + (Array.isArray(diag.logTail) ? diag.logTail.length : 'N/A') + ' 行');
+        // 启动自愈的那行日志必须在尾部里。这同时证明了两件事：
+        // logger 在自愈之前就初始化好了，且自愈的输出真的落进了文件而不只是 console。
+        check('日志尾部里有启动自愈留下的记录',
+          diag.logTail.some(l => l.includes('[heal]')), JSON.stringify(diag.logTail.slice(-3)));
+        // 底线：诊断包不许含正文，也不许含用户起的文件名。
+        const json = JSON.stringify(diag);
+        check('诊断包不含提示词正文', !json.includes('第一版正文'));
+        check('诊断包不含用户文件名', !json.includes('自检改名'));
+
+        const exported = await api.exportDiagnostics();
+        check('导出诊断信息返回成功且带字节数',
+          exported.ok === true && exported.bytes > 0, JSON.stringify(exported));
+      }
+
       // 清理
       const leftovers = (await api.getMetaList()).filter(mm => mm.rel !== renamed && mm.top === 'prompts');
       for (const mm of leftovers) { try { await api.trash(mm.rel); } catch (_) {} }

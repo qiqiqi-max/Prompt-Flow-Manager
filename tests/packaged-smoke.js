@@ -124,6 +124,18 @@ console.log('[test:packaged] 被测产物: ' + path.basename(unpackedExe));
     assert(missing.length === 0,
       'src/selftest/*.js 全部打进了 asar（主进程要 readFileSync 它们）',
       missing.length ? '缺失：' + missing.join(', ') : localScripts.join(', '));
+
+    // lib/ 下的模块是主进程 require 进来的，漏打的表现和上面不同：
+    // 不是 readFileSync 抛 ENOENT，而是 require 在**加载主进程的第一秒**就抛
+    // MODULE_NOT_FOUND——窗口根本建不出来，只剩一个 Electron 的错误弹框。
+    // 那种情况下第 1 组的每条 mustHave 都会红，输出里全是"没有 PASS"，
+    // 反而看不出根因是打包白名单。所以在这里逐个点名。
+    const libFiles = fs.readdirSync(path.join(root, 'lib')).filter(n => n.endsWith('.js'));
+    assert(libFiles.length >= 3, '本地 lib 模块数量符合预期', libFiles.join(', '));
+    const missingLib = libFiles.filter(n => !norm.includes('/lib/' + n));
+    assert(missingLib.length === 0,
+      'lib/*.js 全部打进了 asar（主进程 require 它们，漏一个就起不来）',
+      missingLib.length ? '缺失：' + missingLib.join(', ') : libFiles.join(', '));
   }
 }
 
@@ -179,6 +191,23 @@ console.log('[test:packaged] 被测产物: ' + path.basename(unpackedExe));
     ? fs.readdirSync(dataDir).filter(n => n.startsWith('.seeding-'))
     : [];
   assert(flags.length === 0, '种子完成后没有残留 .seeding-* 标记', flags.join(',') || '无');
+
+  // ---------- 2b) 日志必须落在 DATA_ROOT 下，不是 CODE_ROOT ----------
+  // 这条只有打包后才有意义，正是本项目最严重那次故障的同一形状：
+  // 开发模式下 CODE_ROOT === DATA_ROOT，把 LOGS_DIR 写成 path.join(CODE_ROOT, 'logs')
+  // 照样能写、测试照样全绿；打包后 CODE_ROOT 在 asar 内且只读，日志会**静默**
+  // 写不进去（logger 落盘失败只累加 failures，不抛也不吭第二声），
+  // 于是"有日志可查"这个功能在真实用户那里根本不存在。
+  const logFile = path.join(dataDir, 'logs', 'app.log');
+  assert(fs.existsSync(logFile), '日志写在了数据目录的 logs/ 下（不是只读的 asar 内）',
+    fs.existsSync(logFile) ? '' : '期望 ' + logFile);
+  if (fs.existsSync(logFile)) {
+    const logText = fs.readFileSync(logFile, 'utf8');
+    assert(/\[heal\]/.test(logText), '打包后启动自愈的记录真的落进了日志文件');
+    // 两个根目录在打包后是分叉的，日志里的路径必须已经换成占位符
+    assert(!logText.toLowerCase().includes(dataDir.toLowerCase()),
+      '日志里没有裸的绝对数据目录路径');
+  }
 }
 
 // ---------- 3) 退出码保真（反向对照）----------

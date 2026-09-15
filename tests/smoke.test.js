@@ -310,9 +310,18 @@ section('错误码本地化');
 // 现在统一成 appError('E_XXX', detail)，渲染侧 describeError() 负责翻译。
 assert(/function appError\(/.test(mainSrc), '主进程有 appError 工具');
 assert(!/throw new Error\('[^']*[\u4e00-\u9fa5]/.test(mainSrc), '主进程不再抛中文字面量错误');
+// lib/ 下**每个**文件都要查，不是只查 zip-import.js。
+// 原先这里写死了那一个文件名，于是后来新增的 lib/logger.js、lib/diagnostics.js
+// 落进来时完全没人管——diagnostics 里真的就有一句 throw new Error('E_..|中文')，
+// 而这条断言照旧全绿。按目录枚举之后，下一个新文件自动进检查范围。
+const LIB_FILES = fs.readdirSync(path.join(root, 'lib'))
+  .filter(n => n.endsWith('.js'))
+  .map(n => ['lib/' + n, fs.readFileSync(path.join(root, 'lib', n), 'utf8')]);
 {
-  const libSrc = fs.readFileSync(path.join(root, 'lib/zip-import.js'), 'utf8');
-  assert(!/(throw|reject\()\s*new Error\('[^']*[\u4e00-\u9fa5]/.test(libSrc), 'lib/zip-import.js 不再抛中文字面量错误');
+  assert(LIB_FILES.length >= 3, 'lib/ 下枚举到了文件（' + LIB_FILES.map(([n]) => n).join(', ') + '）');
+  const bad = LIB_FILES.filter(([, src]) => /(throw|reject\()\s*new Error\('[^']*[\u4e00-\u9fa5]/.test(src));
+  assert(bad.length === 0,
+    'lib/ 下没有抛中文字面量错误的文件' + (bad.length ? '，违规：' + bad.map(([n]) => n).join(', ') : ''));
 }
 assert(/function describeError\(/.test(rendererSrc), '渲染进程有 describeError');
 assert(/describeError\(e\)/.test(rendererSrc), 'tErr 走 describeError');
@@ -320,7 +329,9 @@ assert(/describeError\(e\)/.test(rendererSrc), 'tErr 走 describeError');
   const I18N = require('../src/i18n.js');
   // 主进程用到的每个错误码都必须有对应文案，否则界面上会露出 E_XXX
   const codes = new Set();
-  for (const src of [mainSrc, fs.readFileSync(path.join(root, 'lib/zip-import.js'), 'utf8')]) {
+  // 同样按目录枚举，而不是列举文件名：新 lib 文件里的错误码要自动进"必须有中英文案"
+  // 这条检查，否则界面上会直接露出 E_XXX。
+  for (const src of [mainSrc, ...LIB_FILES.map(([, s]) => s)]) {
     for (const m of src.matchAll(/appError\('([A-Z0-9_]+)'/g)) codes.add(m[1]);
   }
   assert(codes.size >= 10, '收集到足够多的错误码（' + codes.size + ' 个）');

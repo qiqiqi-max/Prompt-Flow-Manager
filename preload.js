@@ -40,6 +40,12 @@ const api = {
   // 启动自愈的报告（摘掉了哪些幽灵条目、收养了哪些孤立正文、删了哪些残留临时文件）。
   // 只读，不触发任何写操作。
   getHealReport: () => ipcRenderer.invoke('get-heal-report'),
+  // 诊断信息：环境事实 + 数量统计 + 日志尾部。只读，不含提示词正文和文件名。
+  getDiagnostics: () => ipcRenderer.invoke('get-diagnostics'),
+  // 把上面那份诊断信息存成 JSON 文件。会弹保存框，由用户自己决定放哪、给谁看——
+  // 里面带真实的数据目录路径（路径指错是本项目最严重那次故障的根因），
+  // 所以绝不自动上传。
+  exportDiagnostics: () => ipcRenderer.invoke('export-diagnostics'),
   onMenuAction: (cb) => {
     const handler = (e, action) => cb(action);
     ipcRenderer.on('menu-action', handler);

@@ -94,6 +94,13 @@ const { readZipMarkdownEntries, sanitizeTitle, uniqueRel } = require('./lib/zip-
 const I18N_TABLE = require('./src/i18n.js');
 // frontmatter 解析同样两边共用（src/frontmatter.js 结尾也有 module.exports）。
 const FRONTMATTER = require('./src/frontmatter.js');
+// 滚动文件日志 + 诊断包。两个模块都刻意不 require('electron')：
+// 目录、版本号、两个根目录全部由这里传进去，DATA_ROOT / CODE_ROOT 的判断
+// 只允许存在下面那一份（见 123-133 行的说明）。
+// 必须在 EPIPE 兜底（86-88 行）之后 require：logger 会往 console 镜像，
+// 而那段兜底负责保证 console 抛不出未捕获异常。
+const logger = require('./lib/logger');
+const diagnostics = require('./lib/diagnostics');
 // 当前菜单语言。buildMenu 只在启动和语言变化时调用（见 syncMenuLang），
 // 所以文案取值统一读这个变量，不用每个调用点都把 lang 传一遍。
 let menuLang = null;
@@ -139,6 +146,11 @@ const TEMPLATES_DIR = path.join(DATA_ROOT, 'templates');
 const TOP_DIRS = { prompts: PROMPTS_DIR, workflows: WORKFLOWS_DIR, templates: TEMPLATES_DIR };
 const VERSIONS_DIR = path.join(DATA_ROOT, '.versions');
 const TRASH_DIR = path.join(DATA_ROOT, '.trash');
+// 日志放独立子目录，不放数据根目录顶层：tests/smoke.test.js 有一条防回归断言
+// 盯的就是"往 DATA_ROOT 顶层 append debug.log"这个形状（旧实现每次列目录树
+// 都同步追加一行，文件无上限增长）。独立子目录 + 大小滚动 + 文件数上限，
+// 三条一起才算真正解决那个问题。
+const LOGS_DIR = path.join(DATA_ROOT, 'logs');
 // 配置默认放 userData（不污染提示词目录）；设了 PFM_DATA_DIR 时跟着走，
 // 否则测试改语言/主题会写进用户真实配置。
 const CONFIG_PATH = path.join(process.env.PFM_DATA_DIR ? DATA_ROOT : app.getPath('userData'), 'config.json');
@@ -1006,6 +1018,32 @@ ipcMain.handle('list-trash', async () => readTrashIndex());
 // 自检也没法断言修复真的发生过。第 9 项的诊断信息导出会直接用这份数据。
 ipcMain.handle('get-heal-report', async () => lastHealReport);
 
+// ---------- 诊断信息 ----------
+// 采集所需的全部上下文都从这里传给 lib/diagnostics.js。那个模块刻意不 require
+// ('electron')，也不自己解析目录：DATA_ROOT / CODE_ROOT 的判断只允许存在一份
+// （见 130-140 行）。抄第二份的代价这个项目付过——打包版白屏。
+//
+// dirs 复用 TOP_DIRS，不在这里重新拼三个 path.join：那三个目录的定义已经有一处
+// 真值来源了，遍历它们的地方（listTree / getMetaList / listTreeAndMeta）都从
+// TOP_DIRS 取，诊断也照这个走，将来加第四个顶层目录才不会漏。
+function diagnosticsContext() {
+  return {
+    appVersion: app.getVersion(),
+    versions: process.versions,
+    isPackaged: app.isPackaged,
+    dataRoot: DATA_ROOT,
+    codeRoot: CODE_ROOT,
+    dirs: TOP_DIRS,
+    healReport: lastHealReport,
+    configPath: CONFIG_PATH
+  };
+}
+
+// 只读采集，给"关于/诊断"面板直接显示用。
+// collect() 里做同步 IO（数文件、读日志尾部），所以这是冷路径，别挂在任何
+// 每次刷新都会走的地方。
+ipcMain.handle('get-diagnostics', async () => diagnostics.collect(diagnosticsContext()));
+
 // 恢复也要动库里的文件（正文搬回 originalRel、还原版本目录），所以除了 trash
 // 还得占 ver:<originalRel>。否则并发的 save-file 能插在"判断目标是否存在"和
 // fsp.rename 之间：那次保存返回成功，随后被 rename 无声覆盖（rename 不看目标
@@ -1334,6 +1372,30 @@ ipcMain.handle('export-single', async (e, rel) => {
   return { ok: true, path: res.filePath };
 });
 
+// 导出诊断信息。用户报障时把这个 JSON 贴出来，代替一来一回问"你的版本/系统/
+// 数据目录在哪"。
+//
+// 必须由用户自己选保存位置：诊断包里含 DATA_ROOT 的真实路径（Windows 上带用户名），
+// 那是故意不脱敏的——"路径指错"正是本项目最严重那次故障的根因，看不到真实路径
+// 就白采集了。代价是这份文件不能自动上传、不能默默写到某个固定位置，
+// 必须让用户看见它落在哪、由用户决定给谁看。
+//
+// writeFileAtomic 注入进去，而不是让 diagnostics 自己实现一份原子写：
+// 临时名的形态（.tmp-<pid>-<seq>-*.part）和启动自愈的清理规则 TMP_PART_RE
+// 是绑死的，出现第二份实现就会漂移，症状是自愈删掉别人正在写的临时文件、
+// 或留下永远清不掉的垃圾。
+ipcMain.handle('export-diagnostics', async () => {
+  const res = await dialog.showSaveDialog(win, {
+    title: mt('dlgExportDiagnostics'),
+    defaultPath: diagnostics.defaultFileName(),
+    filters: [{ name: 'JSON', extensions: ['json'] }]
+  });
+  if (res.canceled || !res.filePath) return { ok: false };
+  const out = await diagnostics.exportTo(res.filePath, diagnosticsContext(), writeFileAtomic);
+  logger.info('[diag] 已导出诊断信息，' + out.bytes + ' 字节');
+  return { ok: true, path: res.filePath, bytes: out.bytes };
+});
+
 // ---------- 导入辅助 ----------
 // 依据 frontmatter 决定落库位置，返回实际写入的相对路径。
 async function importMarkdown(fileName, content) {
@@ -1644,21 +1706,25 @@ async function runStartupHeal() {
       ['越界 store', r.droppedBadStore.length],
       ['残留临时文件', r.removedTempFiles.length]
     ].filter(([, n]) => n > 0);
+    // 这一段从 console.* 换成 logger.*：字符串一个字都没动。
+    // tests/heal.test.js:186 断言输出里出现 /\[heal\]/，而 195 行断言对照组的输出里
+    // **没有** [heal]——logger 默认镜像到 console，所以 stdout 形状不变，
+    // 同时这些行现在也会落进 logs/app.log，用户报障时拿得出来。
     if (counts.length) {
-      console.log('[heal] 已修复: ' + counts.map(([k, n]) => k + ' ' + n).join('，'));
-      for (const g of r.droppedGhostEntries) console.log('[heal] 摘掉幽灵条目（文件已不存在）: ' + g.store);
-      for (const a of r.adoptedOrphanFiles) console.log('[heal] 收养孤立正文 ' + a.store + ' → 可从回收站恢复到 ' + a.originalRel);
-      for (const b of r.droppedBadStore) console.error('[heal] 摘掉越界 store 条目: ' + b.store + '（' + b.reason + '）');
-      for (const t of r.removedTempFiles) console.log('[heal] 删除残留临时文件: ' + t);
+      logger.info('[heal] 已修复: ' + counts.map(([k, n]) => k + ' ' + n).join('，'));
+      for (const g of r.droppedGhostEntries) logger.info('[heal] 摘掉幽灵条目（文件已不存在）: ' + g.store);
+      for (const a of r.adoptedOrphanFiles) logger.info('[heal] 收养孤立正文 ' + a.store + ' → 可从回收站恢复到 ' + a.originalRel);
+      for (const b of r.droppedBadStore) logger.error('[heal] 摘掉越界 store 条目: ' + b.store + '（' + b.reason + '）');
+      for (const t of r.removedTempFiles) logger.info('[heal] 删除残留临时文件: ' + t);
     } else {
-      console.log('[heal] 数据目录检查通过，无需修复');
+      logger.info('[heal] 数据目录检查通过，无需修复');
     }
-    if (r.orphanVersionDirs.length) console.log('[heal] 注意：.trash 下有孤立版本目录（未处理）: ' + r.orphanVersionDirs.join(', '));
-    if (r.unrestorableEntries.length) console.error('[heal] 注意：有条目的原路径已不允许写入，恢复会失败: ' + r.unrestorableEntries.map(x => x.originalRel).join(', '));
-    for (const err of r.errors) console.error('[heal] ' + err);
+    if (r.orphanVersionDirs.length) logger.info('[heal] 注意：.trash 下有孤立版本目录（未处理）: ' + r.orphanVersionDirs.join(', '));
+    if (r.unrestorableEntries.length) logger.error('[heal] 注意：有条目的原路径已不允许写入，恢复会失败: ' + r.unrestorableEntries.map(x => x.originalRel).join(', '));
+    for (const err of r.errors) logger.error('[heal] ' + err);
     return r;
   } catch (e) {
-    console.error('[heal] 自愈过程本身失败（已忽略，不影响启动）:', e && e.stack ? e.stack : e);
+    logger.error('[heal] 自愈过程本身失败（已忽略，不影响启动）:', e && e.stack ? e.stack : e);
     lastHealReport = { ranAt: new Date().toISOString(), failed: String(e && e.message ? e.message : e) };
     return lastHealReport;
   }
@@ -3332,6 +3398,13 @@ app.whenReady().then(async () => {
   // activate 必须在 createWindow 之前注册：注册在后面时，一旦 createWindow 抛错
   // 就永远注册不上（macOS 下点 Dock 图标再也开不出窗口）。
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  // 日志要在任何可能失败的启动步骤之前初始化，否则最需要记录的那一段
+  // （ensureSeedData / ensureDirs 抛错）恰好没人记。init 自己不抛：建不出目录
+  // 就退化成只往 console 镜像，应用照常起来。
+  //
+  // 放在 try 之外是故意的：init 失败不该走 showErrorBox + app.exit(1) 那条路，
+  // 日志写不进去不是启动失败。
+  logger.init({ dir: LOGS_DIR, dataRoot: DATA_ROOT, codeRoot: CODE_ROOT });
   if (process.env.PFM_SELFTEST_BENCH) {
     if (!process.env.PFM_DATA_DIR) {
       console.error('[bench] 必须设置 PFM_DATA_DIR，拒绝往真实库里写压测数据');
@@ -3359,7 +3432,7 @@ app.whenReady().then(async () => {
     await runStartupHeal();
     await createWindow();
   } catch (e) {
-    console.error('[bootstrap] 启动失败:', e && e.stack ? e.stack : e);
+    logger.error('[bootstrap] 启动失败:', e && e.stack ? e.stack : e);
     // 至少让用户知道是哪里出了问题、数据目录在哪，而不是对着一个不存在的窗口。
     try {
       dialog.showErrorBox('Prompt Flow Manager 启动失败', [

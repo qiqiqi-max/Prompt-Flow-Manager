@@ -71,6 +71,12 @@ jobs:
       - name: debounce 语义
         run: npm run test:debounce
 
+      # 日志滚动 + 诊断采集：lib/logger.js 和 lib/diagnostics.js 刻意不 require
+      # electron（目录由 init({dir}) 传进来），所以这一层用裸 node 就能跑完。
+      # 自带两组反向对照：不滚动/不脱敏/失败即抛的桩，以及"每次都滚"的桩。
+      - name: 日志滚动与诊断采集
+        run: npm run test:logger
+
       # 下面三个会真的拉起 Electron。各自 PFM_DATA_DIR 指向临时目录，
       # 不会碰仓库里的提示词库（脚本内部自己建临时副本）。
       - name: 功能自检（真实 IPC 往返）

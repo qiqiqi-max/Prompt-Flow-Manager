@@ -208,6 +208,9 @@ const I18N = {
     err_E_EXPORT_ARCHIVE: '生成备份包失败：{detail}',
     err_E_CONTENT_NOT_STRING: '内容必须是文本：{detail}',
     err_E_CONFIG_WRITE: '设置保存失败，磁盘可能已满或配置文件被占用：{detail}',
+    // 编程错误而不是运行时故障：诊断导出没拿到注入的原子写函数。
+    // 正常路径下用户看不到它，但错误码一旦露出来必须有话可说。
+    err_E_DIAG_NO_WRITER: '导出诊断信息失败：内部调用缺少写入函数（{detail}）',
     err_E_PREV_READ: '读取原文件失败，为避免覆盖已放弃保存。请关闭占用该文件的程序后重试：{detail}',
     // 原生菜单。主进程 buildMenu() 用这些键，语言切换时会重建菜单
     // （updateConfig 检测到 lang 变化就调 buildMenu）。
@@ -249,6 +252,7 @@ const I18N = {
     dlgExportSingle: '导出提示词',
     dlgImportSingle: '导入提示词',
     dlgImportZip: '导入备份包',
+    dlgExportDiagnostics: '导出诊断信息',
     // 通用
     sep: '：',
     confirm: '确认',
@@ -459,6 +463,9 @@ const I18N = {
     err_E_EXPORT_ARCHIVE: 'Failed to build the backup archive: {detail}',
     err_E_CONTENT_NOT_STRING: 'Content must be text: {detail}',
     err_E_CONFIG_WRITE: 'Failed to save settings; the disk may be full or the config file is locked: {detail}',
+    // 编程错误而不是运行时故障：诊断导出没拿到注入的原子写函数。
+    // 正常路径下用户看不到它，但错误码一旦露出来必须有话可说。
+    err_E_DIAG_NO_WRITER: 'Failed to export diagnostics: the internal call is missing a write function ({detail})',
     err_E_PREV_READ: 'Could not read the existing file, so the save was aborted to avoid overwriting it. Close any program using the file and retry: {detail}',
     // 原生菜单。主进程 buildMenu() 用这些键，语言切换时会重建菜单
     // （updateConfig 检测到 lang 变化就调 buildMenu）。
@@ -500,6 +507,7 @@ const I18N = {
     dlgExportSingle: 'Export Prompt',
     dlgImportSingle: 'Import Prompt',
     dlgImportZip: 'Import Backup',
+    dlgExportDiagnostics: 'Export Diagnostics',
     // 通用
     sep: ': ',
     confirm: 'Confirm',

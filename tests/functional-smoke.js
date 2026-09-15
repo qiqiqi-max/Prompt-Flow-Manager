@@ -30,12 +30,16 @@ const outDir = path.join(dataDir, '__export');
 fs.mkdirSync(outDir, { recursive: true });
 const exportedMd = path.join(outDir, 'exported.md');
 const exportedZip = path.join(outDir, 'exported.zip');
+const exportedDiag = path.join(outDir, 'diag.json');
 const dialogQueue = [
   { canceled: false, filePath: exportedMd },                 // exportSingle
   { canceled: false, filePath: exportedZip },                // exportZip
   { canceled: false, filePaths: [exportedMd] },              // importSingle
   { canceled: false, filePaths: [exportedZip] },             // importZip
   { canceled: true },                                        // exportZip（验证取消分支）
+  // 诊断信息导出（functional.js 第 14 节）。位置必须在这里：文件类对话框
+  // 按先后顺序消费，第 14 节排在第 11 节之后、第 13 节不占文件类队列。
+  { canceled: false, filePath: exportedDiag },               // exportDiagnostics
   // 未保存改动的三选一（confirm-unsaved）：buttons 是 [保存, 不保存, 取消]，
   // 所以 response 0/1/2 分别对应三条分支。顺序 = functionalScript 第 13 节
   // 13a 取消 → 13b 不保存 → 13c 保存。
@@ -91,6 +95,52 @@ child.on('exit', (code) => {
       const buf = fs.readFileSync(exportedZip);
       artifacts.push(['导出的 ZIP 是合法 ZIP（PK 头）', buf.length > 100 && buf[0] === 0x50 && buf[1] === 0x4b]);
     } else artifacts.push(['导出的 ZIP 已落盘', false]);
+
+    // ---- 日志与诊断包：断言放在进程外，退出后直接读磁盘 ----
+    // 进程里自己说"我写了日志"证明不了文件真的在盘上（logger 落盘失败是**静默**的，
+    // 只累加 failures），所以这几条必须从外面看。
+    const logFile = path.join(dataDir, 'logs', 'app.log');
+    if (fs.existsSync(logFile)) {
+      const logText = fs.readFileSync(logFile, 'utf8');
+      const lines = logText.split('\n').filter(s => s.length > 0);
+      const LINE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z (INFO|WARN|ERROR) /;
+      artifacts.push(['日志落在 logs/app.log（不是数据根目录顶层）', lines.length > 0]);
+      artifacts.push(['每行都是 <ISO> <LEVEL> 形状（' + lines.length + ' 行）',
+        lines.every(l => LINE_RE.test(l))]);
+      // 自愈那几行现在走 logger，必须同时出现在文件里——这是"接进去了"的证据。
+      // 只看 stdout 不够：改回 console.* 后 stdout 一模一样，文件里却什么都没有。
+      artifacts.push(['自愈的输出真的进了日志文件', /\[heal\]/.test(logText)]);
+    } else {
+      artifacts.push(['日志文件 logs/app.log 已生成', false]);
+    }
+    if (fs.existsSync(exportedDiag)) {
+      const raw = fs.readFileSync(exportedDiag, 'utf8');
+      let diag = null;
+      try { diag = JSON.parse(raw); } catch (_) { diag = null; }
+      artifacts.push(['导出的诊断包是可解析 JSON 且带 schema', !!diag && diag.schema === 1]);
+      // 原子写：临时文件必须已经 rename 掉，不能在目标目录留 .part
+      const leftParts = fs.readdirSync(outDir).filter(n => n.endsWith('.part'));
+      artifacts.push(['诊断包走了原子写且没留下 .part（剩 ' + leftParts.length + ' 个）',
+        leftParts.length === 0]);
+      // 诊断包会被贴进 issue，所以不能带正文，也不能带用户文件名。
+      // 这里查的是功能自检自己造的那些文件名（它们在这次运行里真实存在过）。
+      const leaked = ['自检临时', '自检改名', '第一版正文', '未保存A'].filter(s => raw.includes(s));
+      artifacts.push(['诊断包不含用户文件名/正文' + (leaked.length ? '，泄漏：' + leaked.join(',') : ''),
+        leaked.length === 0]);
+      artifacts.push(['诊断包里两个根目录原样给出（排查路径问题的唯一依据）',
+        !!diag && !!diag.roots && typeof diag.roots.dataRoot === 'string' && diag.roots.dataRoot.length > 0]);
+      // 路径脱敏必须查一个**真的含路径**的字段。
+      // 原先这里写的是"日志文件里没有裸的绝对路径"——那是个空断言：正常启动
+      // 落进 app.log 的只有 [heal] 那一行，它压根不含任何路径，所以无论
+      // maskRoots 有没有生效都是绿的。logger.dir 一定是个目录，脱敏掉了就是
+      // <data>\logs，没脱敏就是完整的临时目录路径（里面带 Windows 用户名）。
+      const loggerDir = diag && diag.logger ? String(diag.logger.dir || '') : '';
+      artifacts.push(['诊断包里的日志目录已脱敏成 <data>（不带真实绝对路径）: ' + loggerDir,
+        loggerDir.includes('<data>') && !loggerDir.toLowerCase().includes(dataDir.toLowerCase())]);
+    } else {
+      artifacts.push(['诊断包已落盘', false]);
+    }
+
     const rest = JSON.parse(fs.readFileSync(dialogQueuePath, 'utf8'));
     artifacts.push(['对话框队列已被按序全部消费（剩 ' + rest.length + ' 项）', rest.length === 0]);
   } catch (e) {
@@ -123,7 +173,14 @@ child.on('exit', (code) => {
     // 原生对话框的本地化。这两条必须在清单里：它们在 if (lang === 'en' &&
     // PFM_SELFTEST_DIALOGS) 里，条件不成立时整段被跳过，只靠"没有 FAIL"是绿的。
     /\[selftest\] PASS 英文界面下原生确认框走了 i18n/,
-    /\[selftest\] PASS 英文界面下文件对话框标题走了 i18n/
+    /\[selftest\] PASS 英文界面下文件对话框标题走了 i18n/,
+    // 诊断/日志（第 14 节）。同样包在 if (window.__pfmDialogStubs) 里，
+    // 而且 getDiagnostics / exportDiagnostics 是新加的 preload 方法——
+    // 忘了加就是 undefined，整段 try 直接跳到 catch，输出里一条都不剩。
+    /\[selftest:fn\] PASS 诊断报告里日志是启用状态/,
+    /\[selftest:fn\] PASS 日志尾部里有启动自愈留下的记录/,
+    /\[selftest:fn\] PASS 诊断包不含提示词正文/,
+    /\[selftest:fn\] PASS 导出诊断信息返回成功且带字节数/
   ];
   const missing = mustHave.filter(re => !re.test(out));
   if (missing.length) console.error('[test:fn] 缺少必需的检查项: ' + missing.map(String).join(', '));
