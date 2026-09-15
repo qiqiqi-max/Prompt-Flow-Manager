@@ -25,6 +25,9 @@ const api = {
   getConfig: () => ipcRenderer.invoke('get-config'),
   setConfig: (cfg) => ipcRenderer.invoke('set-config', cfg),
   confirm: (msg) => ipcRenderer.invoke('confirm', msg),
+  // 保存 / 不保存 / 取消三选一。切文件、切标签时草稿还在就问这个，
+  // 而不是像原先那样直接替用户保存。
+  confirmUnsaved: (opts) => ipcRenderer.invoke('confirm-unsaved', opts),
   exportZip: () => ipcRenderer.invoke('export-zip'),
   exportSingle: (rel) => ipcRenderer.invoke('export-single', rel),
   getStages: () => ipcRenderer.invoke('get-stages'),

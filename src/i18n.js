@@ -134,6 +134,10 @@ const I18N = {
     // 确认框
     deleteConfirm: '删除「{name}」？\n文件将移入回收站，可恢复。',
     discardConfirm: '放弃未保存的修改？',
+    unsavedTitle: '有未保存的修改',
+    unsavedPrompt: '当前文件有未保存的修改，切换后未保存的内容会丢失。',
+    saveChanges: '保存',
+    discardChanges: '不保存',
     emptyTrashConfirm: '永久清空回收站？此操作不可恢复。',
     emptyTrashConfirmShort: '永久清空回收站？',
     // 历史抽屉
@@ -183,6 +187,11 @@ const I18N = {
     err_E_ZIP_OPEN: '无法打开 ZIP：{detail}',
     err_E_ZIP_PARSE: 'ZIP 解析失败：{detail}',
     err_E_ZIP_ENTRY: '读取 ZIP 条目失败：{detail}',
+    // 下面三条是"跳过某个条目"的原因，不是被抛出的异常：它们出现在导入结果的失败
+    // 明细里，同样经 describeError 翻译，所以键名必须逐字等于 zip-import.js 里的码名。
+    err_E_ZIP_ENTRY_TOO_BIG: '超过单个条目大小上限（{detail} 字节），已跳过',
+    err_E_ZIP_TOTAL_TOO_BIG: '已达到累计大小上限（{detail} 字节），后续条目已跳过',
+    err_E_ZIP_TOO_MANY_ENTRIES: '已达到条目数上限（{detail} 条），后续条目已跳过',
     err_E_TOO_MANY_DUPES: '同名文件太多，无法生成新名称：{detail}',
     err_E_TRASH_DIR_UNSUPPORTED: '回收站不支持目录，请逐个删除目录内的文件：{detail}',
     // 键名必须逐字等于主进程 appError() 里的错误码，否则 describeError 查不到，
@@ -367,6 +376,10 @@ const I18N = {
     // 确认框
     deleteConfirm: 'Delete "{name}"?\nIt will be moved to trash and can be restored.',
     discardConfirm: 'Discard unsaved changes?',
+    unsavedTitle: 'Unsaved changes',
+    unsavedPrompt: 'The current file has unsaved changes. Switching now will lose them.',
+    saveChanges: 'Save',
+    discardChanges: "Don't save",
     emptyTrashConfirm: 'Permanently empty the trash? This cannot be undone.',
     emptyTrashConfirmShort: 'Permanently empty the trash?',
     // 历史抽屉
@@ -416,6 +429,9 @@ const I18N = {
     err_E_ZIP_OPEN: 'Cannot open ZIP: {detail}',
     err_E_ZIP_PARSE: 'Failed to parse ZIP: {detail}',
     err_E_ZIP_ENTRY: 'Failed to read ZIP entry: {detail}',
+    err_E_ZIP_ENTRY_TOO_BIG: 'Entry exceeds the per-file limit ({detail} bytes), skipped',
+    err_E_ZIP_TOTAL_TOO_BIG: 'Total size limit reached ({detail} bytes), remaining entries skipped',
+    err_E_ZIP_TOO_MANY_ENTRIES: 'Entry count limit reached ({detail}), remaining entries skipped',
     err_E_TOO_MANY_DUPES: 'Too many duplicates, cannot generate a new name: {detail}',
     err_E_TRASH_DIR_UNSUPPORTED: 'Trash does not support folders; delete files inside individually: {detail}',
     err_E_TRASH_STORE_MISSING: 'The trashed file no longer exists (possibly deleted manually): {detail}',

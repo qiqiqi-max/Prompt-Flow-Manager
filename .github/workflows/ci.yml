@@ -57,6 +57,11 @@ jobs:
       - name: 冒烟测试
         run: npm test
 
+      # 纯逻辑测试，不用起 Electron：从 renderer.js 里抠出 debounce 单独验语义。
+      # 自带反向对照（旧版一行 debounce 必须失败），所以它不会变成永远绿的空壳。
+      - name: debounce 语义
+        run: npm run test:debounce
+
       # 下面三个会真的拉起 Electron。各自 PFM_DATA_DIR 指向临时目录，
       # 不会碰仓库里的提示词库（脚本内部自己建临时副本）。
       - name: 功能自检（真实 IPC 往返）
@@ -67,3 +72,8 @@ jobs:
 
       - name: 标签页恢复
         run: npm run test:tabs
+
+      # 关窗落盘握手：拉起两个 Electron（正常关窗 / 直接销毁窗口）比对结果。
+      # 自带反向对照——两组结果必须不同，否则说明测的不是握手本身。
+      - name: 关窗落盘握手
+        run: npm run test:close

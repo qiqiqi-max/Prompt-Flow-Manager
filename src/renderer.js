@@ -89,7 +89,65 @@ const state = {
 
 // ===== 工具 =====
 const $ = (id) => document.getElementById(id);
-const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
+// 返回的函数会返回一个 promise，它在这次防抖真正执行完之后才 resolve，
+// 并额外挂一个 .flush()：立即执行待处理的那次调用（没有待处理的就等在飞的那次）。
+//
+// 原先返回 undefined。两个后果：
+//   - toggleLockFile 里的 `await saveLockedDebounced()` 实际是 await undefined，
+//     一个 tick 就过去了，锁状态还在 400ms 窗口里躺着没落盘。
+//   - 关窗时五个配置 debounce（tabs/recent/locked/sidebarWidth/expandedPaths）
+//     只要有一个还在窗口里，那次改动就跟着窗口一起没了：拖完侧边栏立刻关窗，
+//     下次打开宽度是旧的。计时器没有任何对外把手，主进程也没法催它落盘。
+//
+// 只保留最后一次的参数（防抖语义本来就是这样），但每次调用各自拿到一个 promise，
+// 全部在同一次执行后一起结算。
+const debounce = (fn, ms) => {
+  let timer = null;
+  let lastArgs = null;
+  let waiters = [];
+  let running = null;
+  const run = () => {
+    timer = null;
+    const args = lastArgs || [];
+    lastArgs = null;
+    const w = waiters;
+    waiters = [];
+    const p = (async () => {
+      // 这里不让异常逃出去：running 会被 flush() 返回给主进程的关窗流程，
+      // 一次保存失败不该把关窗卡住。等待者仍然按原样收到 reject。
+      try {
+        const r = await fn(...args);
+        w.forEach(x => x.resolve(r));
+      } catch (e) {
+        w.forEach(x => x.reject(e));
+      }
+    })();
+    // 注意比的是 settled 而不是 p：running 存的是 p.then(...) 的返回值，
+    // 和 p 不是同一个 promise，写成 if (running === p) 那句永远为假、running 永不清空。
+    const settled = p.then(() => { if (running === settled) running = null; });
+    running = settled;
+    return running;
+  };
+  const wrapped = (...a) => {
+    lastArgs = a;
+    if (timer) clearTimeout(timer);
+    const p = new Promise((resolve, reject) => { waiters.push({ resolve, reject }); });
+    timer = setTimeout(run, ms);
+    // 大多数调用方是 fire-and-forget（migrateLock、addRecent、switchTab 等）。
+    // 挂一个空 catch 把 promise 标记成已处理，免得这些地方冒出 unhandledrejection；
+    // 之后真的 await 这个 p 的调用方照旧能拿到异常。
+    p.catch(() => {});
+    return p;
+  };
+  wrapped.flush = () => {
+    if (timer) {
+      clearTimeout(timer);
+      return run();
+    }
+    return running || Promise.resolve();
+  };
+  return wrapped;
+};
 const escapeHtml = (s) => String(s).replace(/[&<>"'`]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '`': '&#96;' }[c]));
 // 保存展开状态（防抖）
 const saveExpandedPathsDebounced = debounce(async () => {
@@ -427,7 +485,7 @@ function labelForDir(node) {
 // ===== 打开文件 =====
 async function openFile(rel) {
   if (!rel) return;
-  if (state.editMode && !(await exitEditMode(true))) return;
+  if (state.editMode && !(await leaveEditForSwitch())) return;
   try {
     // 多标签页：若已存在标签则激活，否则新建。
     // 注意判的是 loaded 而不是"标签存不存在"：启动时从 config 恢复的标签是
@@ -508,7 +566,7 @@ function renderTabs() {
 }
 
 async function switchTab(rel) {
-  if (state.editMode && !(await exitEditMode(true))) return;
+  if (state.editMode && !(await leaveEditForSwitch())) return;
   const tab = state.tabs.find(t => t.rel === rel);
   if (!tab) return;
   // 恢复出来的占位标签还没有正文，切过去之前先补读（理由同 openFile）
@@ -815,13 +873,17 @@ async function enterEditMode() {
 // save=true 保存后退出；save=false 丢弃退出。
 // 丢弃且有未保存改动时先确认，避免草稿无声消失。
 // 返回 false = 用户取消，调用方必须中止自己的后续动作（切文件/切标签等）。
-async function exitEditMode(save) {
+// opts.skipConfirm：调用方已经用别的对话框问过了，别再弹第二个框。
+// leaveEditForSwitch 的"不保存"分支就是这样——用户刚在三选一里点了"不保存"，
+// 紧接着再弹一个"放弃未保存的修改？"是在质问用户刚才的选择。
+async function exitEditMode(save, opts) {
   if (!state.editMode) return true;
+  const skipConfirm = !!(opts && opts.skipConfirm);
   if (save) {
     const ok = await saveCurrent();
     if (!ok) return false;
   } else {
-    if (isDirty() && !(await confirmDialog(t('discardConfirm')))) return false;
+    if (!skipConfirm && isDirty() && !(await confirmDialog(t('discardConfirm')))) return false;
     state.editMode = false;
     state.editBaseline = '';
     $('preview-wrap').classList.remove('hidden');
@@ -836,6 +898,35 @@ async function exitEditMode(save) {
   $('editor-wrap').classList.add('hidden');
   $('btn-edit').textContent = t('edit');
   return true;
+}
+
+// 切文件 / 切标签时离开编辑模式。返回 false = 用户取消，调用方必须中止切换。
+//
+// 原先这两处是 exitEditMode(true)：不问一声就把草稿写进磁盘。这不是"保守的默认"，
+// 而是把一次误点变成不可逆的写入——主进程每次 save-file 都会 bumpAutoFields 并
+// 生成版本快照，所以手滑点到树上另一个文件，就多一条版本、version 自增一格，
+// 撤不回来。半句没写完的草稿也会成为"正式内容"。
+//
+// 而 Esc / 关标签走的是 exitEditMode(false)，会弹确认。同一份草稿两条离开路径，
+// 一条静默保存一条弹框询问，用户没法形成稳定预期。
+//
+// 用三选一而不是沿用两按钮的 discardConfirm：这里用户真正需要的第三个选项是
+// "不保存，但还是切过去"，两个按钮表达不了。取消是 cancelId，按 Esc 等于取消。
+async function leaveEditForSwitch() {
+  if (!state.editMode) return true;
+  // 没改动就没什么可问也没什么可存的。走 skipConfirm 分支直接退出编辑：
+  // 传 true 会白写一次盘并多一条内容完全相同的版本快照。
+  if (!isDirty()) return exitEditMode(false, { skipConfirm: true });
+  const choice = await api.confirmUnsaved({
+    title: t('unsavedTitle'),
+    detail: t('unsavedPrompt'),
+    save: t('saveChanges'),
+    discard: t('discardChanges'),
+    cancel: t('cancel')
+  });
+  if (choice === 'save') return exitEditMode(true);
+  if (choice === 'discard') return exitEditMode(false, { skipConfirm: true });
+  return false;
 }
 
 // 菜单里的"重新加载"走这里而不是 role:'reload'。
@@ -1191,11 +1282,16 @@ async function toggleLockFile(rel) {
     state.lockedFiles.add(rel);
     toast(t('locked'), 'success');
   }
-  await saveLockedDebounced();
-  // 更新树上的锁定标记
+  // 先更新树上的锁定标记，再落盘。顺序反过来会让点一下锁要等 400ms 防抖 +
+  // 一次 IPC 才看到图标变化（debounce 现在返回真 promise 了，await 是真的在等）。
   document.querySelectorAll('.tree-row.file').forEach(r => {
     r.classList.toggle('locked', state.lockedFiles.has(r.__rel));
   });
+  // 用 flush() 立刻写，不等那 400ms。锁定是"防误删"开关，必须尽快变成磁盘上的
+  // 事实：主进程的 trash 会读 config 判锁，而它看不见渲染进程这边还在计时的防抖。
+  // "点锁定 → 立刻按删除"这个连招下，等 400ms 的话主进程读到的仍是没有该文件的
+  // 旧快照，锁形同虚设。防抖留给 migrateLock 那种事后记账的路径。
+  await saveLockedDebounced.flush();
 }
 const saveLockedDebounced = debounce(async () => {
   try { await api.setConfig({ lockedFiles: Array.from(state.lockedFiles) }); }
@@ -1206,6 +1302,8 @@ function migrateLock(oldRel, newRel) {
   if (state.lockedFiles.has(oldRel)) {
     state.lockedFiles.delete(oldRel);
     state.lockedFiles.add(newRel);
+    // 不 await：调用方（改名/移动）已经把文件动完了，锁列表是事后记账。
+    // 真正需要保证落盘的是关窗那一下，由 __pfmFlushPending 兜。
     saveLockedDebounced();
   }
 }
@@ -1565,7 +1663,7 @@ function renderSettingsTypes() {
         toast(t('deleted'), 'success');
         populateFilters();
       } catch (e) {
-        toast(e.message, 'error');
+        toast(tErr('typeRemoveFailed', e), 'error');
       }
     };
   });
@@ -1582,7 +1680,7 @@ $('btn-add-type').onclick = async () => {
     inp.value = '';
     toast(t('added'), 'success');
   } catch (e) {
-    toast(e.message, 'error');
+    toast(tErr('typeAddFailed', e), 'error');
   }
 };
 $('new-type-input').onkeydown = (e) => {
@@ -1921,6 +2019,26 @@ async function init() {
 
   initResizer();
 }
+
+// 主进程关窗前会先调这个（见 electron-main.js 的 win.on('close')）：
+// 把还在防抖窗口里的配置写入立刻落盘，否则"改完立刻关窗"这一下就丢了。
+// 只收这五个写 config 的，doSearch 也是 debounce 但关窗时再搜一次没有意义。
+//
+// 挂在 window 上而不是走 IPC：主进程本来就用 executeJavaScript 和页面通信
+// （自检那套），再开一条 preload 通道只为关窗握手不划算。
+// 返回值让主进程能区分"flush 完成"和"页面根本没响应"（后者会走超时兜底）。
+window.__pfmFlushPending = async () => {
+  const all = [
+    saveExpandedPathsDebounced,
+    saveTabsDebounced,
+    saveRecentDebounced,
+    saveLockedDebounced,
+    saveSidebarWidthDebounced
+  ];
+  // allSettled 而不是 all：单个失败（磁盘满/配置被占）不该让其余四个不落盘。
+  await Promise.allSettled(all.map(d => d.flush()));
+  return true;
+};
 
 // 启动
 window.addEventListener('DOMContentLoaded', init);

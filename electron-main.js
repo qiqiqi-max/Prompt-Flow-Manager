@@ -567,6 +567,24 @@ function queueConfigWrite(fn) {
   return queueWrite('config', fn);
 }
 
+// 一次占多个 key。rename 要同时动源和目标两个文件（各自还有版本目录），
+// 只占一个 key 的话另一侧仍可能被并发的 save-file 插进来。
+//
+// 多 key 必须按固定顺序获取，否则会死锁：A 占了 ver:x 等 ver:y、B 占了 ver:y 等
+// ver:x，两边都不会释放。这里先排序再逐个嵌套，所有多 key 调用方的获取顺序就一致了，
+// 环也就构造不出来。
+//
+// 全局约定的获取顺序（跨 key 类别）：ver:*（组内按字典序） → trash → config。
+// 当前所有调用方都符合：save-file/pin/rollback 只占 ver:<rel>；trash 占 trash 后
+// 再占 config；restore/empty-trash 只占 trash；set-config/项目类型只占 config；
+// rename 占两个 ver:* 后再占 config。没有任何一处反向获取，所以无环。
+// 新增写操作时若要占多个 key，必须沿用这个顺序。
+function queueWriteMulti(keys, fn) {
+  const uniq = Array.from(new Set(keys)).sort();
+  const acquire = (i) => (i >= uniq.length ? fn() : queueWrite(uniq[i], () => acquire(i + 1)));
+  return acquire(0);
+}
+
 // ---------- 目录树 ----------
 async function buildSubTree(dir, baseRel) {
   const nodes = [];
@@ -789,7 +807,18 @@ async function createFileAt(rel, content) {
 
 ipcMain.handle('create-file', (e, rel, content) => createFileAt(rel, content));
 
-ipcMain.handle('rename', async (e, oldRel, newRel) => {
+// 整个 handler 排进两侧文件各自的写链。原先完全没排队，而它由四步磁盘操作组成
+// （判重 → 移正文 → 移版本目录 → 改锁列表），任意一步和并发的 save-file 交叉都会
+// 留下半完成状态：
+//   - 判重到 rename 之间有窗口，此刻另一路在 newRel 上保存，fsp.rename 直接把刚
+//     存进去的正文覆盖掉（rename 不看目标存不存在），而两边都返回成功。
+//   - 正文移走后、版本目录还没移时，另一路对 oldRel 保存会把 oldRel 重新创建出来，
+//     结果同一份内容在新旧两个路径各有一份，版本历史却只跟着其中一个。
+// 占两个 key 而不是一个：只占源的话，并发写目标的那条路照样插得进来。
+// 顺序由 queueWriteMulti 统一排序，不会和别处形成环。
+ipcMain.handle('rename', async (e, oldRel, newRel) => queueWriteMulti(
+  ['ver:' + String(oldRel), 'ver:' + String(newRel)],
+  async () => {
   // 两侧都过写入白名单：源要被移走（等于删），目标要被写入，
   // 任一侧落在 .versions/.trash/config.json 上都不行。
   const oldFull = safeJoinWritable(oldRel);
@@ -829,11 +858,21 @@ ipcMain.handle('rename', async (e, oldRel, newRel) => {
     console.error('锁定标记跟随改名失败（文件已改名）:', oldRel, '->', newRel, err.message);
   }
   return true;
-});
+}));
 
+// 锁状态必须在 config 队列内读。原先是队列外裸 loadConfig()：渲染进程的
+// lockedFiles 是 400ms 防抖写盘，"点锁定 → 立刻按删除"这个连招里，
+// 锁还在防抖窗口里没落盘，或者正落盘落到一半（写队列里排着但还没执行），
+// 这里读到的就是没有该文件的旧快照，于是锁形同虚设，文件照样进回收站。
+// 排进队列后读到的是"此刻队列里所有已排队写入都完成后"的状态。
+//
+// 在 trash handler（持有 trash key）里再占 config 是允许的：
+// 全局顺序是 ver:* → trash → config，config 永远最后占，构造不出环。
 async function isLocked(rel) {
-  const cfg = await loadConfig();
-  return Array.isArray(cfg.lockedFiles) && cfg.lockedFiles.includes(rel);
+  return queueConfigWrite(async () => {
+    const cfg = await loadConfig();
+    return Array.isArray(cfg.lockedFiles) && cfg.lockedFiles.includes(rel);
+  });
 }
 
 // 整个 handler 排进 trash 链：中间的 readTrashIndex → unshift → writeTrashIndex
@@ -1089,6 +1128,34 @@ ipcMain.handle('confirm', async (e, message) => {
     detail: message
   });
   return res.response === 1;
+});
+
+// 三选一：保存 / 不保存 / 取消。
+// confirm 只有两个按钮，表达不了"不保存但继续"这个选项——而切文件/切标签时
+// 用户真正需要的就是它（见渲染进程的 leaveEditForSwitch）。
+//
+// 按钮文案由渲染进程传进来：主进程没有 i18n 字典，写死中文的话英文界面下
+// 会弹出一个中英混排的框（现有的 confirm 就是这样，属于已知欠账）。
+// cancelId 指向"取消"，所以按 Esc 或点窗口关闭按钮都等于取消——
+// 默认取最安全的那个分支，不会把草稿丢掉。
+ipcMain.handle('confirm-unsaved', async (e, opts) => {
+  const o = opts || {};
+  const labels = [
+    String(o.save || '保存'),
+    String(o.discard || '不保存'),
+    String(o.cancel || '取消')
+  ];
+  const res = await dialog.showMessageBox(win, {
+    type: 'warning',
+    buttons: labels,
+    defaultId: 0,
+    cancelId: 2,
+    // noLink 防止 Windows 把三个按钮渲染成命令链接样式，和应用里其他对话框不一致
+    noLink: true,
+    message: String(o.title || '有未保存的修改'),
+    detail: String(o.detail || '')
+  });
+  return ['save', 'discard', 'cancel'][res.response] || 'cancel';
 });
 
 ipcMain.handle('export-zip', async () => {
@@ -2196,6 +2263,62 @@ function attachSelfTest(targetWin) {
   return {
     run: async () => {
       const fail = (msg) => { console.error('[selftest] FAIL ' + msg); process.exitCode = 1; };
+      // PFM_SELFTEST_CLOSE=flush|destroy：验证关窗时还挂在防抖窗口里的配置写入
+      // 会被真的落盘（见 win.on('close') 与渲染进程的 __pfmFlushPending）。
+      //
+      // 成败不在这里判：进程退出之后由 tests/close-flush.test.js 读 config.json 定论。
+      // "落盘"要等关窗流程整个走完才算数，在进程里自己断言等于自己发毕业证。
+      //
+      // destroy 是反向对照：win.destroy() 不触发 'close'，握手根本不会跑，那次改动
+      // 就该跟着窗口一起没了。两组结果不同，才说明 flush 组测到的是握手本身，
+      // 而不是"这个值反正总会被写进去"。
+      //
+      // 关键一步是把防抖的自然计时器挪到 10 分钟以后（下面临时改 setTimeout 的延时）。
+      // 不这么做的话，flush 组即使握手完全失效，400ms 的计时器自己也可能把值写进去，
+      // 于是测试照样绿——这就是个空断言。挪走之后，只有 flush() 能让这次写入完成。
+      //
+      // 这段不能放进下面的 try/finally：那里的 finally 会调 app.exit()，
+      // 而 app.exit() 不走窗口关闭流程，会把正在进行的 flush 直接掐断。
+      if (process.env.PFM_SELFTEST_CLOSE) {
+        await loaded;
+        if (!process.env.PFM_DATA_DIR) {
+          fail('关窗落盘自检必须设置 PFM_DATA_DIR，拒绝在真实数据目录上跑');
+          app.exit(1);
+          return;
+        }
+        const mode = process.env.PFM_SELFTEST_CLOSE;
+        const markWidth = 377;
+        // 直接调防抖函数，不经过 toggleLockFile：后者现在会立刻 flush（锁定要尽快变成
+        // 磁盘事实），那就没有"待写入"状态可测了。这里要的正是挂着还没落盘的状态。
+        const sched = await targetWin.webContents.executeJavaScript(
+          '(() => {'
+          + ' const origST = window.setTimeout;'
+          + ' window.setTimeout = function (fn, ms) { return origST.call(window, fn, 600000); };'
+          + ' try {'
+          + '   saveSidebarWidthDebounced(' + markWidth + ');'
+          + '   saveTabsDebounced();'
+          + ' } finally { window.setTimeout = origST; }'
+          + ' return { hasFlush: typeof window.__pfmFlushPending === "function" };'
+          + ' })()', true);
+        if (!sched.hasFlush) fail('渲染进程没有暴露 __pfmFlushPending，关窗握手无从谈起');
+        else console.log('[selftest:close] PASS 渲染进程暴露了 __pfmFlushPending');
+        // 前置条件：此刻必须还没落盘。若这时磁盘上已经是新值，说明它是别的路径写进去的，
+        // 后面无论看到什么都证明不了 flush 起了作用。
+        let before = {};
+        try { before = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch {}
+        if (before.sidebarWidth === markWidth) {
+          fail('前置条件不成立：待写入的值在关窗之前就已经落盘了');
+        } else {
+          console.log('[selftest:close] PASS 关窗前该值还挂在防抖里（磁盘上是 '
+            + JSON.stringify(before.sidebarWidth) + '）');
+        }
+        console.log('[selftest:close] 模式=' + mode);
+        if (mode === 'destroy') targetWin.destroy();
+        else targetWin.close();
+        // 故意不调 app.exit()：让关窗流程自己走完（close → 异步收尾 → 真的关 →
+        // window-all-closed → app.quit()），进程退出后由测试脚本读 config.json。
+        return;
+      }
       try {
         await loaded;
         const r = await targetWin.webContents.executeJavaScript(probeScript, true);
@@ -2549,26 +2672,84 @@ async function createWindow() {
   };
   win.on('resize', scheduleSaveBounds);
   win.on('move', scheduleSaveBounds);
-  // 关窗前把待写入的尺寸落盘，否则最后一次调整会丢。
-  // 这里必须同步写：close 之后进程随即退出，await 不保证能跑完。
-  // 为了不和写队列打架，先把队列里已排队的写等干净再动手——但同步上下文
-  // 等不了 promise，所以退而求其次：读当前磁盘内容做 merge，只覆盖
-  // windowBounds 一个字段，其余字段原样保留。最坏情况是丢掉一次
-  // 正在飞行中的 debounce 写入，而不是整份配置被覆盖。
-  win.on('close', () => {
+  // 同步兜底：读当前磁盘内容做 merge，只覆盖 windowBounds 一个字段。
+  // 不走写队列（同步上下文等不了 promise），所以最坏情况是丢掉一次正在飞行中的
+  // debounce 写入。只在下面的异步路径没走通时用。
+  const saveBoundsSync = () => {
+    if (!win || win.isDestroyed()) return;
+    try {
+      const bounds = currentBounds();
+      const cur = fs.existsSync(CONFIG_PATH) ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) : {};
+      cur.windowBounds = bounds;
+      // 同步版的原子写：临时文件 + rename。异步 writeFileAtomic 在 close
+      // 回调里等不到，但截断风险是一样的——这里崩在半路，config.json 就废了。
+      const tmp = CONFIG_PATH + '.tmp-close';
+      fs.writeFileSync(tmp, JSON.stringify(cur, null, 2), 'utf8');
+      fs.renameSync(tmp, CONFIG_PATH);
+    } catch (e) { console.error('关窗保存尺寸失败:', e); }
+  };
+
+  // 让渲染进程把还在防抖窗口里的配置写入立刻落盘（见 renderer 的 __pfmFlushPending）。
+  // typeof 判断不能省：页面还没加载完或加载失败时那个函数不存在，
+  // 直接调会抛 ReferenceError，把整个关窗收尾带崩。
+  const flushRendererPending = async () => {
+    if (!win || win.isDestroyed()) return;
+    const wc = win.webContents;
+    if (!wc || wc.isDestroyed() || wc.isCrashed()) return;
+    await wc.executeJavaScript(
+      '(typeof window.__pfmFlushPending === "function" ? window.__pfmFlushPending() : true)', true
+    );
+  };
+
+  // 关窗前把待写入的东西落盘，否则最后一次改动会丢。
+  //
+  // 原先只能同步写 windowBounds——close 回调是同步的，等不了 promise。但渲染进程
+  // 那五个配置 debounce（tabs 500 / recent 500 / locked 400 / sidebarWidth 400 /
+  // expandedPaths 600）根本没有对外把手，改完立刻关窗那次就没了：拖宽侧边栏后
+  // 马上关窗，重开还是旧宽度；展开几个目录再关窗，展开状态丢失。
+  //
+  // 所以第一次 close 先 preventDefault 把窗口留住，异步做两件事——催渲染进程
+  // flush、把窗口尺寸走正常写队列存好——然后再真的关。close 会因此触发两次，
+  // 用 closing 区分，第二次直接放行。
+  //
+  // 超时兜底是必须的：页面崩了或渲染主线程卡死时 executeJavaScript 的 promise
+  // 永远不 settle，没有超时窗口就再也关不掉，比丢一次防抖写入严重得多。
+  const CLOSE_FLUSH_TIMEOUT_MS = 3000;
+  let closing = false;
+  let boundsSavedAsync = false;
+  win.on('close', (e) => {
     if (boundsTimer) { clearTimeout(boundsTimer); boundsTimer = null; }
-    if (win && !win.isDestroyed()) {
-      try {
-        const bounds = currentBounds();
-        const cur = fs.existsSync(CONFIG_PATH) ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) : {};
-        cur.windowBounds = bounds;
-        // 同步版的原子写：临时文件 + rename。异步 writeFileAtomic 在 close
-        // 回调里等不到，但截断风险是一样的——这里崩在半路，config.json 就废了。
-        const tmp = CONFIG_PATH + '.tmp-close';
-        fs.writeFileSync(tmp, JSON.stringify(cur, null, 2), 'utf8');
-        fs.renameSync(tmp, CONFIG_PATH);
-      } catch (e) { console.error('关窗保存尺寸失败:', e); }
+    if (closing) {
+      // 第二次进来：异步收尾已经结束（或超时放弃）。它没存下尺寸就走同步兜底。
+      if (!boundsSavedAsync) saveBoundsSync();
+      return;
     }
+    closing = true;
+    e.preventDefault();
+    const finish = (async () => {
+      try {
+        await flushRendererPending();
+      } catch (err) {
+        console.error('关窗催渲染进程落盘失败:', err && err.message ? err.message : err);
+      }
+      try {
+        // 走 updateConfig 而不是同步写：它在配置写队列里，不会和渲染进程刚 flush
+        // 出来的那几次 set-config 互相覆盖字段。
+        if (win && !win.isDestroyed()) {
+          await updateConfig({ windowBounds: currentBounds() });
+          boundsSavedAsync = true;
+        }
+      } catch (err) {
+        console.error('关窗保存尺寸失败（退回同步写）:', err && err.message ? err.message : err);
+      }
+    })();
+    const timeout = new Promise(r => setTimeout(r, CLOSE_FLUSH_TIMEOUT_MS));
+    Promise.race([finish, timeout]).then(() => {
+      // 退出流程里 preventDefault 已经把 quit 取消了，必须原路走回 app.quit()，
+      // 否则 macOS 下按了 Cmd+Q 只关窗、应用不退。
+      if (isQuitting) { app.quit(); return; }
+      if (win && !win.isDestroyed()) win.close();
+    });
   });
 
   // win 是模块级单例，销毁后必须置空。send() 只检查 `win &&`，
@@ -2706,6 +2887,14 @@ app.whenReady().then(async () => {
   }
 });
 }
+
+// 菜单退出 / Cmd+Q 会先走 before-quit，再给每个窗口发 close。
+// 而下面 win.on('close') 为了做异步收尾会 preventDefault 一次，那会把整个 quit
+// 取消掉：只 win.close() 的话，macOS 下窗口关了应用还留着（window-all-closed
+// 在 darwin 不退），用户按了 Cmd+Q 却退不掉。所以记下"这次是退出"，
+// 收尾做完后原路走回 app.quit()。
+let isQuitting = false;
+app.on('before-quit', () => { isQuitting = true; });
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
