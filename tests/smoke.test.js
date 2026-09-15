@@ -508,6 +508,63 @@ assert(/^\d+\.\d+\.\d+$/.test((pkg.devDependencies || {}).eslint || ''),
 }
 assert(fs.existsSync(path.join(root, '.editorconfig')), '存在 .editorconfig');
 
+section('CI 覆盖');
+// 一个测试套件只要没挂进 CI，就等于"需要有人记得手动跑"——
+// 而人不会记得。这里把 package.json 里的 test* 脚本和 ci.yml 对账，
+// 新加了套件却忘了配 CI 步骤时直接变红。
+{
+  const ciPath = path.join(root, '.github/workflows/ci.yml');
+  assert(fs.existsSync(ciPath), '存在 .github/workflows/ci.yml');
+  const ci = fs.readFileSync(ciPath, 'utf8');
+  const testScripts = Object.keys(pkg.scripts).filter(k => k === 'test' || k.startsWith('test:'));
+  // test:all 是本地一键入口（串行跑完所有套件），CI 里拆成独立步骤是故意的：
+  // 拆开才能在页面上直接看到是哪一个套件红的，不用翻日志。
+  const needInCi = testScripts.filter(k => k !== 'test:all');
+  assert(needInCi.length >= 8, '收集到需要进 CI 的测试脚本（' + needInCi.length + ' 个）');
+  const notInCi = needInCi.filter(k => {
+    const cmd = k === 'test' ? 'npm test' : 'npm run ' + k;
+    return !ci.includes(cmd);
+  });
+  assert(notInCi.length === 0,
+    '每个测试脚本都有对应的 CI 步骤' + (notInCi.length ? '，漏了：' + notInCi.join(', ') : ''));
+  assert(ci.includes('npm run lint'), 'CI 跑了 lint');
+
+  // GitHub 已经在对 node20 运行时的 action 报废弃警告，@v4 那批就是 node20。
+  // 不锁具体版本（会天天过期），只卡"不能退回到已废弃的 v4"。
+  const oldActions = [...ci.matchAll(/uses: (actions\/[\w-]+)@v(\d+)/g)]
+    .filter(m => Number(m[2]) <= 4)
+    .map(m => m[1] + '@v' + m[2]);
+  assert(oldActions.length === 0,
+    '没有使用 node20 运行时的旧版 action' + (oldActions.length ? '：' + oldActions.join(', ') : ''));
+
+  // 打包验证：唯一一次"打包后白屏"的故障，开发模式的 8 个套件全绿也拦不住，
+  // 因为开发模式下 CODE_ROOT 和 DATA_ROOT 是同一个目录。必须真打成 exe。
+  assert(/^  package:/m.test(ci), 'CI 里有独立的 package job');
+  assert(ci.includes('npm run dist'), 'CI 真的执行打包');
+  assert(ci.includes('npm run test:packaged'), 'CI 对打包产物跑自检');
+  // if-no-files-found 默认是 warn：路径写错时 artifact 是空的，但 CI 照样绿。
+  assert(/if-no-files-found: error/.test(ci), 'artifact 找不到文件时报错（默认只是 warning）');
+}
+{
+  assert(fs.existsSync(path.join(root, 'tests/packaged-smoke.js')), '存在 tests/packaged-smoke.js');
+  assert(!!pkg.scripts['test:packaged'], '有 npm run test:packaged');
+  const pkgTest = fs.readFileSync(path.join(root, 'tests/packaged-smoke.js'), 'utf8');
+  // dist/ 是增量目录，历史版本的 exe 会一直堆在里面。按任意版本号匹配的话
+  // readdirSync 可能先返回几周前那个 exe——检查全绿，但验的是陈旧产物。
+  // 这是实测踩到的：第一版就把 1.3.0 的 exe 当成被测对象了。
+  assert(/pkgVersion/.test(pkgTest), '打包检查按 package.json 的当前版本号定位产物');
+  // 必须先剥注释再查：上面那段解释为什么不能这么写的注释里就原样写着这个模式，
+  // 直接全文匹配会把自己的说明文字当成违规代码（实测第一版就是这么假红的）。
+  {
+    const code = pkgTest.split(/\r?\n/).filter(l => !/^\s*\/\//.test(l)).join('\n');
+    assert(!/\/\\d\+\\\.\\d\+\\\.\\d\+\//.test(code), '不用"任意版本号"匹配 exe');
+  }
+  // 打包产物只验退出码是不够的：portable 是 GUI 子系统，抓不到 stdout，
+  // 启动器解压失败也可能返回 0。必须用磁盘副作用证明它真跑到了业务逻辑。
+  assert(/ensureSeedData/.test(pkgTest), '验证了只在打包模式执行的首启种子拷贝');
+  assert(/portable 产物失败时返回非零/.test(pkgTest), '验证了打包产物失败时确实非零（否则 exit=0 无意义）');
+}
+
 section('调试残留');
   // 防回归：buildSubTree/listTree 每次调用都同步 appendFileSync，日志无限增长
   assert(!/appendFileSync\(path\.join\(DATA_ROOT, 'debug\.log'\)/.test(mainSrc), '不再往数据目录写 debug.log');

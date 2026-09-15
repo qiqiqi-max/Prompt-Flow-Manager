@@ -12,6 +12,7 @@
     "test:debounce": "node tests/debounce.test.js",
     "test:close": "node tests/close-flush.test.js",
     "test:render": "node tests/render-guard.test.js",
+    "test:packaged": "node tests/packaged-smoke.js",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "test:all": "npm run lint && npm test && npm run test:ui && npm run test:fn && npm run test:tabs && npm run test:debounce && npm run test:close && npm run test:render",

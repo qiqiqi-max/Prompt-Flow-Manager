@@ -23,11 +23,15 @@ jobs:
     timeout-minutes: 25
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          # Node 20 已经进入维护末期，GitHub 也开始对 node20 的 action 报废弃警告。
+          # 这里固定 22（当前 LTS）：package.json 声明的下限是 >=18，
+          # 用比下限更高的版本跑 CI 是故意的——新版 Node 的行为更严格，
+          # 能先一步暴露即将失效的写法。
+          node-version: 22
           cache: npm
 
       # 用 npm ci 而不是 npm install：严格按 lockfile 装，
@@ -52,6 +56,11 @@ jobs:
             exit 1
           fi
           echo "vendor 副本已是最新"
+
+      # 放在所有测试之前：lint 几秒钟就能跑完，语法/未定义变量这类问题
+      # 没必要等 Electron 起完再报。
+      - name: 静态检查（eslint）
+        run: npm run lint
 
       # 静态检查（语法、i18n 完整性、防回归断言），不需要图形环境
       - name: 冒烟测试
@@ -82,3 +91,49 @@ jobs:
       # 自带反向对照——两组结果必须不同，否则说明测的不是握手本身。
       - name: 关窗落盘握手
         run: npm run test:close
+
+  # 打包验证单独成 job，不并进上面那串：
+  # 它要下载 108MB 的 Electron 二进制再打包，实测首次约 10 分钟，
+  # 而上面那些测试 3 分钟内就能给出反馈。合成一个 job 的话，
+  # 一个拼写错误也要等十几分钟才知道。两个 job 并行跑，互不阻塞。
+  #
+  # 为什么非要有这一层：唯一一次"打包后界面全白"的故障，
+  # 根因是 preload / index.html 路径指向了数据目录而不是 asar 内的代码目录。
+  # 开发模式下 CODE_ROOT 和 DATA_ROOT 是同一个目录，指错了也照样能读到文件，
+  # 所以上面 8 个测试全绿也拦不住它。必须真的打成 exe 才测得到。
+  package:
+    runs-on: windows-latest
+    # 首次要下 Electron 二进制（108MB）+ NSIS 工具链，给足时间
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装依赖
+        shell: bash
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      # predist 钩子会自动跑 sync-vendor，所以打出来的包一定带最新 vendor
+      - name: 打包（portable exe）
+        run: npm run dist
+
+      # 对打包产物本身跑自检：验 asar 内路径、contextBridge、vendor 加载、
+      # 以及只在打包模式执行的 ensureSeedData 首启种子拷贝。
+      - name: 打包产物自检
+        run: npm run test:packaged
+
+      # 留下产物便于人工验证/回归复现。构建号区分不同次运行。
+      # retention 短一些：这是每次 push 都产生的中间产物，不是发布物。
+      - name: 上传打包产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: portable-exe-${{ github.run_number }}
+          path: dist/*.exe
+          if-no-files-found: error
+          retention-days: 14
