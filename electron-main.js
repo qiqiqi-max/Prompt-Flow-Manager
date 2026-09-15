@@ -1474,22 +1474,34 @@ async function runSecurityRegression(targetWin) {
     const dirT = versionDirFor(relS);
     await ensureDir(dirT);
     // 占名窗口要同时满足两头：
-    //   够宽——写这批占位文件本身要花时间（实测 25 次 writeFileSync 约 12ms），
-    //         窗口必须宽到把这段耗时盖住，否则 saveVersion 起手那一毫秒已经
-    //         漂到窗口外面，根本不会撞名，断言就又变成"永远为真"；
+    //   够宽——写这批占位文件本身要花时间，窗口必须宽到把这段耗时盖住，否则
+    //         saveVersion 起手那一毫秒已经漂到窗口外面，根本不会撞名，
+    //         断言就又变成"永远为真"；
     //   够窄——总数必须低于 MAX_UNPINNED_VERSIONS（30），否则 saveVersion 里的
     //         pruneVersions 会把最旧的占位文件裁掉，看起来像"被覆盖"。
-    // 25ms 窗口写完约剩 12ms 余量。用同步写是为了让这段尽量短。
+    // 窗口起点是自适应的：写 25 个文件在 CI 机器上可能要三四十毫秒，比窗口本身还宽，
+    // 固定从"现在"起算就会整段错过——CI 上真红过一次（窗口 ..666 .. ..690，
+    // 而 saveVersion 要用 ..691）。所以每轮量一次实际耗时，下一轮把窗口整体后移到
+    // "写完之后"再开始，这样不依赖机器快慢，也不用把窗口撑到触发 pruneVersions。
     const DECOY_MS = 25;
-    const decoyNames = [];
-    const t0 = new Date();
-    for (let i = 0; i < DECOY_MS; i++) decoyNames.push(timestampName(new Date(t0.getTime() + i)) + '.md');
-    for (const n of decoyNames) fs.writeFileSync(path.join(dirT, n), 'DECOY', 'utf8');
+    let decoyNames = [];
+    let wouldPick = null;
+    let occupied = false;
+    let offset = 0;
+    for (let attempt = 0; attempt < 12 && !occupied; attempt++) {
+      // 上一轮的占位文件必须清掉，否则累计超过 30 个会触发 pruneVersions
+      for (const n of decoyNames) { try { fs.unlinkSync(path.join(dirT, n)); } catch {} }
+      decoyNames = [];
+      const t0 = Date.now();
+      for (let i = 0; i < DECOY_MS; i++) decoyNames.push(timestampName(new Date(t0 + offset + i)) + '.md');
+      for (const n of decoyNames) fs.writeFileSync(path.join(dirT, n), 'DECOY', 'utf8');
+      wouldPick = timestampName(new Date()) + '.md';
+      occupied = decoyNames.includes(wouldPick);
+      if (!occupied) offset = (Date.now() - t0) + 2; // 下一轮从"写完"之后再开始占
+    }
 
     // 前置断言：saveVersion 此刻会算出的名字必须已经被占掉，否则这个用例什么都没测到。
-    // 余量被机器拖慢吃光时这里会直接红，而不是假装通过。
-    const wouldPick = timestampName(new Date()) + '.md';
-    check('撞名用例前置：目标快照名确实已被占用', decoyNames.includes(wouldPick),
+    check('撞名用例前置：目标快照名确实已被占用', occupied,
       `将要使用 ${wouldPick}，占名窗口 ${decoyNames[0]} .. ${decoyNames[decoyNames.length - 1]}`);
 
     await saveVersion(relS, 'SNAPSHOT-CONTENT');
