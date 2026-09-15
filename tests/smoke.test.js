@@ -672,6 +672,87 @@ section('自检脚本是真实文件（不是模板字符串）');
   }
 }
 
+section('文档与代码一致');
+{
+  // 文档漂移是静默的：脚本改名、开关删掉，文档照旧，读文档的人照着敲然后失败。
+  // 所以这里把 CONTRIBUTING.md / CLAUDE.md 里引用的 npm 脚本、环境变量、文件路径
+  // 全部回查一遍代码。
+  const contribPath = path.join(root, 'CONTRIBUTING.md');
+  assert(fs.existsSync(contribPath), 'CONTRIBUTING.md 存在');
+  const docs = [
+    ['CONTRIBUTING.md', contribPath],
+    ['CLAUDE.md', path.join(root, 'CLAUDE.md')],
+    ['README.md', path.join(root, 'README.md')]
+  ]
+    .filter(([, p]) => fs.existsSync(p))
+    .map(([name, p]) => [name, fs.readFileSync(p, 'utf8')]);
+
+  const pkgScripts = Object.keys(JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).scripts || {});
+  for (const [name, src] of docs) {
+    // `npm run x` 和 `npm test`（后者没有 run）
+    const cited = new Set();
+    for (const m of src.matchAll(/npm run ([a-z][\w:-]*)/g)) cited.add(m[1]);
+    for (const m of src.matchAll(/npm test\b/g)) { void m; cited.add('test'); }
+    const badScripts = [...cited].filter(s => !pkgScripts.includes(s));
+    assert(badScripts.length === 0,
+      name + ' 引用的 npm 脚本都存在' + (badScripts.length ? '，查不到：' + badScripts.join(', ') : '（' + cited.size + ' 个）'));
+
+    // 文档里写的路径必须真的在仓库里。
+    //
+    // 只查**带目录分隔符**的，不查裸文件名。第一版把 `` `i18n.js` `` 和
+    // `` `index.json` `` 也算进来，于是误报了两条：前者是散文里的简称
+    // （真实路径 src/i18n.js，同一段上下文已经写清楚了），后者是回收站里的
+    // 运行时文件（.trash/index.json，仓库里本来就不该有）。
+    // 带斜杠的路径才是"读者会照着去打开"的断言，裸文件名是行文简称，
+    // 强行校验只会逼着把散文改成路径，读起来更差。
+    const paths = new Set();
+    for (const m of src.matchAll(/`([\w.-]+(?:\/[\w.*-]+)+)`/g)) paths.add(m[1]);
+    const badPaths = [...paths].filter(p => !p.includes('*') && !fs.existsSync(path.join(root, p)));
+    assert(badPaths.length === 0,
+      name + ' 引用的文件路径都存在' + (badPaths.length ? '，查不到：' + badPaths.join(', ') : '（' + paths.size + ' 个）'));
+
+    // 自我复制：CLAUDE.md 曾经把整篇文档插进自己第 7 条的正中间（首个 H1 出现两次），
+    // 结果那一条的句子被截断成半句，读的人只会以为是笔误。
+    // 这类损坏靠肉眼翻很难发现——文档很长，前半段看起来完全正常。
+    const firstLine = src.split('\n')[0];
+    if (/^# /.test(firstLine)) {
+      const dupAt = src.indexOf(firstLine, 1);
+      assert(dupAt === -1, name + ' 没有把自己的标题重复一遍（自我复制损坏）',
+        dupAt === -1 ? '' : '第二次出现在偏移 ' + dupAt);
+    }
+  }
+
+  // 反向：主进程里的自检开关必须都被 CONTRIBUTING.md 记录到，
+  // 否则新增开关只有作者知道，等同于没有。
+  {
+    const contrib = fs.readFileSync(contribPath, 'utf8');
+    const inCode = new Set([...mainSrc.matchAll(/PFM_[A-Z_]+/g)].map(m => m[0]));
+    const undocumented = [...inCode].filter(v => !contrib.includes(v));
+    assert(undocumented.length === 0,
+      '主进程的自检开关都写进了 CONTRIBUTING.md' +
+      (undocumented.length ? '，漏了：' + undocumented.join(', ') : '（' + inCode.size + ' 个）'));
+  }
+
+  // 反向：package.json 里的每个 test* 脚本都要在 CONTRIBUTING.md 里出现。
+  // 上面那条查的是"文档写的脚本存在"，方向是文档→代码，挡不住
+  // "加了新测试但没人知道"——那种漏法下文档依然全绿。
+  {
+    const contrib = fs.readFileSync(contribPath, 'utf8');
+    const testScripts = pkgScripts.filter(s => s === 'test' || s.startsWith('test:'));
+    const notDocumented = testScripts.filter(s => !contrib.includes(s === 'test' ? 'npm test' : 'npm run ' + s));
+    assert(notDocumented.length === 0,
+      '每个 test 脚本都写进了 CONTRIBUTING.md' +
+      (notDocumented.length ? '，漏了：' + notDocumented.join(', ') : '（' + testScripts.length + ' 个）'));
+  }
+
+  // 反向对照这条规则本身要出现在文档里，否则新人不会知道它存在
+  {
+    const contrib = fs.readFileSync(contribPath, 'utf8');
+    assert(/反向对照/.test(contrib), 'CONTRIBUTING.md 写了反向对照规则');
+    assert(/空断言/.test(contrib), 'CONTRIBUTING.md 解释了什么算空断言');
+  }
+}
+
 section('调试残留');
   // 防回归：buildSubTree/listTree 每次调用都同步 appendFileSync，日志无限增长
   assert(!/appendFileSync\(path\.join\(DATA_ROOT, 'debug\.log'\)/.test(mainSrc), '不再往数据目录写 debug.log');

@@ -153,27 +153,19 @@ const content = \`--- ... ---\`;
 
 ## 测试
 
-三层，各管一件事：
+完整的分层说明、全部自检开关、以及**反向对照**规则（本项目唯一不可协商的测试纪律）
+都在 [CONTRIBUTING.md](CONTRIBUTING.md)。改测试之前先读那一份。
+
+最常用的三条：
 
 ```bash
+npm run lint     # eslint。自检脚本是真实文件，所以它们也在检查范围内
 npm test         # 静态检查 + ZIP 导入逻辑单测 + 真实压缩解压往返
-npm run test:ui  # 拉起 Electron，验证 contextBridge / 依赖加载 / 文件树真的渲染出来
-npm run test:fn  # 端到端走 IPC：新建→保存→版本→星标→回滚→锁定→删除→恢复→搜索→越权防护
-npm run test:all # 三层一起跑
-npm run bench    # 搜索压测（临时目录，默认 1000 条）
+npm run test:all # lint + 静态 + UI + 功能 + 标签恢复 + 防抖 + 关窗 + 渲染
 ```
 
-主进程的自检开关（都只在测试里用）：
-
-| 环境变量 | 作用 |
-|----------|------|
-| `PFM_SELFTEST=1` | 页面加载完自动跑启动自检并退出 |
-| `PFM_SELFTEST_FUNCTIONAL=1` | 追加功能自检；**必须同时设 PFM_DATA_DIR**，否则拒绝执行 |
-| `PFM_DATA_DIR=<目录>` | 把 DATA_ROOT 指到临时目录，避免测试动到真实提示词库 |
-| `PFM_SELFTEST_SHOT=<png>` | 存一张真实渲染截图，便于人工核对界面 |
-| `PFM_SELFTEST_LANG=en` | 切到指定语言后检查界面外壳有无残留中文 |
-| `PFM_SELFTEST_DIALOGS=<json>` | 用队列文件替换系统对话框，跑通导出/导入 |
-| `PFM_SELFTEST_BENCH=<条数>` | 生成指定规模的库并跑搜索压测 |
+一条底线：所有会落盘的自检开关都强制要求同时设 `PFM_DATA_DIR`，
+没设就直接 `fail()` 退出——防的是开发机上的真实提示词库被测试清空。
 
 ### 导出/导入怎么做到自动化的
 

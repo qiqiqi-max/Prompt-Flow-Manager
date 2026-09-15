@@ -178,12 +178,16 @@ flowchart LR
 ## 开发与测试
 
 ```bash
-npm test          # 静态约束、语法、ZIP、安全与回归检查
-npm run test:ui   # 启动真实 Electron 窗口并验证渲染及关键点击流程
-npm run test:fn   # 在临时目录执行端到端功能自检
-npm run test:tabs # 验证重启后标签页及正文恢复
-npm run test:all  # 依次运行全部测试
-npm run bench     # 生成 1000 条提示词并执行搜索性能基准
+npm run lint          # eslint 静态检查
+npm test              # 静态约束、语法、ZIP、安全与回归检查
+npm run test:ui       # 启动真实 Electron 窗口并验证渲染及关键点击流程
+npm run test:fn       # 在临时目录执行端到端功能自检
+npm run test:tabs     # 验证重启后标签页及正文恢复
+npm run test:debounce # 验证配置写入防抖与关窗前 flush
+npm run test:close    # 验证关窗落盘握手
+npm run test:render   # 验证 markdown 渲染成本上限
+npm run test:all      # 依次运行上述全部检查
+npm run bench         # 生成 1000 条提示词并执行搜索性能基准
 ```
 
 功能测试使用独立临时目录，不会读写真实提示词库。测试过程里出现的预期错误日志用于验证锁定、路径穿越和非法版本名等防护是否生效。
@@ -191,10 +195,18 @@ npm run bench     # 生成 1000 条提示词并执行搜索性能基准
 常用开发命令：
 
 ```bash
-npm run sync-vendor # 从 node_modules 更新本地前端依赖
-npm run build       # 构建 Windows 安装目标
-npm run dist        # 构建 Windows portable 版本
+npm run sync-vendor   # 从 node_modules 更新本地前端依赖
+npm run build         # 构建 Windows 安装目标
+npm run dist          # 构建 Windows portable 版本
+npm run test:packaged # 对打包产物跑自检（须先 dist）
 ```
+
+打包产物有单独一层检查：开发模式下代码目录与数据目录恰好重合，路径写错也照样能跑，
+只有打包后两者分叉才会暴露成白屏。改了打包配置、路径解析或首次运行的种子拷贝，
+跑一次 `npm run dist && npm run test:packaged`。
+
+改代码前请先读 [CONTRIBUTING.md](CONTRIBUTING.md)，尤其是反向对照那一节：
+本项目要求每条新增断言都必须证明「撤掉修复会变红」，否则算空断言。
 
 ## 项目结构
 
@@ -209,6 +221,8 @@ Prompt-Flow-Manager/
 │   ├── styles.css           # 主题与组件样式
 │   ├── renderer.js          # 渲染进程交互逻辑
 │   ├── i18n.js              # 中英文文案
+│   ├── frontmatter.js       # frontmatter 解析与自动字段更新
+│   ├── selftest/            # 自检脚本（在页面上下文里执行的真实 .js）
 │   └── vendor/              # 本地化的渲染进程依赖
 ├── prompts/                 # 内置提示词示例
 ├── workflows/               # 内置工作流示例
