@@ -65,8 +65,10 @@ for (const p of ['lib/**/*', 'src/**/*', 'preload.js']) {
 // 理由：vendor 副本是提交进仓库的，而 ^x.y.z 允许 npm install 装到别的版本，
 // 于是"package.json 声明的版本"和"实际加载的那份文件"可以静默不一致，
 // 出问题时按声明的版本号去查 changelog 会查错。
-// DOMPurify 尤其重要：sandbox 是关的（见 webPreferences 注释），
-// 它是提示词正文渲染唯一的 XSS 边界，版本必须是确定的。
+// DOMPurify 尤其重要：沙箱现在默认开着，但它会在探测失败的机器上自动降级
+// （见"渲染进程隔离"一节和 lib/sandbox-state.js），也就是说总有一部分用户
+// 实际跑在无沙箱模式下。DOMPurify 是那种情况下提示词正文渲染唯一的 XSS 边界，
+// 版本必须是确定的。
 for (const dep of ['dompurify', 'marked', 'diff-match-patch']) {
   const range = (pkg.devDependencies || {})[dep] || '';
   assert(/^\d+\.\d+\.\d+$/.test(range), dep + ' 锁定到确定版本（当前 ' + range + '）');
@@ -104,6 +106,98 @@ assert(!/path\.join\(DATA_ROOT, 'src'/.test(mainSrc), '未从数据目录加载 
 section('渲染进程隔离');
 assert(/contextIsolation: true/.test(mainSrc), 'contextIsolation 已开启');
 assert(/nodeIntegration: false/.test(mainSrc), 'nodeIntegration 已关闭');
+{
+  // 沙箱有**两个半边**，必须取同一个结论：
+  //   webPreferences.sandbox            窗口级
+  //   app.commandLine 的 --no-sandbox   进程级，会盖掉上面那个
+  // 历史写法是两边都无条件关闭。只改其中一处是这次改动最容易犯的错——
+  // 只开 webPreferences 的话进程开关照旧盖掉它，诊断包会报"开着"而实际没开，
+  // 比一直关着更糟（它给出一个假的安全结论）。
+  assert(!/sandbox: false/.test(mainSrc), '没有写死 sandbox: false');
+  // 窗口级开关取 sandboxActive（此刻生效的模式），不是 sandboxDecision.sandbox
+  // （启动时的判定）。就地降级之后重建窗口时两者不同，取判定的话重建出来的
+  // 窗口又会把沙箱打开、又崩一次，降级路径实际是死的——而且只在真降级时才暴露。
+  assert(/sandbox: sandboxActive/.test(mainSrc),
+    'webPreferences.sandbox 取当前生效模式 sandboxActive');
+  assert(/let sandboxActive = sandboxDecision\.sandbox/.test(mainSrc),
+    'sandboxActive 初值来自跨启动判定');
+  assert(!/^\s*app\.commandLine\.appendSwitch\('no-sandbox'\);\s*$/m.test(mainSrc),
+    '没有无条件 appendSwitch(no-sandbox)');
+  assert(/if \(!sandboxDecision\.sandbox\) app\.commandLine\.appendSwitch\('no-sandbox'\)/.test(mainSrc),
+    '进程级开关和窗口级取同一个判定（两个半边不许分叉）');
+  // 判定必须在 app ready 之前完成，否则 appendSwitch 赶不上这一进程的命令行。
+  const decideAt = mainSrc.indexOf('const sandboxDecision');
+  const readyAt = mainSrc.indexOf('app.whenReady()');
+  assert(decideAt > 0 && readyAt > 0 && decideAt < readyAt,
+    '沙箱判定在 app.whenReady 之前（appendSwitch 之后再改就无效了）');
+  // 探测标记必须在 loadFile 之前按下去：先加载再按标记的话，
+  // 加载失败那一瞬间盘上还没有 pending，下次启动看不出上次失败过。
+  const probeAt = mainSrc.indexOf('attachSandboxProbe(win)');
+  const loadAt = mainSrc.indexOf("win.loadFile(path.join(CODE_ROOT, 'src', 'index.html'))");
+  assert(probeAt > 0 && loadAt > 0 && probeAt < loadAt,
+    '探测在 loadFile 之前挂上（标记要先落盘）');
+  // 降级是持久的，所以两个触发信号都必须过滤，否则一次无关失败就永久关掉隔离。
+  assert(/reason === 'clean-exit'/.test(mainSrc),
+    'render-process-gone 排掉正常退出（否则加载完成前退出会被当成沙箱起不来）');
+  assert(/if \(!isMainFrame\) return;/.test(mainSrc),
+    'did-fail-load 只认主 frame（子 frame 失败与沙箱无关）');
+  // 只在 did-fail-load 的处理体里查 isSelfUrl，不能全文查：
+  // attachNavigationGuard 里本来就有一处 isSelfUrl(url)，全文匹配等于恒真
+  // （写第一版时就是这么写的，删掉过滤照样全绿）。
+  {
+    const at = mainSrc.indexOf("wc.on('did-fail-load'");
+    const body = at > 0 ? mainSrc.slice(at, at + 400) : '';
+    assert(/isSelfUrl\(url\)/.test(body), 'did-fail-load 只认自己那个页面（不是任意 URL）');
+  }
+  // 状态文件目录和 CONFIG_PATH 用同一个三元表达式。写死成 DATA_ROOT 会让
+  // 打包版把它写进 asar 旁边（只读），降级结论永远存不下来。
+  assert(/const SANDBOX_STATE_DIR = process\.env\.PFM_DATA_DIR/.test(mainSrc),
+    '沙箱状态目录跟着 PFM_DATA_DIR 走（测试隔离）');
+  assert(!/SANDBOX_STATE_DIR = path\.join\(DATA_ROOT/.test(mainSrc),
+    '沙箱状态不落在 DATA_ROOT（打包后那是 asar，只读）');
+
+  // ---- 就地降级（不重启）----
+  // 实测依据：本机缺 VC++ 运行库，sandbox:true 必崩（0xC0000135），而
+  // sandbox:false 且**不带**进程级 --no-sandbox 能正常渲染。所以降级只需要
+  // 换掉窗口级开关，不必 app.relaunch()。
+  assert(/async function rebuildWindowWithoutSandbox\(/.test(mainSrc),
+    '有就地重建窗口的降级路径');
+  // 必须先剥掉注释再查：上面那段解释"为什么不用重启"的注释里就原样写着
+  // app.relaunch()，直接全文匹配会把自己的说明文字当成违规代码
+  // （实测第一版就是这么假红的，和 packaged-smoke.js 那条踩的是同一个坑）。
+  {
+    const code = mainSrc.split(/\r?\n/).filter(l => !/^\s*(\/\/|\*)/.test(l)).join('\n');
+    assert(!/app\.relaunch\(\)/.test(code),
+      '降级不走 app.relaunch（不需要重启，且重启在自检下必须特例跳过）');
+  }
+  // destroy 而不是 close：close 会走关窗落盘握手，那里要等已经死掉的渲染进程
+  // 回话，必然空等到 3 秒超时。
+  {
+    const at = mainSrc.indexOf('async function rebuildWindowWithoutSandbox');
+    const body = at > 0 ? mainSrc.slice(at, at + 700) : '';
+    assert(/old\.destroy\(\)/.test(body), '重建时 destroy 旧窗口（不触发要等死渲染进程的落盘握手）');
+    assert(/await createWindow\(\)/.test(body), '重建时重新建窗口');
+  }
+  // 这条守的是整条降级路里最隐蔽的一环：destroy 旧窗口到新窗口建出来之间
+  // 有一瞬间零窗口，Windows 上 window-all-closed 会在那时 app.quit()，
+  // 表现为"开了一下就没了"。没有这个 guard，就地降级整条是死的。
+  {
+    const at = mainSrc.indexOf("app.on('window-all-closed'");
+    const body = at > 0 ? mainSrc.slice(at, at + 500) : '';
+    assert(/sandboxRuntime\.rebuilding/.test(body),
+      'window-all-closed 在重建窗口期间不退出（否则零窗口的一瞬会 app.quit）');
+  }
+  // 诊断包必须报"此刻生效的模式"而不是"启动时的判定"。就地降级之后两者不同，
+  // 报判定的话诊断包会说沙箱开着、而用户正跑在无沙箱窗口上——本次改动要消灭的
+  // 假安全读数换个地方又出现了。
+  {
+    const at = mainSrc.indexOf('sandbox: (() => {');
+    const body = at > 0 ? mainSrc.slice(at, at + 500) : '';
+    assert(/enabled: sandboxActive/.test(body),
+      '诊断包报当前生效的沙箱模式（不是启动判定）');
+    assert(/degradedThisRun/.test(body), '诊断包报出本次是否发生过降级');
+  }
+}
 assert(/contextBridge\.exposeInMainWorld/.test(preloadSrc), 'preload 走 contextBridge');
 // 防回归：contextBridge 暴露的属性不可配置，若叫 'api' 会和 renderer.js 里
 // const api = ... 撞车，抛 "Identifier 'api' has already been declared"，整段脚本不执行。
@@ -735,12 +829,20 @@ section('文档与代码一致');
 
   // 反向：主进程里的自检开关必须都被 CONTRIBUTING.md 记录到，
   // 否则新增开关只有作者知道，等同于没有。
+  //
+  // lib/ 也要扫：PFM_SANDBOX 的读取点在 lib/sandbox-state.js 的 decide() 里
+  // （env 是调用方传进来的），只扫 mainSrc 的话它在文档里缺失也照样全绿。
+  // 这和上面"lib/ 下不许抛中文"是同一类漏法——按文件名写死的检查，
+  // 新文件落进来时自动脱离覆盖。
   {
     const contrib = fs.readFileSync(contribPath, 'utf8');
-    const inCode = new Set([...mainSrc.matchAll(/PFM_[A-Z_]+/g)].map(m => m[0]));
+    const inCode = new Set(
+      [mainSrc, ...LIB_FILES.map(([, s]) => s)]
+        .flatMap(src => [...src.matchAll(/PFM_[A-Z_]+/g)].map(m => m[0]))
+    );
     const undocumented = [...inCode].filter(v => !contrib.includes(v));
     assert(undocumented.length === 0,
-      '主进程的自检开关都写进了 CONTRIBUTING.md' +
+      '主进程与 lib/ 的开关都写进了 CONTRIBUTING.md' +
       (undocumented.length ? '，漏了：' + undocumented.join(', ') : '（' + inCode.size + ' 个）'));
   }
 

@@ -124,8 +124,43 @@ app.commandLine.appendSwitch('disable-gpu-compositing');
 app.commandLine.appendSwitch('disable-direct-composition');
 app.commandLine.appendSwitch('in-process-gpu');
 app.commandLine.appendSwitch('disable-gpu-shader-disk-cache');
-// 沙箱在某些缺少运行库的环境会导致渲染进程 DLL 缺失，关闭以保证启动。
-app.commandLine.appendSwitch('no-sandbox');
+// 沙箱默认开启，只在这台机器上被证明起不来之后才降级。
+//
+// 原先这里无条件 appendSwitch('no-sandbox')，理由是"某些缺运行库的环境开了会缺 DLL"。
+// 那个理由是真的，但代价是**所有**用户都失去渲染进程的 OS 级隔离，
+// 为的是照顾一小部分环境。contextIsolation 只隔离 JS 作用域，
+// DOMPurify 被绕过之后的原生层利用要靠沙箱挡，而导入的 .md 属外部内容。
+//
+// 判断逻辑全在 lib/sandbox-state.js（跨启动的标记 + 两次不确认才降级 + 七天后重试），
+// 那边的文件头写了为什么"探测"只能跨启动做。这里只负责把结论翻译成命令行开关。
+//
+// 顺序上不能挪：appendSwitch 必须在 app ready 之前，等窗口失败了再改已经来不及。
+// 而 webPreferences.sandbox 单独开是没用的 —— 进程级的 --no-sandbox 会盖掉它，
+// 所以这两处必须同时改（这也是本次改动的核心：它们是一个开关的两半）。
+const sandboxState = require('./lib/sandbox-state');
+// 状态文件跟 config.json 同目录。这里不能用 CONFIG_PATH：它在下面 40 行才定义，
+// 而 appendSwitch 必须在此刻完成，所以把同一个三元表达式在此处求值一次。
+// 两份表达式的漂移风险由 tests/smoke.test.js 的断言盯着。
+const SANDBOX_STATE_DIR = process.env.PFM_DATA_DIR
+  ? path.resolve(process.env.PFM_DATA_DIR)
+  : app.getPath('userData');
+const sandboxDecision = sandboxState.decide({
+  state: sandboxState.read(SANDBOX_STATE_DIR),
+  env: process.env
+});
+if (!sandboxDecision.sandbox) app.commandLine.appendSwitch('no-sandbox');
+
+// 本次进程**当前生效**的模式。和 sandboxDecision.sandbox 的区别只有一种情况：
+// 沙箱开着但渲染进程当场起不来，那时就地降级重建窗口（见 attachSandboxProbe），
+// 这个变量跟着变 false，而 sandboxDecision 保留启动时的判定不动。
+//
+// 实测（本机缺 VC++ 运行库，正是这套机制要照顾的环境）：
+//   sandbox:true  + 不带 --no-sandbox → 渲染进程 crash，exitCode -1073741515
+//                                       （0xC0000135 STATUS_DLL_NOT_FOUND）
+//   sandbox:false + 不带 --no-sandbox → 正常渲染
+// 后一条是就地降级成立的依据：关掉窗口级开关就够了，不需要那个只能在
+// app ready 之前设的进程级开关，所以不必重启。
+let sandboxActive = sandboxDecision.sandbox;
 
 // 两个根目录必须严格区分，混用会导致打包版白屏：
 // - CODE_ROOT：随包分发的只读代码资源（preload.js / src/）。打包后位于 asar 内部，
@@ -1035,7 +1070,36 @@ function diagnosticsContext() {
     codeRoot: CODE_ROOT,
     dirs: TOP_DIRS,
     healReport: lastHealReport,
-    configPath: CONFIG_PATH
+    configPath: CONFIG_PATH,
+    // 沙箱是否真的开着，以及为什么。这一项必须在诊断包里：降级是自动发生的，
+    // 用户界面上看不出任何差别，不报出来就没人知道自己在不安全模式下跑了几个月。
+    //
+    // enabled 必须取 sandboxActive（此刻真正生效的模式），不能取
+    // sandboxDecision.sandbox（启动时的判定）。两者只在一种情况下不同，而那种情况
+    // 恰好是最需要如实上报的一种：沙箱开着但渲染进程起不来，就地降级重建了窗口。
+    // 报启动判定的话，诊断包会说"沙箱开着"，而实际上用户正跑在无沙箱窗口上——
+    // 这正是本次改动要消灭的那种假安全读数，只是换了个地方出现。
+    // reason 同理跟着 sandboxRuntime 走：降级后它是 render-process-gone:xxx。
+    //
+    // confirmed 是"渲染进程这次真的起来了吗"（少了它，一个在加载完成前导出的
+    // 诊断包会让人误以为沙箱验证通过）。
+    //
+    // strikes / degradedAt / lastConfirmedAt 现读磁盘，不用启动时那份快照：
+    // 那三项是跨启动累积的历史，而启动快照是 confirm() 之前的状态，
+    // 拿它报 lastConfirmedAt 会报出上一次启动的时间，看着像"本次没确认过"。
+    // 诊断本来就是冷路径（同一个函数里已经在数文件、读日志尾部），多一次读不算事。
+    sandbox: (() => {
+      const st = sandboxState.read(SANDBOX_STATE_DIR);
+      return {
+        enabled: sandboxActive,
+        reason: sandboxRuntime.reason || sandboxDecision.reason,
+        confirmed: sandboxRuntime.confirmed,
+        degradedThisRun: sandboxRuntime.degradedThisRun,
+        strikes: st.strikes,
+        degradedAt: st.degradedAt,
+        lastConfirmedAt: st.lastConfirmedAt
+      };
+    })()
   };
 }
 
@@ -3129,6 +3193,159 @@ function attachNavigationGuard(targetWin) {
   });
 }
 
+// 沙箱探测的运行时结论。诊断包要能回答"我这台机器现在到底开着沙箱吗、为什么"，
+// 这是唯一能看出降级发生过的地方（用户不会去翻 sandbox-state.json）。
+let sandboxRuntime = {
+  requested: null,      // 本次启动请求的模式
+  reason: null,         // decide() 给出的理由
+  confirmed: false,     // 渲染进程真的加载完了
+  degradedThisRun: false,
+  rebuilding: false     // 正在就地重建窗口（window-all-closed 期间不许退出）
+};
+
+// 跨启动探测的窗口侧半边。
+//
+// 时序（必须在 loadFile 之前调用，标记要先按下去）：
+//   1. 沙箱开着 → 在磁盘按 pending 标记
+//   2. did-finish-load → confirm()，标记清掉，strikes 归零
+//   3. 标记还在的时候渲染进程就没了（render-process-gone / did-fail-load）
+//      → degrade() 落盘，然后**就地**把窗口用 sandbox:false 重建一个
+//
+// 为什么是就地重建而不是 app.relaunch()：起初这里写的是重启，理由是"进程级的
+// --no-sandbox 只能在 app ready 之前设，这一进程改不动了"。前半句是对的，
+// 后半句的推论是错的——实测 sandbox:false **不需要**那个进程级开关配合就能渲染
+// （见文件开头 sandboxActive 处记录的两组实测退出码）。那个开关只是历史上
+// 一并加上的，并非降级的必要条件。所以关掉窗口级开关重建窗口就够了，
+// 用户看到窗口闪一下，不用经历一次完整重启。
+//
+// 附带效果：重启方案在自检模式下必须特例跳过（父进程会等一个已经换了 pid 的
+// 目标，表现为莫名超时），于是自检环境永远走不到降级后的成功路径；
+// 就地重建没有这个问题，自检和真实运行走同一条代码。
+//
+// 沙箱关着时整个探测不挂：那时没有要证明的事，挂上只会把普通的渲染进程崩溃
+// 记成沙箱的账，反而让"七天后重试"永远重试不成功。
+function attachSandboxProbe(targetWin) {
+  if (!sandboxActive) {
+    // 重建出来的窗口也会走到这里，所以两处状态都必须从旧值继承，不能重置：
+    //   degradedThisRun —— 重置的话诊断包会显示"本来就是关着的"，本次降级无痕；
+    //   reason —— 重置成 sandboxDecision.reason（启动判定，通常是 default-on）
+    //     会把 render-process-gone:crashed 这个真正的原因盖掉。实测就是这样：
+    //     重建后的日志打的是"原因: default-on"，而那次明明是崩溃降级来的。
+    const degraded = sandboxRuntime.degradedThisRun;
+    sandboxRuntime = {
+      requested: sandboxState.MODE_OFF,
+      reason: degraded ? sandboxRuntime.reason : sandboxDecision.reason,
+      confirmed: false,
+      degradedThisRun: degraded,
+      rebuilding: false
+    };
+    logger.info('[sandbox] 本次以无沙箱模式' + (degraded ? '重建窗口' : '启动')
+      + '，原因: ' + sandboxRuntime.reason);
+    return;
+  }
+
+  sandboxRuntime = {
+    requested: sandboxState.MODE_ON,
+    reason: sandboxDecision.reason,
+    confirmed: false,
+    degradedThisRun: false,
+    rebuilding: false
+  };
+
+  // decide() 可能已经改了状态（累加 strike、冷静期到了重试），先把那个落盘，
+  // markAttempt 再在它之上加 pending。
+  let cur = sandboxDecision.nextState;
+  if (sandboxDecision.changed) {
+    const res = sandboxState.write(SANDBOX_STATE_DIR, cur);
+    if (!res.ok) logger.error('[sandbox] 写状态失败（本次结论记不住）: ' + res.error);
+  }
+  const marked = sandboxState.markAttempt(SANDBOX_STATE_DIR, cur);
+  cur = marked.state;
+  if (!marked.ok) {
+    // 标记按不下去（目录只读）时不能继续假装在探测：pending 永远不会出现，
+    // 于是"上次没确认"这个判断永远为假，降级路径就成了死代码。
+    // 这种情况下沙箱照常开着（安全的那一侧），只是失去自动降级能力，记一行。
+    logger.error('[sandbox] 无法写探测标记，本次不做降级判断: ' + marked.error);
+    return;
+  }
+  logger.info('[sandbox] 尝试开启沙箱，原因: ' + sandboxDecision.reason);
+
+  const wc = targetWin.webContents;
+
+  wc.once('did-finish-load', () => {
+    sandboxRuntime.confirmed = true;
+    const res = sandboxState.confirm(SANDBOX_STATE_DIR, cur);
+    cur = res.state;
+    if (!res.ok) logger.error('[sandbox] 清探测标记失败（下次启动会误判一次未确认）: ' + res.error);
+    else logger.info('[sandbox] 渲染进程已确认可用，沙箱保持开启');
+  });
+
+  // 渲染进程在确认之前就没了 —— 这正是缺运行库那类环境的症状。
+  const fallback = (why) => {
+    if (sandboxRuntime.confirmed || sandboxRuntime.rebuilding) return;
+    sandboxRuntime.degradedThisRun = true;
+    sandboxRuntime.rebuilding = true;
+    const res = sandboxState.degrade(SANDBOX_STATE_DIR, cur, why);
+    cur = res.state;
+    if (!res.ok) {
+      // 状态写不进去不影响本次恢复——sandboxActive 是内存里的变量，这一次照样能
+      // 重建出可用窗口。代价只是下次启动还会再试一次沙箱、再失败、再重建一次。
+      // 所以这里只记一行就继续；早先写成"放弃恢复"是错的，那会把一个能救回来的
+      // 启动停在白窗口上。
+      logger.error('[sandbox] 降级状态写盘失败（下次启动会重复一次探测）: ' + res.error);
+    }
+    logger.error('[sandbox] 渲染进程在沙箱下起不来（' + why + '），就地降级为无沙箱并重建窗口');
+    sandboxActive = false;
+    // 理由要在这里就记住。重建出来的窗口会再走一遍 attachSandboxProbe，
+    // 那边的无沙箱分支原先无条件写 sandboxDecision.reason（还是 'default-on'），
+    // 于是诊断包和日志都只会说"以无沙箱模式启动，原因 default-on"——降级发生过
+    // 这件事被自己的恢复过程抹掉了。实测第一版日志就是这么打的。
+    sandboxRuntime.reason = why;
+    // 从事件回调里跳出来再动窗口：这会儿还在 render-process-gone 的派发过程中，
+    // 同步 destroy 正在报告崩溃的那个 webContents 不是有保障的操作。
+    setTimeout(() => { rebuildWindowWithoutSandbox().catch((e) => {
+      logger.error('[sandbox] 重建窗口失败: ' + (e && e.stack ? e.stack : e));
+      sandboxRuntime.rebuilding = false;
+    }); }, 0);
+  };
+
+  // 两个信号都必须先过滤，否则会把不相干的失败记到沙箱账上——而降级是**持久**的，
+  // 误判一次就把这台机器上的 OS 级隔离永久关掉，还顺带掩盖真正的故障。
+  //
+  // render-process-gone 的 clean-exit 是正常退出。绝大多数情况下这时 confirmed
+  // 已经是 true，上面那个 guard 就挡住了；但用户在页面加载完之前就退出时不是，
+  // 那次会被当成"沙箱起不来"。所以显式排掉。
+  wc.on('render-process-gone', (e, details) => {
+    const reason = details && details.reason ? details.reason : 'unknown';
+    if (reason === 'clean-exit') return;
+    fallback('render-process-gone:' + reason);
+  });
+  // did-fail-load 会为**任意** frame、任意 URL 触发。用 once 更糟：一个无关的
+  // 子 frame 失败就把这一次机会用掉了。这里只认"主 frame 加载我们自己那个页面失败"，
+  // 其余情况留给 attachSelfTest 和用户去看——比如 index.html 根本不在包里
+  // （历史上那次打包白屏就是这个形状），那是打包问题，关掉沙箱一点用都没有。
+  wc.on('did-fail-load', (e, code, desc, url, isMainFrame) => {
+    if (!isMainFrame) return;
+    if (!isSelfUrl(url)) return;
+    fallback('did-fail-load:' + code + ':' + desc);
+  });
+}
+
+// 就地降级：扔掉起不来的那个窗口，用 sandbox:false 重建一个。
+//
+// 用 destroy() 而不是 close()：close 会走 win.on('close') 那套异步落盘握手，
+// 里头 flushRendererPending() 要等渲染进程回话，而渲染进程正是已经死掉的那个，
+// 于是必然空等到 3 秒超时才继续。这时候也确实没有什么可落盘的——页面从来没
+// 加载成功过，用户一个字都没输入。
+async function rebuildWindowWithoutSandbox() {
+  const old = win;
+  win = null;                     // 先摘引用，避免 destroy 触发的回调里又读到它
+  if (old && !old.isDestroyed()) old.destroy();
+  await createWindow();           // 此刻 sandboxActive 已是 false
+  sandboxRuntime.rebuilding = false;
+  logger.info('[sandbox] 已用无沙箱模式重建窗口');
+}
+
 // 恢复窗口位置前必须校验。config.windowBounds 直接来自磁盘，而 set-config
 // 又允许渲染进程写任意字段，所以这里可能是任何东西：
 //   - 拔掉副屏后，上次存的 x/y 落在已不存在的显示器上 → 窗口开在屏幕外，
@@ -3186,13 +3403,20 @@ async function createWindow() {
       // nodeIntegration 会让一次 XSS 直接升级成任意代码执行。
       contextIsolation: true,
       nodeIntegration: false,
-      // sandbox 维持关闭：部分缺运行库的 Windows 环境开启后渲染进程会因缺 DLL 起不来
-      // （与文件开头的 --no-sandbox 开关配套）。进程隔离由 contextIsolation 承担。
-      sandbox: false,
+      // 沙箱开不开由文件开头那个跨启动状态机决定（见 sandboxDecision 处的说明）。
+      // 这里和进程级的 --no-sandbox 必须取同一个结论：只开这个而不管那个开关的话，
+      // 命令行会盖掉它，看起来开了其实没开。
+      //
+      // 取 sandboxActive 而不是 sandboxDecision.sandbox：就地降级重建窗口时，
+      // 内存里的 sandboxActive 已经翻成 false，而 sandboxDecision 保留启动判定。
+      // 读后者的话重建出来的窗口又会开着沙箱，于是崩溃→重建→再崩溃，
+      // 除了 rebuilding 那个 guard 拦着之外就是个死循环——白窗口照旧。
+      sandbox: sandboxActive,
       webgl: false
     }
   });
   attachNavigationGuard(win);
+  attachSandboxProbe(win);
   const selfTest = process.env.PFM_SELFTEST === '1' ? attachSelfTest(win) : null;
   win.loadFile(path.join(CODE_ROOT, 'src', 'index.html'));
   if (selfTest) selfTest.run();
@@ -3458,5 +3682,10 @@ let isQuitting = false;
 app.on('before-quit', () => { isQuitting = true; });
 
 app.on('window-all-closed', () => {
+  // 沙箱降级正在重建窗口时不许退出。这中间有一小段"零个窗口"的空隙
+  // （destroy 旧窗口 → await createWindow 建新窗口），Windows 上这个事件
+  // 会在那一瞬间触发并直接 app.quit()，表现为"开了一下就没了"。
+  // 没有这个 guard，整条就地降级的路就是死的——而且只在真的降级时才暴露。
+  if (sandboxRuntime.rebuilding) return;
   if (process.platform !== 'darwin') app.quit();
 });

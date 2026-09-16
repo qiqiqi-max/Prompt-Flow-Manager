@@ -66,7 +66,19 @@ const DATA_ROOT = app.isPackaged ? app.getPath('userData') : __dirname;  // 用�
 - 导入时 frontmatter 的 `title` 会成为文件名，必须过 `sanitizeTitle()`。
 - ZIP 导入不落盘、不使用包内路径写文件 → 免疫 zip-slip。
 - Markdown 预览经 DOMPurify 清洗；index.html 有 CSP（`script-src 'self'`）。
-- `sandbox: false` 与 `--no-sandbox` 是对缺运行库的 Windows 环境的妥协，隔离由 contextIsolation 承担。
+- 沙箱默认**开着**，只在这台机器上被证明起不来之后才降级（`lib/sandbox-state.js`）。
+  沙箱起不来的症状是渲染进程根本不启动，进程内没法提前探测，所以判定是跨启动的：
+  `loadFile` 前在磁盘按下 pending 标记，`did-finish-load` 时清掉；连续两次启动都没清掉
+  才把结论记成"这台机器不能用沙箱"（一次断电不该永久关掉隔离），7 天后自动重试一次。
+  `PFM_SANDBOX=on|off` 可强制覆盖且不写盘。当前状态会进诊断包。
+- 沙箱下渲染进程当场崩掉时**就地重建**一个无沙箱窗口（`rebuildWindowWithoutSandbox`），
+  不重启进程：实测 `sandbox: false` 且不带 `--no-sandbox` 能正常渲染，所以只需换掉
+  窗口级开关。用户看到窗口闪一下，不会停在白窗口上等着自己重启。
+  重建期间 `window-all-closed` 必须跳过 `app.quit()`——中间有一瞬零窗口。
+- 沙箱有两个半边：窗口级的 `webPreferences.sandbox` 和进程级的 `--no-sandbox`
+  （后者会盖掉前者）。启动时两边取同一个判定，只改一个就会得到"沙箱开着"的假读数。
+  就地降级只动窗口级那半边，所以诊断包里的 `enabled` 取 `sandboxActive`（此刻生效的），
+  不取 `sandboxDecision.sandbox`（启动时的判定）。
 
 ### 抛给渲染进程的错误必须带错误码
 
