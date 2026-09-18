@@ -874,6 +874,162 @@ section('调试残留');
     assert(!fs.existsSync(path.join(root, junk)), '开发残留已清理: ' + junk);
   }
 
+  section('升级检查（本项目唯一主动出网的地方）');
+  // 这一节盯的不是"版本比较对不对"（那在 tests/update.test.js 里，裸 node 跑），
+  // 而是**主进程接线**上那些单测看不到的约束。加这个功能等于给一个此前零出网的
+  // 应用开一个出网口，所以每条都指向"这个口会不会被用歪"。
+  {
+    // 三个文件都先剥掉整行注释再查。这一节的注释里原样写着 html_url、assets、
+    // await runUpdateCheck() 这些"反面写法"，不剥就会把自己的说明文字当成违规代码
+    // （本仓库已经踩过三次这个坑，最近一次在 packaged-smoke.js）。
+    const strip = (s) => s.split(/\r?\n/).filter(l => !/^\s*(\/\/|\*)/.test(l)).join('\n');
+    const updSrc = fs.readFileSync(path.join(root, 'lib/update-check.js'), 'utf8');
+    const updCode = strip(updSrc);
+    const mainCode = strip(mainSrc);
+    const renderCode = strip(rendererSrc);
+    assert(!/\.html_url/.test(updCode),
+      '模块不读响应里的 html_url（发布页地址只能是本地常量）');
+    assert(!/\.assets\b/.test(updCode), '模块不读响应里的 assets（不自动下载）');
+
+    // 发布页 URL 只能在主进程里出现，且不接受渲染进程传参。
+    // 反面情形：ipcMain.handle('open-release-page', (e, url) => shell.openExternal(url))
+    // ——那样"地址不来自响应"这条约束在最后一步就白做了，因为渲染进程的 url
+    // 可以一路追溯到响应内容。
+    {
+      const at = mainCode.indexOf("ipcMain.handle('open-release-page'");
+      assert(at > 0, '有打开发布页的 IPC');
+      const body = at > 0 ? mainCode.slice(at, at + 300) : '';
+      assert(/shell\.openExternal\(updateCheck\.RELEASE_PAGE_URL\)/.test(body),
+        '打开发布页用模块里的本地常量（不接受调用方传 URL）');
+      assert(!/async \(e, url\)/.test(body) && !/\(e, url\)/.test(body),
+        'open-release-page 不接收 url 参数（否则外部内容能决定打开什么）');
+    }
+    // 出网不能挡住窗口。fetchLatest 最坏要等满超时，await 它就等于让窗口
+    // 晚那么久才出来——而升级检查是用户没要求的后台行为，凭什么让它拖慢启动。
+    //
+    // 锚点用 `await runStartupHeal();`，不用 `await createWindow();`：后者在
+    // electron-main.js 里有两处（启动链路一处，沙箱降级重建一处），indexOf 会
+    // 命中降级那一处，于是"不 await"这条会在一段根本没有 runUpdateCheck 的
+    // 文本上恒真——空断言。第一版就是这么写的，靠"启动时会跑升级检查"那条
+    // 变红才发现窗口取错了。
+    {
+      const at = mainCode.indexOf('await runStartupHeal();');
+      assert(at > 0, '启动链路里有自愈步骤（升级检查断言的锚点）');
+      const body = at > 0 ? mainCode.slice(at, at + 400) : '';
+      assert(/runUpdateCheck\(\)/.test(body), '启动时会跑升级检查');
+      assert(!/await runUpdateCheck\(\)/.test(body),
+        '升级检查不 await（否则窗口要等出网超时才出来）');
+    }
+    // 自检/压测进程不许出网：否则测试依赖网络，变慢且偶发失败。
+    // 这个判断在模块里（shouldCheck），这里确认它真的被接上了。
+    assert(/PFM_SELFTEST/.test(updCode), '模块自己排除自检进程');
+    assert(/updateCheck\.shouldCheck\(/.test(mainCode), '主进程走 shouldCheck 判定');
+    // 用户可关，且开关要能真的写盘（走 updateConfig 而不是直接改内存）
+    assert(/updateCheck: true/.test(mainCode), '配置默认值里有 updateCheck');
+    assert(/config\.updateCheck === false/.test(updCode), '关掉之后连请求都不发');
+    // 时间戳必须无论成功失败都记。只在成功时记的话，离网用户每次启动都会
+    // 重新发起请求并等满超时。
+    //
+    // 顺序也要查：时间戳那句必须排在 `if (res.error)` 之前。只比较"两句都在"
+    // 证明不了任何东西——把写时间戳挪到失败返回之后，两句依然都在。
+    {
+      const at = mainCode.indexOf('async function runUpdateCheck');
+      const body = at > 0 ? mainCode.slice(at, at + 2000) : '';
+      assert(/updateConfig\(\{ updateLastCheckedAt: at \}\)/.test(body),
+        '检查时间走 updateConfig（串行化的读改写，不会和渲染进程的配置写互相覆盖）');
+      const errAt = body.indexOf('if (res.error)');
+      const tsAt = body.indexOf('updateLastCheckedAt: at');
+      assert(tsAt > 0 && errAt > 0 && tsAt < errAt,
+        '失败也记检查时间（否则离网用户每次启动都等满超时）');
+    }
+    // 整个 runUpdateCheck 是 fire-and-forget 调用的，内部必须自己兜住异常，
+    // 否则就是主进程里一个没人接的 rejection。
+    //
+    // 查的是"函数体第一句就是 try"这个结构，不是"函数体里出现过 try/catch"：
+    // 这个函数里另有一处内层 try/catch（包住 updateConfig 那次写盘），
+    // 所以宽松的 /try \{/ 在**外层被删掉之后照样是绿的**——正好是那种"改坏了
+    // 也不报"的空断言。锚定到签名后面第一句，才真的能证明整段被包住了。
+    assert(/async function runUpdateCheck\(\) \{\s*try \{/.test(mainCode),
+      'runUpdateCheck 整个函数体被 try 包住（它是 fire-and-forget 调用的）');
+    {
+      // 兜住之后要留下痕迹。静默失败不等于装作没发生过——这是排障时唯一的线索。
+      //
+      // 只查"函数体里有 logger.error('[update]"是不够的：里头那处内层 catch
+      // （updateConfig 写盘失败）自己就有一条同前缀的日志，所以把**外层** catch
+      // 的日志删掉，宽松写法照样是绿的。锚到最后一个 `} catch (e) {` 之后的
+      // 那一段，查的才是外层那条。
+      const at = mainCode.indexOf('async function runUpdateCheck');
+      const end = mainCode.indexOf('\n}', at);
+      const fn = at > 0 && end > at ? mainCode.slice(at, end) : '';
+      const lastCatch = fn.lastIndexOf('} catch (e) {');
+      const tail = lastCatch > 0 ? fn.slice(lastCatch) : '';
+      assert(/logger\.error\('\[update\]/.test(tail),
+        '最外层兜住的异常会记日志（静默不等于无痕）');
+    }
+    // 渲染进程侧：版本号在插进界面之前要再过一次白名单。
+    // 不能因为"主进程已经校验过"就省掉——那种跨层信任一旦上游放宽就变成注入点。
+    //
+    // 这几条都**限定在升级提示那段函数体内**查。整个 renderer.js 里 textContent
+    // 出现几十次，不限定范围的 /textContent/ 永远是绿的：横幅改用 innerHTML 它
+    // 照样通过，那就是 CONTRIBUTING 里说的空断言。
+    //
+    // 切片的两端都锚在**代码行**上，不锚注释：这一节用的是剥过注释的 renderCode，
+    // 原来那个 `\n// ===== 分隔条拖拽` 结束锚点在剥完之后根本不存在，
+    // indexOf 返回 -1，body 直接变成空串——三条断言会一起假绿。
+    {
+      const at = renderCode.indexOf('function showUpdateBanner');
+      const end = renderCode.indexOf('const saveSidebarWidthDebounced', at);
+      assert(at > 0 && end > at, '找到升级提示那段渲染代码');
+      const body = at > 0 && end > at ? renderCode.slice(at, end) : '';
+      // 白名单必须真的**用在**版本号上，而不只是声明在文件里。
+      assert(/VERSION_DISPLAY_RE\.test\(/.test(renderCode),
+        '渲染进程的版本号白名单真的被调用（不是只声明）');
+      // 把响应内容写进界面的路径有**两条**：横幅靠主进程推送，设置面板那行状态
+      // 文字靠主动拉取。两条都要过白名单，所以分开切、分开查——合在一起查的话
+      // 失败信息说不出是哪条断的。
+      //
+      // 查法是"剥掉所有 safeVersion(...) 调用之后，还有没有裸读 info.version"，
+      // 不是"出现过 safeVersion"也不是数调用次数。前两种写法都被反向对照证明过是
+      // 漏的：横幅函数里本来就有两处 safeVersion（一处包版本号、一处包当前版本），
+      // 删掉包版本号那处，"出现过"照样成立；数次数则只会让**另一条**断言变红，
+      // 报错指向的不是真正坏掉的地方。剥完看残留，查的才是"每一次读都被包住"。
+      const unguarded = (s) => /\binfo\s*(?:&&\s*info\s*)?\.(?:version|currentVersion)\b/
+        .test(s.replace(/safeVersion\([^)]*\)/g, ''));
+
+      const bEnd = renderCode.indexOf('function hideUpdateBanner', at);
+      const banner = at > 0 && bEnd > at ? renderCode.slice(at, bEnd) : '';
+      assert(banner.length > 0 && !unguarded(banner),
+        '横幅里每一次读推过来的版本号都过白名单');
+
+      const sAt = renderCode.indexOf('async function renderUpdateStatus');
+      const status = sAt > 0 && end > sAt ? renderCode.slice(sAt, end) : '';
+      assert(status.length > 0 && !unguarded(status),
+        '设置面板那行状态文字里的版本号也过白名单');
+      assert(/\.textContent = /.test(body), '横幅文案走 textContent');
+      assert(!/innerHTML/.test(body), '横幅不用 innerHTML（版本号来自外部响应）');
+    }
+    // 请求里不许带本机标识。
+    //
+    // 这条必须写成**白名单**：枚举请求头里允许出现的字段名，多一个就红。
+    // 第一版写的是黑名单（查 machineId / os.hostname() 这类词），反向对照里
+    // 加一行 'X-Machine': require('os').hostname() 就绕过去了——黑名单只能拦
+    // 它想得到的写法，而"别往外发本机信息"这件事的反面有无穷多种拼法。
+    {
+      const at = updCode.indexOf('headers: {');
+      const end = updCode.indexOf('timeout: timeoutMs', at);
+      assert(at > 0 && end > at, '找到出网请求的请求头');
+      const hdr = at > 0 && end > at ? updCode.slice(at, end) : '';
+      const allowed = ['User-Agent', 'Accept', 'Accept-Encoding'];
+      const names = (hdr.match(/'[A-Za-z][A-Za-z-]*':/g) || []).map(s => s.slice(1, -2));
+      const extra = names.filter(n => !allowed.includes(n));
+      assert(names.length > 0 && extra.length === 0,
+        '请求头只有固定的三个字段，不带任何本机标识' + (extra.length ? '（多了: ' + extra.join(', ') + '）' : ''));
+      // UA 的内容也要是常量。带上主机名/用户名同样是本机标识，而它不会多出一个字段名。
+      assert(/userAgent: o\.userAgent \|\| 'Prompt-Flow-Manager'/.test(updCode),
+        'User-Agent 是固定常量（不拼接任何本机信息）');
+    }
+  }
+
   section('i18n 键完整性');
   const I18N = require('../src/i18n.js');
   const zhKeys = Object.keys(I18N.zh).sort();

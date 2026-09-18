@@ -62,6 +62,12 @@ function applyI18n() {
   document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
     el.placeholder = t(el.dataset.i18nPlaceholder);
   });
+  // aria-label 也要跟着语言走。纯图标按钮（✕）只有 aria-label 能告诉读屏软件
+  // 它是干什么的，写死中文的话英文用户听到的是中文——而这类问题在界面上完全
+  // 看不出来，"clone body 查残留中文"那套检查也看不到属性值。
+  document.querySelectorAll('[data-i18n-aria]').forEach(el => {
+    el.setAttribute('aria-label', t(el.dataset.i18nAria));
+  });
 }
 
 // ===== 状态 =====
@@ -1681,6 +1687,11 @@ async function openSettings() {
   const drawer = $('settings-drawer');
   drawer.classList.remove('hidden');
   renderSettingsTypes();
+  // 勾选框的真值只有一个来源：磁盘上的配置。不能只在 init 时同步一次——
+  // 用户可能在别处改过，也可能上次的写盘失败了，那时界面必须回到真实状态。
+  const chk = $('chk-update-check');
+  if (chk) chk.checked = state.config.updateCheck !== false;
+  renderUpdateStatus();
 }
 function renderSettingsTypes() {
   const list = $('types-list');
@@ -1814,6 +1825,76 @@ async function setLang(lang) {
   updateStatusInfo(t('ready'));
   if (langSaveError) toast(describeError(langSaveError), 'error');
   else toast(t('langSwitched'), 'success');
+}
+
+// ===== 升级提示 =====
+// 主进程查到新版本后会推一次（见 electron-main.js 的 runUpdateCheck），
+// 这里只负责显示。三条要点：
+//   1. 版本号一律当**纯文本**塞进 textContent，而且进界面前再过一次白名单。
+//      它来自 GitHub 的响应，主进程已经用 VERSION_RE 卡过一遍，但渲染侧不该依赖
+//      "上游一定校验过"——那种跨层信任一旦哪天上游放宽就直接变成注入点。
+//   2. 发布页地址不从这里传。open-release-page 不接收参数，URL 只存在于主进程的
+//      本地常量里（见 lib/update-check.js 的 RELEASE_PAGE_URL）。
+//   3. 关掉横幅只是关这一次显示，不写任何配置；"以后别提示这个版本"是另一个按钮。
+let updateBannerInfo = null;
+
+// 渲染侧的版本号白名单，和主进程的 VERSION_RE 同形。
+// 单独写一份而不是从主进程取：这条的意义就在于"不依赖上游"，
+// 共用一个来源等于又把判断权交回去了。
+const VERSION_DISPLAY_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+
+// 版本号过不了白名单就当没有版本号。返回 null 让调用方走"不显示"的分支，
+// 而不是显示一个可疑字符串——界面上少一行，比塞进去一段未知内容安全。
+function safeVersion(v) {
+  return typeof v === 'string' && VERSION_DISPLAY_RE.test(v) ? v : null;
+}
+
+function showUpdateBanner(info) {
+  const version = safeVersion(info && info.version);
+  if (!version) return;
+  updateBannerInfo = { version, currentVersion: safeVersion(info.currentVersion) || '' };
+  const banner = $('update-banner');
+  if (!banner) return;
+  $('update-banner-text').textContent = t('updateFound', {
+    version,
+    current: updateBannerInfo.currentVersion
+  });
+  banner.classList.remove('hidden');
+}
+
+function hideUpdateBanner() {
+  const banner = $('update-banner');
+  if (banner) banner.classList.add('hidden');
+}
+
+// 设置面板里那行状态文字。故意做成"只读的事实陈述"：当前版本、上次检查时间、
+// 有没有新版本。用户关掉开关之后这里也要如实说明不再检查，否则界面上看不出差别。
+async function renderUpdateStatus() {
+  const el = $('update-status');
+  if (!el) return;
+  let info = null;
+  try {
+    info = await api.getUpdateStatus();
+  } catch {
+    // 主进程还没起完或通道不可用：不显示比显示一个错误更合适，这只是辅助信息
+  }
+  // 两个版本号都过白名单，理由同 showUpdateBanner：这一行也是把响应内容写进界面。
+  const current = safeVersion(info && info.currentVersion) || '';
+  const latest = safeVersion(info && info.version);
+  const parts = [t('updateCurrent', { version: current })];
+  if (info && info.checkedAt) {
+    // toLocaleString 跟随系统区域设置，这里只做显示，不参与任何判断。
+    // checkedAt 是主进程自己 new Date().toISOString() 写的，不来自响应。
+    let at = info.checkedAt;
+    try { at = new Date(info.checkedAt).toLocaleString(); } catch { /* 保留 ISO 原文 */ }
+    parts.push(t('updateLastChecked', { at }));
+  } else {
+    parts.push(t('updateNever'));
+  }
+  if (info && info.updateAvailable && latest) {
+    parts.push(t('updateFound', { version: latest, current }));
+  }
+  el.textContent = parts.join(' · ');
 }
 
 // ===== 分隔条拖拽 =====
@@ -2003,6 +2084,50 @@ async function init() {
   $('btn-trash-close').onclick = () => $('trash-drawer').classList.add('hidden');
   $('btn-version-close-detail').onclick = openHistory;
   $('btn-settings-close').onclick = () => $('settings-drawer').classList.add('hidden');
+
+  // 升级检查的三个按钮 + 开关。
+  //
+  // 打开发布页不传 URL：主进程那边 open-release-page 不收参数（见 electron-main.js
+  // 的说明）。如果这里传，"发布页地址不来自响应"这条约束在最后一步就白做了。
+  $('btn-update-open').onclick = async () => {
+    try { await api.openReleasePage(); }
+    catch (e) { toast(describeError(e), 'error'); }
+  };
+  // 忽略只对这一个版本生效，下个版本照常提示。传的是主进程给的版本号，
+  // 而主进程那边会再过一次 VERSION_RE——不靠渲染进程"上游一定校验过"。
+  $('btn-update-skip').onclick = async () => {
+    if (!updateBannerInfo || !updateBannerInfo.version) { hideUpdateBanner(); return; }
+    const v = updateBannerInfo.version;
+    try {
+      await api.skipUpdateVersion(v);
+      hideUpdateBanner();
+      renderUpdateStatus();
+      toast(t('updateSkipped', { version: v }), 'success');
+    } catch (e) {
+      toast(describeError(e), 'error');
+    }
+  };
+  // 关掉横幅只是关这一次显示，不写配置。
+  $('btn-update-close').onclick = () => hideUpdateBanner();
+  // 开关：写盘失败必须把勾选框拨回去。否则界面显示"已关闭"而下次启动照样联网，
+  // 这在"我明确关掉了联网"这件事上是不能接受的偏差（配置写入失败是真实存在的，
+  // 磁盘满/文件被占用都会走到，主进程为此专门有 E_CONFIG_WRITE）。
+  $('chk-update-check').onchange = async (e) => {
+    const on = !!e.target.checked;
+    try {
+      await api.setConfig({ updateCheck: on });
+      state.config.updateCheck = on;
+      if (!on) hideUpdateBanner();
+      renderUpdateStatus();
+    } catch (err) {
+      e.target.checked = !on;
+      toast(describeError(err), 'error');
+    }
+  };
+  // 主进程查到新版本会推过来。用户没开界面时窗口可能还没加载完，
+  // 那种情况下这条推送会丢——设置面板里的 renderUpdateStatus 能补上。
+  api.onUpdateAvailable((info) => showUpdateBanner(info));
+
   $('btn-empty-trash').onclick = async () => {
     if (await confirmDialog(t('emptyTrashConfirm'))) {
       // 失败时同样要重画抽屉：删不掉的条目主进程会留在索引里，

@@ -101,6 +101,12 @@ const FRONTMATTER = require('./src/frontmatter.js');
 // 而那段兜底负责保证 console 抛不出未捕获异常。
 const logger = require('./lib/logger');
 const diagnostics = require('./lib/diagnostics');
+// 升级检查。同样不 require('electron')：版本号、是否打包、配置、env 全部传进去，
+// 出网用的 transport 也可注入，所以整套判定能用裸 node 单测（tests/update.test.js）。
+//
+// 这是本项目**唯一**主动出网的地方（另一处 shell.openExternal 由用户点击触发）。
+// 三条硬约束写在那个模块里：只读 tag_name、发布页地址是本地常量、任何失败都不抛。
+const updateCheck = require('./lib/update-check');
 // 当前菜单语言。buildMenu 只在启动和语言变化时调用（见 syncMenuLang），
 // 所以文案取值统一读这个变量，不用每个调用点都把 lang 传一遍。
 let menuLang = null;
@@ -574,7 +580,15 @@ async function loadConfig() {
     theme: 'light',
     windowBounds: { width: 1200, height: 780 },
     projectTypes: DEFAULT_PROJECT_TYPES,
-    lockedFiles: []
+    lockedFiles: [],
+    // 升级检查。默认开着，但这是本项目唯一主动出网的地方，所以必须能关：
+    // 内网/离线环境里一个连不上的请求没有意义，用户也有权不让软件自己联网。
+    // 关掉之后连请求都不发（见 updateCheck.shouldCheck 的 config-off 分支）。
+    updateCheck: true,
+    // 上次检查时刻 + 用户点过"忽略此版本"的那个版本号。两项都由主进程维护，
+    // 渲染进程只读。updateSkipVersion 只对那一个版本生效，不是"永久别提醒"。
+    updateLastCheckedAt: null,
+    updateSkipVersion: null
   };
   try {
     const cfg = JSON.parse(await fsp.readFile(CONFIG_PATH, 'utf8'));
@@ -1793,6 +1807,116 @@ async function runStartupHeal() {
     return lastHealReport;
   }
 }
+
+// ---------- 升级检查 ----------
+// 本项目此前**零**主动出网：唯一的外发是用户点击正文里的链接后 shell.openExternal。
+// 加这一条就是新开一个攻击面和一次隐私承诺，所以整段按"能不做就不做"来写：
+//
+//   1. 只查、不下载、不安装。发现新版本只提示，用户自己去发布页。
+//   2. 发布页地址是**本地常量**（updateCheck.RELEASE_PAGE_URL），不取响应里的
+//      html_url。否则 openExternal 的参数就来自外部内容了。
+//   3. 响应里唯一被采纳的字段是 tag_name，且必须过 VERSION_RE。
+//   4. 任何失败都静默：只记日志，不弹框、不 toast。用户没要求检查更新，
+//      不该因为断网/被限流看到报错。
+//   5. 可关：设置里的开关、PFM_UPDATE_CHECK=off 都能停掉。
+//   6. 请求里不带任何本机标识（没有 machine id、没有装机量统计）。
+//
+// 判定逻辑全在 lib/update-check.js，这里只负责"读配置 → 调它 → 落时间戳 → 通知窗口"。
+let lastUpdateResult = null;
+
+async function runUpdateCheck() {
+  try {
+    const config = await loadConfig();
+    const decision = updateCheck.shouldCheck({
+      packaged: app.isPackaged,
+      env: process.env,
+      config
+    });
+    lastUpdateResult = {
+      checkedAt: null,
+      reason: decision.reason,
+      updateAvailable: false,
+      version: null,
+      currentVersion: app.getVersion(),
+      url: updateCheck.RELEASE_PAGE_URL,
+      error: null
+    };
+    if (!decision.check) {
+      logger.info('[update] 本次不查更新，原因: ' + decision.reason);
+      return lastUpdateResult;
+    }
+
+    const res = await updateCheck.fetchLatest({});
+    const at = new Date().toISOString();
+    lastUpdateResult.checkedAt = at;
+
+    // 成功失败都记时间戳。只在成功时记的话，一个离网的用户每次启动都会重新发起
+    // 请求（各带 8 秒超时）；记下来就退化成"每天最多问一次"。
+    // 走 updateConfig 而不是直接 saveConfig：那边是 queueConfigWrite 串行化的
+    // 读改写，否则会和渲染进程那五个 debounce 写配置互相覆盖。
+    try {
+      await updateConfig({ updateLastCheckedAt: at });
+    } catch (e) {
+      // 配置写不进去只影响"下次什么时候再查"，不该让整次检查算失败
+      logger.error('[update] 记录检查时间失败（下次启动会再查一次）: ' + (e && e.message ? e.message : e));
+    }
+
+    if (res.error) {
+      lastUpdateResult.error = res.error;
+      logger.info('[update] 检查未完成（已忽略）: ' + res.error);
+      return lastUpdateResult;
+    }
+
+    const ev = updateCheck.evaluate({
+      latest: res.version,
+      current: app.getVersion(),
+      skipVersion: config.updateSkipVersion
+    });
+    lastUpdateResult.updateAvailable = ev.updateAvailable;
+    lastUpdateResult.version = ev.version;
+    lastUpdateResult.reason = ev.reason;
+
+    if (!ev.updateAvailable) {
+      logger.info('[update] 无需升级（' + ev.reason + '），当前 ' + app.getVersion());
+      return lastUpdateResult;
+    }
+    logger.info('[update] 发现新版本 ' + ev.version + '（当前 ' + app.getVersion() + '）');
+    // 窗口可能还没加载完或已经关掉。渲染进程侧还有 get-update-status 可以主动拉，
+    // 所以这里推送失败不需要重试。
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('update-available', {
+        version: ev.version,
+        currentVersion: app.getVersion(),
+        url: updateCheck.RELEASE_PAGE_URL
+      });
+    }
+    return lastUpdateResult;
+  } catch (e) {
+    // 这个函数是 fire-and-forget 调用的，抛出去就是没人接的 rejection。
+    logger.error('[update] 检查过程本身失败（已忽略）: ' + (e && e.stack ? e.stack : e));
+    return lastUpdateResult;
+  }
+}
+
+// 渲染进程主动查（错过推送、或用户打开设置面板时看一眼）。只读。
+ipcMain.handle('get-update-status', async () => lastUpdateResult);
+
+// 打开发布页。**不接受参数**：URL 只能是模块里的本地常量。
+// 如果这里收一个 url 参数，等于把 openExternal 的目标交给调用方，
+// 那么"发布页地址不来自响应"这条约束在最后一步就白做了。
+ipcMain.handle('open-release-page', async () => {
+  await shell.openExternal(updateCheck.RELEASE_PAGE_URL);
+  return true;
+});
+
+// 忽略某个版本。只对这一个版本生效，不是关掉检查——下一个版本照常提示。
+ipcMain.handle('skip-update-version', async (e, version) => {
+  const v = updateCheck.parseVersion(version);
+  if (!v) throw appError('E_UPDATE_BAD_VERSION', String(version == null ? '' : version).slice(0, 40));
+  await updateConfig({ updateSkipVersion: v.normalized });
+  if (lastUpdateResult) lastUpdateResult.updateAvailable = false;
+  return v.normalized;
+});
 
 // ---------- 搜索压测（PFM_SELFTEST_BENCH=<条数>） ----------
 // 搜索会遍历整个库，是唯一随规模线性变差的操作。这里生成指定条数的提示词，
@@ -3655,6 +3779,10 @@ app.whenReady().then(async () => {
     // 那时索引应该已经是修好的，否则用户先看到一屏幽灵条目再看到它们消失。
     await runStartupHeal();
     await createWindow();
+    // 升级检查故意**不 await**：它要出网，最坏情况是等满 8 秒超时，
+    // await 就等于让窗口晚 8 秒出来。runUpdateCheck 内部自己兜住所有异常，
+    // 所以这里既不会有未捕获 rejection，也不会把启动失败的锅甩给它。
+    runUpdateCheck();
   } catch (e) {
     logger.error('[bootstrap] 启动失败:', e && e.stack ? e.stack : e);
     // 至少让用户知道是哪里出了问题、数据目录在哪，而不是对着一个不存在的窗口。

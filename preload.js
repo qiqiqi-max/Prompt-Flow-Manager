@@ -46,10 +46,25 @@ const api = {
   // 里面带真实的数据目录路径（路径指错是本项目最严重那次故障的根因），
   // 所以绝不自动上传。
   exportDiagnostics: () => ipcRenderer.invoke('export-diagnostics'),
+  // 升级检查的结论。只读，主进程在启动时查一次就存着（见 runUpdateCheck）。
+  // 这里**不提供**"立刻去查一次"的方法：查更新是出网行为，触发权留在主进程，
+  // 不让渲染进程（可能正在渲染导入的第三方 .md）有办法反复驱动出网。
+  getUpdateStatus: () => ipcRenderer.invoke('get-update-status'),
+  // 打开发布页。故意不收 url 参数：地址只能是主进程里的本地常量。
+  // 收了参数就等于把 shell.openExternal 的目标交给渲染进程。
+  openReleasePage: () => ipcRenderer.invoke('open-release-page'),
+  // 忽略某个版本（只对这一个版本生效，下一版照常提示）
+  skipUpdateVersion: (version) => ipcRenderer.invoke('skip-update-version', version),
   onMenuAction: (cb) => {
     const handler = (e, action) => cb(action);
     ipcRenderer.on('menu-action', handler);
     return () => ipcRenderer.removeListener('menu-action', handler);
+  },
+  // 主进程发现新版本后推过来。返回取消订阅函数，和 onMenuAction 同一个形状。
+  onUpdateAvailable: (cb) => {
+    const handler = (e, info) => cb(info);
+    ipcRenderer.on('update-available', handler);
+    return () => ipcRenderer.removeListener('update-available', handler);
   }
 };
 

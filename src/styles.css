@@ -423,6 +423,13 @@ mark {
 .lang-toggle { display: flex; gap: 8px; }
 .lang-toggle button.btn-link.active { color: var(--primary); font-weight: 500; }
 .settings-desc { font-size: 12px; color: var(--text-muted); margin: 0 0 10px; }
+/* 设置里的开关行。label 包住 checkbox，所以点文字也能切——键盘 Tab 到 checkbox 后
+   空格同样生效，不需要额外的 keydown 处理。 */
+.settings-toggle {
+  display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;
+}
+.settings-toggle input { cursor: pointer; }
+.settings-hint { font-size: 11px; color: var(--text-muted); margin: 8px 0 0; }
 .types-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
 .type-tag {
   display: flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 10px;
@@ -463,6 +470,20 @@ mark {
 .toast.hidden { opacity: 0; pointer-events: none; }
 .toast.success { background: var(--success); color: #fff; }
 .toast.error { background: var(--danger); color: #fff; }
+
+/* ===== 升级提示条 ===== */
+/* 刻意不做成 toast：toast 1.8 秒就消失，而"有新版本"是用户可能想稍后处理的信息，
+   一闪而过等于没提示。也刻意不做成模态框：用户打开这个应用是来写提示词的，
+   不该被一个非紧急通知挡住去路。所以是右下角常驻、可手动关掉的条。 */
+.update-banner {
+  position: fixed; bottom: 18px; right: 18px; max-width: 360px;
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 12px 14px; border-radius: 8px; z-index: 150;
+  background: var(--bg); border: 1px solid var(--primary);
+  box-shadow: 0 4px 16px rgba(0,0,0,.18);
+  font-size: 13px; color: var(--text);
+}
+.update-banner-actions { display: flex; align-items: center; gap: 4px; justify-content: flex-end; }
 
 .hidden { display: none !important; }
 
