@@ -285,6 +285,34 @@ const CASES = [
     expect: /targetWin 不做兜底替换/
   },
 
+  // ---- console-message 的两套签名 ----
+  // 这一组是升 Electron 时最阴的一类：28 → 38 把事件签名从 (e, level, message)
+  // 改成单个 details 对象，level 也从整数变字符串。只认旧签名的话，新版里
+  // `level >= 2` 恒为 false，"渲染进程报错就让自检失败"这道唯一入口静默失效，
+  // 而所有测试照旧全绿——全绿恰好是症状本身。实测过：往 probe.js 里注一条
+  // console.error，修好之后自检确实 FAIL 并点出那条错误，退出码 1。
+  {
+    name: '只认旧签名的整数 level（新版里 level 是对象，恒不成立）',
+    rel: 'lib/selftest.js',
+    find: "    const d = args[0];\n    if (d && typeof d === 'object' && 'level' in d && typeof d.level === 'string') {\n      if (d.level === 'warning' || d.level === 'error') consoleErrors.push(d.message);\n      return;\n    }",
+    replace: '',
+    expect: /认新签名的字符串 level/
+  },
+  {
+    name: '只认新签名（在旧版 Electron 上又收不到报错）',
+    rel: 'lib/selftest.js',
+    find: "    const [, level, message] = args;\n    if (typeof level === 'number' && level >= 2) consoleErrors.push(message);",
+    replace: '    void args;',
+    expect: /同时认旧签名的整数 level/
+  },
+  {
+    name: '监听器整个删掉（渲染进程报错再也进不了 consoleErrors）',
+    rel: 'lib/selftest.js',
+    find: "  targetWin.webContents.on('console-message', (...args) => {",
+    replace: "  targetWin.webContents.on('console-message-DISABLED', (...args) => {",
+    expect: /找到 console-message 监听/
+  },
+
   // ---- 模块必须保持 electron-free / 不自己算路径 ----
   {
     name: '模块自己 require electron（拿到的不是主进程那份状态）',

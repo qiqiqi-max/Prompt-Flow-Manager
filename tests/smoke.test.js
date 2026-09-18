@@ -936,6 +936,23 @@ section('自检模块拆分（注入契约）');
   // 传进来的窗口不能被兜底成别的东西：`targetWin = targetWin || 某个模块级引用`
   // 就是上面那个假绿场景的落地形式。
   assert(!/targetWin\s*=\s*targetWin\s*\|\|/.test(selftestCode), 'targetWin 不做兜底替换');
+  // console-message 的两套签名都要认。Electron 36 把它从 (e, level, message)
+  // 改成只传一个 details 对象，且 level 从整数（2=warning/3=error）变成字符串。
+  //
+  // 为什么专门盯这一处：它是"渲染进程报错就让自检失败"的唯一入口。只写旧签名的话，
+  // 在新版里 level 会变成那个 details 对象，`level >= 2` 恒为 false——页面里报什么错
+  // 都收不到，自检照旧全绿。升 Electron 时这类失效不会有任何报错，只会让一道检查
+  // 静默消失，而"测试还是全绿"恰好是它的症状而不是反证。
+  {
+    const at = selftestCode.indexOf("on('console-message'");
+    const body = at === -1 ? '' : selftestCode.slice(at, at + 700);
+    assert(at > 0, '找到 console-message 监听（渲染进程报错的唯一入口）');
+    assert(/'error'/.test(body) && /'warning'/.test(body),
+      'console-message 认新签名的字符串 level（Electron 36+ 传 details 对象）');
+    assert(/typeof level === 'number'/.test(body) || /typeof\s+\w+\s*===\s*'number'/.test(body),
+      'console-message 同时认旧签名的整数 level（不赌运行时是哪个版本）');
+    assert(/consoleErrors\.push/.test(body), '两条分支都把消息收进 consoleErrors');
+  }
 
   // ---- 和其它 lib 模块同样的约定 ----
   // 自己 require('electron') 会拿到同一个模块实例，看着能用；但路径常量不行——
