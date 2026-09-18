@@ -16,6 +16,11 @@ function assert(cond, msg) {
 function section(name) { console.log('--- ' + name + ' ---'); }
 
 const mainSrc = fs.readFileSync(path.join(root, 'electron-main.js'), 'utf8');
+// 自检 / 压测 / 安全回归已经搬到 lib/selftest.js（原先占 electron-main.js 的 35%）。
+// 下面凡是查"自检里有没有某段逻辑"的断言都改读这一份，**不是**把两份源码拼起来查。
+// 拼起来的话，断言就不再关心那段代码住在哪个文件里：哪天有人把对话框桩搬回主进程、
+// 或者把生产逻辑塞进自检模块，检查照样全绿——而这次拆分的全部意义就是这条边界。
+const selftestSrc = fs.readFileSync(path.join(root, 'lib/selftest.js'), 'utf8');
 const preloadSrc = fs.readFileSync(path.join(root, 'preload.js'), 'utf8');
 const rendererSrc = fs.readFileSync(path.join(root, 'src/renderer.js'), 'utf8');
 const htmlSrc = fs.readFileSync(path.join(root, 'src/index.html'), 'utf8');
@@ -454,18 +459,18 @@ assert(!!pkg.scripts.bench, '有 npm run bench');
 
 section('对话框自动化');
 // 导出/导入四个流程要弹系统对话框，原先只能人工点
-assert(/function installSelfTestDialogStubs\(/.test(mainSrc), '有自检用的对话框桩');
-assert(/PFM_SELFTEST_DIALOGS/.test(mainSrc), '对话框桩由 PFM_SELFTEST_DIALOGS 队列驱动');
+assert(/function installSelfTestDialogStubs\(/.test(selftestSrc), '有自检用的对话框桩');
+assert(/PFM_SELFTEST_DIALOGS/.test(selftestSrc), '对话框桩由 PFM_SELFTEST_DIALOGS 队列驱动');
 assert(/process\.env\.PFM_SELFTEST === '1' && process\.env\.PFM_SELFTEST_DIALOGS/.test(mainSrc),
   '对话框桩只在自检模式生效（生产行为不变）');
 // 消息框也要能桩：confirm-unsaved 是三选一的"保存/不保存/取消"，
 // 没有桩就只能人工点，于是三条分支各自的静默坏法（取消照切、不保存却写盘、
 // 保存却没落盘）一直没有自动化覆盖。
-assert(/dialog\.showMessageBox = async/.test(mainSrc), '消息框（确认/未保存三选一）也有桩');
+assert(/dialog\.showMessageBox = async/.test(selftestSrc), '消息框（确认/未保存三选一）也有桩');
 // 按 kind 分流是必须的：文件对话框和消息框的调用时机互不相干，
 // 混在一条流水线里，插一个消息框应答就会把导出/导入四项全错位一格。
-assert(/q\.kind \? q\.kind : 'file'/.test(mainSrc), '对话框队列按 kind 分流，两类互不错位');
-assert(/Number\.isInteger\(opts\.cancelId\) \? opts\.cancelId : 0/.test(mainSrc),
+assert(/q\.kind \? q\.kind : 'file'/.test(selftestSrc), '对话框队列按 kind 分流，两类互不错位');
+assert(/Number\.isInteger\(opts\.cancelId\) \? opts\.cancelId : 0/.test(selftestSrc),
   '队列没料到的消息框按调用方的 cancelId 回退（对未保存提示＝保住草稿）');
 {
   const fnSrc = fs.readFileSync(path.join(root, 'tests/functional-smoke.js'), 'utf8');
@@ -535,7 +540,7 @@ assert(/menu\.classList\.remove\('ctx-centered'\); \/\/ 右键菜单按坐标定
 
 section('UI 点击自检');
 // 之前所有测试都直接调 IPC，绕过了 UI，所以"点了没反应"一路没被发现。
-assert(/PFM_SELFTEST_UI/.test(mainSrc), '主进程支持 UI 点击自检（PFM_SELFTEST_UI）');
+assert(/PFM_SELFTEST_UI/.test(selftestSrc), '自检模块支持 UI 点击自检（PFM_SELFTEST_UI）');
 // 这两条查的是点击逻辑本身，而它已经从主进程的模板字符串搬到了
 // src/selftest/ui.js。继续查 mainSrc 的话两条恒为假——搬代码时就是这么红的。
 // 反过来说，如果当时这两条写成"宽松匹配"，搬完还是绿的，就再也没人知道它们已经空了。
@@ -544,7 +549,7 @@ assert(/PFM_SELFTEST_UI/.test(mainSrc), '主进程支持 UI 点击自检（PFM_S
   assert(/dispatchEvent\(new MouseEvent\(type/.test(uiScriptSrc), '用真实事件序列 mousedown→mouseup→click 点击');
   assert(/r\.bottom <= window\.innerHeight \+ 1/.test(uiScriptSrc), '弹层可见性判定包含"矩形在视口内"，不只看 hidden 类');
 }
-assert(/拒绝在真实库上点/.test(mainSrc), 'UI 自检未设 PFM_DATA_DIR 时拒绝执行');
+assert(/拒绝在真实库上点/.test(selftestSrc), 'UI 自检未设 PFM_DATA_DIR 时拒绝执行');
 {
   const uiSrc = fs.readFileSync(path.join(root, 'tests/ui-smoke.js'), 'utf8');
   assert(/PFM_SELFTEST_UI/.test(uiSrc), 'test:ui 会跑 UI 点击自检');
@@ -570,7 +575,7 @@ assert(/else break;/.test(rendererSrc), '遇到顶格行才结束 flow 段');
 }
 
 section('只读体检');
-assert(/PFM_SELFTEST_READONLY/.test(mainSrc), '主进程支持只读体检（PFM_SELFTEST_READONLY）');
+assert(/PFM_SELFTEST_READONLY/.test(selftestSrc), '自检模块支持只读体检（PFM_SELFTEST_READONLY）');
 // 探测逻辑本身已经搬到 src/selftest/readonly.js（见"自检脚本是真实文件"一节），
 // 所以要查那个文件而不是主进程。查错文件的话断言只是"在 mainSrc 里找不到"，
 // 会变成永远红或者（把模式放宽后）永远绿，两种都不再指向真实行为。
@@ -588,7 +593,7 @@ assert(/PFM_SELFTEST_READONLY/.test(mainSrc), '主进程支持只读体检（PFM
 
 section('测试防护');
 // 功能自检会增删文件，必须拒绝在没有 PFM_DATA_DIR 的情况下运行
-assert(/拒绝在真实数据目录上跑/.test(mainSrc), '功能自检未设 PFM_DATA_DIR 时会拒绝执行');
+assert(/拒绝在真实数据目录上跑/.test(selftestSrc), '功能自检未设 PFM_DATA_DIR 时会拒绝执行');
 assert(fs.existsSync(path.join(root, 'tests/ui-smoke.js')), '存在 tests/ui-smoke.js');
 assert(fs.existsSync(path.join(root, 'tests/functional-smoke.js')), '存在 tests/functional-smoke.js');
 assert(!!pkg.scripts['test:fn'] && !!pkg.scripts['test:ui'], '有 test:ui / test:fn 脚本');
@@ -707,13 +712,13 @@ section('自检脚本是真实文件（不是模板字符串）');
     assert(!body.includes('\b'), f + ' 里没有退格符（\\b 少转义一层的产物）');
   }
   // 主进程只能剩下 loader 调用，不能再有内联的大段脚本
-  assert(/function loadSelfTestScript\(/.test(mainSrc), '主进程有 loadSelfTestScript');
-  assert(/loadSelfTestScript\('probe\.js'\)/.test(mainSrc), 'probe 从文件读');
-  assert(/loadSelfTestScript\('functional\.js'\)/.test(mainSrc), 'functional 从文件读');
-  assert(/loadSelfTestScript\('ui\.js'\)/.test(mainSrc), 'ui 从文件读');
+  assert(/function loadSelfTestScript\(/.test(selftestSrc), '自检模块有 loadSelfTestScript');
+  assert(/loadSelfTestScript\('probe\.js'\)/.test(selftestSrc), 'probe 从文件读');
+  assert(/loadSelfTestScript\('functional\.js'\)/.test(selftestSrc), 'functional 从文件读');
+  assert(/loadSelfTestScript\('ui\.js'\)/.test(selftestSrc), 'ui 从文件读');
   // 从 CODE_ROOT 读而不是 DATA_ROOT：这是代码资源，打包后在 asar 内，
   // 数据目录里没有这些文件（这正是当年"打包后白屏"的成因）。
-  assert(/path\.join\(CODE_ROOT, 'src', 'selftest', name\)/.test(mainSrc),
+  assert(/path\.join\(CODE_ROOT, 'src', 'selftest', name\)/.test(selftestSrc),
     '自检脚本从 CODE_ROOT 读（DATA_ROOT 里没有这些文件）');
   // 防回归：不能再把脚本写回模板字符串。
   //
@@ -721,9 +726,12 @@ section('自检脚本是真实文件（不是模板字符串）');
   // 那一种写法。反向对照当场证明它是空的：把 133 行的 ui.js 塞回主进程写成
   // `const uiScript = \`...\`;`，守卫依然全绿。而这恰好就是原来的形状。
   // 所以改成扫所有未转义反引号、按配对切出每一段模板字符串，不管它被赋给谁。
-  {
+  // 两个文件都要扫。自检那 1354 行搬进 lib/selftest.js 之后，
+  // "把脚本写回模板字符串"这个坏法的落点也跟着搬了过去——只扫 electron-main.js
+  // 的话，这条守卫会在主文件里永远绿着，而它要防的东西已经不在那里了。
+  for (const [label, src] of [['electron-main.js', mainSrc], ['lib/selftest.js', selftestSrc]]) {
     const longTemplates = [];
-    const lines = mainSrc.split('\n');
+    const lines = src.split('\n');
     let open = null;              // 当前模板字符串的起始行号
     for (let li = 0; li < lines.length; li++) {
       const line = lines[li];
@@ -740,7 +748,7 @@ section('自检脚本是真实文件（不是模板字符串）');
     // 上限取 10 行：短的内联 DOM 探测（两三行）是合理的，没必要一律禁止；
     // 但十行以上的逻辑就该是真实文件，否则又变回检查盲区。
     assert(longTemplates.length === 0,
-      '主进程里没有超过 10 行的内联脚本模板字符串' +
+      label + ' 里没有超过 10 行的内联脚本模板字符串' +
       (longTemplates.length ? '（发现：' + longTemplates.join('；') + '）' : ''));
   }
   // eslint 必须真的覆盖这个目录，否则拆文件就只是搬了个位置
@@ -774,6 +782,199 @@ section('自检脚本是真实文件（不是模板字符串）');
     assert(notInRenderer.length === 0,
       '白名单里的全局在 renderer.js 里都有顶层声明' +
       (notInRenderer.length ? '，查不到：' + notInRenderer.join(', ') : ''));
+  }
+}
+
+section('自检模块拆分（注入契约）');
+// 1354 行测试专用代码从 electron-main.js 搬进 lib/selftest.js。这一节盯的不是
+// "搬没搬"（行数一看就知道），而是**搬完之后新出现的那类故障**：
+// 主进程和模块之间多了一份手写的依赖清单，它会静默脱节。
+{
+  // 注释里原样写着 require('electron')、cacheStats、win 这些词（在解释为什么
+  // 不那样做），全文匹配会把解释当成违规代码。本仓库已经为这件事红过四次。
+  const strip = (s) => s.split(/\r?\n/).filter(l => !/^\s*(\/\/|\*)/.test(l)).join('\n');
+  const mainCode = strip(mainSrc);
+  const selftestCode = strip(selftestSrc);
+
+  // ---- 搬走了，而不是抄了一份 ----
+  // 复制比漏搬危险得多：两份会各自演化，而自检跑的是模块那份，
+  // 读主文件的人以为自己在看生效的代码。
+  for (const fn of ['installSelfTestDialogStubs', 'attachSelfTest', 'runSecurityRegression', 'loadSelfTestScript', 'runSearchBench']) {
+    assert(new RegExp('function ' + fn + '\\(').test(selftestCode), 'lib/selftest.js 里有 ' + fn);
+    assert(!new RegExp('function ' + fn + '\\(').test(mainCode), 'electron-main.js 里不再有 ' + fn + ' 的定义（是搬走，不是抄一份）');
+  }
+  // 模块只对外暴露三个入口，另外两个（runSecurityRegression / loadSelfTestScript）
+  // 是它的内部实现，不该被主进程直接调。
+  {
+    const at = selftestCode.indexOf('module.exports');
+    const line = at === -1 ? '' : selftestCode.slice(at, selftestCode.indexOf('\n', at) + 1 || undefined);
+    assert(/\binit\b/.test(line) && /runSearchBench/.test(line) &&
+           /installSelfTestDialogStubs/.test(line) && /attachSelfTest/.test(line),
+      '模块导出 init 和三个入口');
+    assert(!/runSecurityRegression/.test(line) && !/loadSelfTestScript/.test(line),
+      '模块不导出内部实现（runSecurityRegression / loadSelfTestScript）');
+  }
+
+  // ---- 三份清单必须一致 ----
+  // REQUIRED（校验用）、init 里的解构（赋值用）、主进程的调用点（传值用）。
+  // 任意两份脱节都是静默的：REQUIRED 少一项 → 校验放过 undefined；解构少一项 →
+  // 模块里那个变量永远是 undefined；调用点少一项 → 启动时才报。
+  const names = (s) => (s.match(/[A-Za-z_$][\w$]*/g) || []);
+  const REQ = (() => {
+    const at = selftestCode.indexOf('const REQUIRED = [');
+    const end = selftestCode.indexOf('];', at);
+    if (at === -1 || end === -1) return [];
+    return (selftestCode.slice(at, end).match(/'[A-Za-z_$][\w$]*'/g) || []).map(s => s.slice(1, -1));
+  })();
+  const DESTRUCT = (() => {
+    const end = selftestCode.indexOf('} = ctx);');
+    const at = end === -1 ? -1 : selftestCode.lastIndexOf('({', end);
+    if (at === -1) return [];
+    return names(selftestCode.slice(at + 2, end));
+  })();
+  const PASSED = (() => {
+    const at = mainCode.indexOf('selftest.init({');
+    const end = at === -1 ? -1 : mainCode.indexOf('});', at);
+    if (at === -1 || end === -1) return [];
+    return names(mainCode.slice(at + 'selftest.init({'.length, end));
+  })();
+  // 先卡数量：切片取空会让下面每条比较都恒真（本仓库栽过一次——锚点是注释，
+  // 剥注释之后 indexOf 变 -1，整段断言全部变成空断言还是绿的）。
+  assert(REQ.length >= 30, 'REQUIRED 清单解析到了（' + REQ.length + ' 项）');
+  assert(DESTRUCT.length >= 30, 'init 的解构清单解析到了（' + DESTRUCT.length + ' 项）');
+  assert(PASSED.length >= 30, '主进程调用点的传参清单解析到了（' + PASSED.length + ' 项）');
+  const diff = (a, b) => a.filter(x => !b.includes(x));
+  assert(diff(REQ, DESTRUCT).length === 0 && diff(DESTRUCT, REQ).length === 0,
+    'REQUIRED 与 init 解构完全一致' +
+    (diff(REQ, DESTRUCT).length ? '，REQUIRED 多：' + diff(REQ, DESTRUCT).join(', ') : '') +
+    (diff(DESTRUCT, REQ).length ? '，解构多：' + diff(DESTRUCT, REQ).join(', ') : ''));
+  assert(diff(REQ, PASSED).length === 0 && diff(PASSED, REQ).length === 0,
+    '主进程传的和模块要的完全一致' +
+    (diff(REQ, PASSED).length ? '，模块要但没传：' + diff(REQ, PASSED).join(', ') : '') +
+    (diff(PASSED, REQ).length ? '，传了但模块没声明：' + diff(PASSED, REQ).join(', ') : ''));
+  // 漏传要在启动时就报名字，而不是等自检跑到一半 undefined is not a function。
+  //
+  // 这条第一版在**全文**里查 /missing\.length/ 和 /throw new Error\(/。反向对照
+  // 证明它是空的：把 init 里那行校验整条删掉，断言照绿——因为这两个词在模块别处
+  // 也有（某个自检项自己在算 missing，requireInit 里也有 throw new Error）。
+  // 全文匹配回答的是"这个文件里有没有这两个字符串"，和"init 有没有校验"无关。
+  {
+    // init 的闭合花括号在第 0 列，而解构那行是 `  } = ctx);`（有缩进），
+    // 所以 \n} 切到的就是函数末尾，不会被内部的 } 截断。
+    const m = selftestCode.match(/function init\(ctx\) \{([\s\S]*?)\n\}/);
+    assert(!!m, '取到了 init 的函数体');
+    const body = m ? m[1] : '';
+    assert(/REQUIRED\.filter\(/.test(body) && /missing\.length/.test(body) && /\bthrow\b/.test(body),
+      'init 自己校验漏传（照 REQUIRED 逐项查并抛出）');
+    // 只抛不报名字的话，启动失败只能知道"少了东西"，不知道少哪一个——
+    // 而这正是拆分之后最可能出现的错误形态（三份清单漂移）。
+    assert(/missing\.join\(/.test(body), 'init 抛出的消息里带上缺失项的名字');
+  }
+  // 三个入口各自挡一道：没注入就跑，产出的是一堆没有意义的失败项，比直接炸更难查。
+  //
+  // 这条的第一版是 `(match(/requireInit\(/g)||[]).length >= 4`——数出现次数。
+  // 反向对照当场证明它是空的：把 requireInit 的函数体换成 `void who;`，四处文本
+  // 一个没少，断言照绿，而守卫已经形同虚设。数文本量证明不了文本在干活。
+  // 所以两头都查：定义里真的抛，且每个入口的**第一条语句**就是它
+  // （挪到后面等于前面那些活已经干完了，守卫只剩装饰作用）。
+  {
+    const def = selftestCode.match(/function requireInit\(\w+\)\s*\{([\s\S]*?)\n\}/);
+    assert(!!def, '取到了 requireInit 的定义');
+    const body = def ? def[1] : '';
+    assert(/!initialized/.test(body) && /\bthrow\b/.test(body),
+      'requireInit 未初始化时真的抛（不是空壳）');
+    for (const fn of ['runSearchBench', 'installSelfTestDialogStubs', 'attachSelfTest']) {
+      const at = selftestCode.indexOf('function ' + fn + '(');
+      const first = at === -1 ? ''
+        : (selftestCode.slice(selftestCode.indexOf('\n', at) + 1).split('\n')[0] || '');
+      assert(new RegExp("requireInit\\('" + fn + "'\\)").test(first),
+        fn + ' 的第一条语句就是 requireInit 守卫');
+    }
+  }
+
+  // ---- 可变绑定：必须共享同一个对象 ----
+  // fileReadCount / cacheHits / cacheMisses / CONTENT_CACHE_MAX 四项，主文件的
+  // 热路径在写，模块里的压测和 LRU 自检也在写。按值传进模块的话，模块清零写的是
+  // 自己那份副本，热路径继续加在原变量上——压测永远报 0 次读 0 命中，而且看不出错。
+  // 所以它们只能是同一个对象上的字段。
+  assert(REQ.includes('cacheStats'), '注入契约里有 cacheStats');
+  for (const c of ['fileReadCount', 'cacheHits', 'cacheMisses', 'CONTENT_CACHE_MAX']) {
+    assert(!REQ.includes(c), c + ' 不单独注入（按值传会写进死副本）');
+    assert(!new RegExp('^\\s*let\\s+' + c + '\\b', 'm').test(selftestCode),
+      'lib/selftest.js 没有自己声明 ' + c + '（否则改的是模块内的影子变量）');
+    assert(!new RegExp('^let\\s+' + c + '\\b', 'm').test(mainCode),
+      'electron-main.js 也不再有模块级 ' + c + '（已并入 cacheStats）');
+  }
+  // 两侧都必须通过同一个对象读写
+  assert(/cacheStats\.fileReadCount\+\+/.test(mainCode), '主进程的读计数加在 cacheStats 上');
+  assert(/contentCache\.size > cacheStats\.CONTENT_CACHE_MAX/.test(mainCode), 'LRU 上限判断读 cacheStats');
+  assert(/cacheStats\.fileReadCount = 0/.test(selftestCode), '压测清零写的是 cacheStats');
+  assert(/cacheStats\.CONTENT_CACHE_MAX = 3/.test(selftestCode), 'LRU 自检调小的也是 cacheStats');
+
+  // ---- win 不能注入 ----
+  // 它是 let，沙箱降级会重建窗口换成新实例（见 attachSandboxProbe）。注入时那个
+  // 引用之后会指向已销毁的旧窗口，而自检会对着它 executeJavaScript，
+  // 症状是自检在一个不存在的窗口上超时，跟被测功能毫无关系。
+  assert(!REQ.includes('win'), 'win 不在注入契约里（它会被重建窗口换掉）');
+  // 这条原先只切函数签名来查 win，反向对照证明它是空的：在模块里加
+  // `let win = null;` 再写 `targetWin = targetWin || win;`，签名里干干净净，
+  // 断言全绿，而模块已经重新拿到了一个会被换掉的窗口引用。
+  // 所以改成盯**整个模块**：除了 win.ini 那几个字面量，不允许出现裸的 win 标识符。
+  {
+    const winRefs = [];
+    for (const m of selftestCode.matchAll(/(?<![\w$.'"])win(?![\w$])/g)) {
+      // win.ini 是路径穿越回归用的测试数据（other + ':\\Windows\\win.ini'），
+      // 与窗口引用无关；上面的前后界已排除 .win / win_ 之类，这里再排掉 win.ini。
+      if (selftestCode.slice(m.index, m.index + 7) === 'win.ini') continue;
+      winRefs.push(selftestCode.slice(Math.max(0, m.index - 30), m.index + 20).replace(/\n/g, '\\n'));
+    }
+    assert(winRefs.length === 0,
+      '模块里没有裸的 win 引用（窗口只能由调用方逐次传入）' +
+      (winRefs.length ? '（发现 ' + winRefs.length + ' 处：' + winRefs.slice(0, 3).join(' | ') + '）' : ''));
+  }
+  assert(/function attachSelfTest\(targetWin\)/.test(selftestCode), 'attachSelfTest 的窗口由调用方传入');
+  // 传进来的窗口不能被兜底成别的东西：`targetWin = targetWin || 某个模块级引用`
+  // 就是上面那个假绿场景的落地形式。
+  assert(!/targetWin\s*=\s*targetWin\s*\|\|/.test(selftestCode), 'targetWin 不做兜底替换');
+
+  // ---- 和其它 lib 模块同样的约定 ----
+  // 自己 require('electron') 会拿到同一个模块实例，看着能用；但路径常量不行——
+  // DATA_ROOT / CODE_ROOT 的判断只允许存在一份，抄第二份的代价这个项目付过（打包版白屏）。
+  assert(!/require\(['"]electron['"]\)/.test(selftestCode), 'lib/selftest.js 不自己 require electron');
+  // 原先只查 app.getPath(，反向对照用 `process.env.PFM_DATA_DIR || __dirname`
+  // 绕过去了——那同样是第二份数据目录真值。改成白名单：数据目录只能从注入的
+  // 常量来，模块自己不许**推导**路径根。
+  // 注意 process.env.PFM_DATA_DIR 本身在模块里是合法的：四处自检用它判断
+  // "有没有隔离数据目录"（拒绝在真实库上跑）。区别在于读它做判断 vs 拿它当路径用。
+  assert(!/app\.getPath\(/.test(selftestCode), '不自己解析数据目录（DATA_ROOT 只有一处真值来源）');
+  assert(!/app\.isPackaged/.test(selftestCode), '不自己判断打包状态（路径分支只有主进程一处）');
+  {
+    const derived = (selftestCode.match(/process\.env\.PFM_DATA_DIR\s*(\|\||&&\s*path|\+)/g) || []);
+    assert(derived.length === 0,
+      'PFM_DATA_DIR 只用于判断是否隔离，不用来拼路径' +
+      (derived.length ? '（发现：' + derived.join('、') + '）' : ''));
+    // 允许的用法只有"真假判断"。逐个回查每一处都是 if (!process.env.PFM_DATA_DIR)。
+    const uses = [...selftestCode.matchAll(/process\.env\.PFM_DATA_DIR/g)];
+    const nonGuard = uses.filter(m => !/if \(!process\.env\.PFM_DATA_DIR\)/.test(
+      selftestCode.slice(Math.max(0, m.index - 20), m.index + 30)));
+    assert(uses.length >= 4 && nonGuard.length === 0,
+      'PFM_DATA_DIR 的每一处用法都是 if (!…) 形式的隔离检查（共 ' + uses.length + ' 处）');
+  }
+  // 主进程只留三个带前缀的调用点
+  assert(/selftest\.attachSelfTest\(win\)/.test(mainCode), '主进程调 selftest.attachSelfTest');
+  assert(/selftest\.runSearchBench\(/.test(mainCode), '主进程调 selftest.runSearchBench');
+  assert(/selftest\.installSelfTestDialogStubs\(\)/.test(mainCode), '主进程调 selftest.installSelfTestDialogStubs');
+  // init 必须在所有被注入的东西都定义好之后才调用。SELF_URL / isSelfUrl 是最后
+  // 定义的两个（就在导航守卫那一节），所以用它们当下界；提前调用会把 undefined
+  // 冻进模块，而 init 的非空校验恰好会当场报出来——但报的是"缺依赖"，
+  // 跟"调用点放错位置"这个真实原因隔着一层，所以这里直接盯位置。
+  {
+    const initAt = mainCode.indexOf('selftest.init({');
+    const selfUrlAt = mainCode.indexOf('const SELF_URL =');
+    const isSelfUrlAt = mainCode.indexOf('function isSelfUrl(');
+    assert(initAt > 0 && selfUrlAt > 0 && isSelfUrlAt > 0, '取到了 init 调用点与 SELF_URL/isSelfUrl 的位置');
+    assert(initAt > selfUrlAt && initAt > isSelfUrlAt,
+      'selftest.init() 在它注入的所有东西都定义之后才调用');
   }
 }
 

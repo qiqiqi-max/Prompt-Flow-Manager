@@ -105,6 +105,24 @@ if (!controlOk) {
 显式接管 `SIGINT`/`SIGTERM`（node 默认收到 SIGINT 直接终止进程，`finally` 不会跑），
 每次跑完比对 md5，收尾再确认回到基线全绿。
 
+`npm run test:reverse-split` 是同一套做法的第二个实例，盯的是「自检模块拆分」那一节
+——也就是 `lib/selftest.js` 和主进程之间那份手写的注入契约。它同样抓出了三条空断言，
+形状和上面那四条不一样，值得单列：
+
+| 空断言 | 为什么恒真 |
+|--------|-----------|
+| "三个入口都有 requireInit 守卫" | 写成 `match(/requireInit\(/g).length >= 4`——数出现次数。把 `requireInit` 的函数体换成 `void who;`，四处文本一个没少，断言照绿，而守卫已经形同虚设。**数文本量证明不了文本在干活** |
+| "attachSelfTest 不从模块作用域取 win" | 只切函数签名来查 `win`。在模块里加 `let win = null;` 再写 `targetWin = targetWin \|\| win;`，签名里干干净净，而模块已经重新持有了一个会被重建窗口换掉的引用 |
+| "不自己解析数据目录" | 只查 `app.getPath(`。改用 `process.env.PFM_DATA_DIR \|\| __dirname` 就绕过去了，而那同样是第二份 DATA_ROOT 真值来源 |
+
+第一条那个教训最通用：**断言要盯行为，不要盯符号出现的次数**。改法是两头都查——
+定义里真的 `throw`，且每个入口的第一条语句就是它（挪到后面等于前面那些活已经干完了）。
+
+还有一类失败是**用例自己写错**，不是断言空。`init 不再校验漏传` 那条的 find 串少算了
+中间夹的三行注释，`mutate` 直接报"要替换的代码没找到"——这正是它该有的行为：
+用例和代码脱节必须当失败，而不是静静跳过。所以 `mutate` 返回没命中的那条 `find`
+并打出来，绝不返回"跳过"。
+
 ## 二、测试不许碰真实数据
 
 功能类自检会真的写文件、真的改配置、真的删东西。所有这类开关都**强制**要求
@@ -135,6 +153,7 @@ npm run test:logger   # 日志滚动/脱敏 + 诊断导出（裸 node，自带�
 npm run test:sandbox  # 沙箱降级状态机（裸 node，自带两组反向对照）
 npm run test:update   # 升级检查：版本比较 + 出网约束（裸 node，自带三组反向对照）
 npm run test:reverse  # 把第一节那套流程自动化：逐条改坏源码，验证目标断言真的变红
+npm run test:reverse-split # 同上，针对「自检模块拆分」那一节的注入契约
 npm run test:all      # 以上除 packaged 外全跑
 npm run bench         # 搜索压测（临时目录）
 
