@@ -66,6 +66,11 @@ jobs:
       - name: 冒烟测试
         run: npm test
 
+      # 配色对比度与焦点可见性：只读 src/styles.css 算数，不起 Electron。
+      # 自带反向对照——拿改动前的旧配色跑同一批断言，必须红 30 对以上。
+      - name: 配色对比度与焦点可见
+        run: npm run test:contrast
+
       # 纯逻辑测试，不用起 Electron：从 renderer.js 里抠出 debounce 单独验语义。
       # 自带反向对照（旧版一行 debounce 必须失败），所以它不会变成永远绿的空壳。
       - name: debounce 语义

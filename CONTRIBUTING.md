@@ -152,6 +152,7 @@ npm run test:heal     # 启动自愈修坏数据目录（自带反向对照）
 npm run test:logger   # 日志滚动/脱敏 + 诊断导出（裸 node，自带两组反向对照）
 npm run test:sandbox  # 沙箱降级状态机（裸 node，自带两组反向对照）
 npm run test:update   # 升级检查：版本比较 + 出网约束（裸 node，自带三组反向对照）
+npm run test:contrast # 配色对比度与焦点可见性（裸 node，自带一组反向对照）
 npm run test:reverse  # 把第一节那套流程自动化：逐条改坏源码，验证目标断言真的变红
 npm run test:reverse-split # 同上，针对「自检模块拆分」那一节的注入契约
 npm run test:all      # 以上除 packaged 外全跑
@@ -191,6 +192,16 @@ npx electron --version     # 两个都要是新版本才算换成功
 
 ```bash
 ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ npm i -D electron@43.7.2
+```
+
+这条断言的反向对照是**手工**做的：它要改 `node_modules`，不适合进自动变异脚本
+——脚本中途被打断就会把错的版本号留在那里，之后每次 `npm test` 都红在一个
+看不懂的地方。要复验按这三步（第三步的版本号跟着 package.json 写）：
+
+```bash
+node -e "require('fs').writeFileSync('node_modules/electron/dist/version','38.8.6')"
+npm test   # 必须红在「装着的 electron 二进制与 package.json 一致」
+node -e "require('fs').writeFileSync('node_modules/electron/dist/version','43.7.2')"
 ```
 
 注意 `electron-builder` 打包时下的是**另一份**二进制，和 `node_modules` 里那份无关。
