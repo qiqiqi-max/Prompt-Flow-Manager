@@ -3,7 +3,7 @@
 > 一款本地优先的提示词与 AI 工作流桌面管理工具。
 
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
-[![Electron](https://img.shields.io/badge/Electron-28-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
+[![Electron](https://img.shields.io/badge/Electron-43-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)](https://github.com/qiqiqi-max/Prompt-Flow-Manager)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -38,6 +38,9 @@ Prompt Flow Manager 用于集中整理项目开发中反复使用的提示词、
 | 导入与导出 | 导入单个 Markdown 或 ZIP 备份，导出单个提示词或整个内容库 |
 | 个性化 | 明暗主题、中英文界面、自定义工程类型、可调节侧边栏 |
 | 高效操作 | 最近打开、创建副本、文件树键盘导航和常用快捷键 |
+| 启动自愈 | 启动时检查数据目录：摘掉回收站里点不动的幽灵记录、把孤立正文收养回可见状态、清掉写入中断留下的半截临时文件 |
+| 可诊断 | 运行日志滚动写入 `logs/`（单文件 2 MB、最多 5 个），设置里可导出一份脱敏的诊断信息用于报障 |
+| 升级提示 | 启动时查询 GitHub 最新发布版本并在右下角提示。只读版本号，不自动下载安装，不发送任何本机信息，设置里可完全关闭 |
 
 应用对大规模提示词库做了针对性优化：文件内容与解析结果按修改时间和大小缓存，目录树与元数据一次遍历返回，搜索时复用正文索引。项目内置的基准脚本可用于复测这些性能路径。
 
@@ -152,6 +155,7 @@ flow:
 - `templates/`：提示词模板
 - `.versions/`：版本快照
 - `.trash/`：回收站
+- `logs/`：滚动日志（`app.log` 及归档，单个 2 MB、最多 5 个，超出自动轮转）
 - `config.json`：主题、语言、窗口状态、标签页和锁定列表等设置
 
 工具栏的“导出”会把 `prompts/`、`workflows/` 和 `templates/` 打包为 ZIP。若要保留版本历史与回收站，请备份整个数据目录。
@@ -168,26 +172,38 @@ flowchart LR
 ```
 
 - Electron 渲染进程启用 `contextIsolation`，关闭 `nodeIntegration`，只通过 preload 暴露白名单 API。
+- 渲染进程默认开启 `sandbox`。极少数环境下沙箱进程起不来会整窗白屏，因此启动时若检测到
+  渲染进程无法就绪，会就地降级重建窗口并把降级原因写进日志，而不是让用户面对一片空白。
 - 页面启用内容安全策略（CSP），Markdown 预览经过 DOMPurify 清理。
 - 文件访问统一校验根目录边界，阻止路径穿越；版本文件名也经过白名单校验。
 - Markdown 中的 HTTP(S) 链接交给系统浏览器打开，其他外部协议会被拦截。
 - ZIP 导入会过滤非 Markdown 文件、限制单项大小，并对重名文件生成安全的新名称。
 - 配置写入串行化，减少多个界面状态同时保存造成的数据覆盖。
 - 正常运行采用单实例锁，避免两个进程同时修改同一个数据目录。
+- **全程只有一处出网**：启动时向 GitHub 查询最新发布版本号。请求带固定 User-Agent、8 秒超时、
+  响应体上限 256 KiB，不携带任何本机标识，失败一律静默；发布页地址是代码里的常量，
+  不取自响应内容。设置里关掉后连请求都不会发出。除此之外应用不联网。
 
 ## 开发与测试
 
 ```bash
-npm run lint          # eslint 静态检查
-npm test              # 静态约束、语法、ZIP、安全与回归检查
-npm run test:ui       # 启动真实 Electron 窗口并验证渲染及关键点击流程
-npm run test:fn       # 在临时目录执行端到端功能自检
-npm run test:tabs     # 验证重启后标签页及正文恢复
-npm run test:debounce # 验证配置写入防抖与关窗前 flush
-npm run test:close    # 验证关窗落盘握手
-npm run test:render   # 验证 markdown 渲染成本上限
-npm run test:all      # 依次运行上述全部检查
-npm run bench         # 生成 1000 条提示词并执行搜索性能基准
+npm run lint            # eslint 静态检查
+npm test                # 静态约束、语法、ZIP、安全、文档漂移与回归检查
+npm run test:ui         # 启动真实 Electron 窗口并验证渲染及关键点击流程
+npm run test:fn         # 在临时目录执行端到端功能自检
+npm run test:tabs       # 验证重启后标签页及正文恢复
+npm run test:debounce   # 验证配置写入防抖与关窗前 flush
+npm run test:close      # 验证关窗落盘握手
+npm run test:render     # 验证 markdown 渲染成本上限
+npm run test:heal       # 验证启动时的数据目录自愈
+npm run test:logger     # 验证滚动日志与诊断信息导出
+npm run test:sandbox    # 验证渲染进程沙箱及起不来时的就地降级
+npm run test:update     # 验证启动时的版本检查（超时、静默失败、可关闭）
+npm run test:contrast   # 逐对计算两套主题的配色对比度与焦点可见性
+npm run test:reverse    # 反向对照：版本检查的每个修复点撤掉都必须变红
+npm run test:reverse-split # 反向对照：自检模块拆分的每个修复点撤掉都必须变红
+npm run test:all        # 依次运行上述全部检查
+npm run bench           # 生成 1000 条提示词并执行搜索性能基准
 ```
 
 功能测试使用独立临时目录，不会读写真实提示词库。测试过程里出现的预期错误日志用于验证锁定、路径穿越和非法版本名等防护是否生效。
@@ -215,7 +231,12 @@ Prompt-Flow-Manager/
 ├── electron-main.js         # 主进程、IPC、文件与窗口管理
 ├── preload.js               # contextBridge 白名单接口
 ├── lib/
-│   └── zip-import.js        # ZIP 安全导入逻辑
+│   ├── zip-import.js        # ZIP 安全导入逻辑
+│   ├── logger.js            # 滚动文件日志
+│   ├── diagnostics.js       # 诊断信息收集与导出
+│   ├── sandbox-state.js     # 沙箱开关判定与降级记录
+│   ├── update-check.js      # 启动时查最新发布版本
+│   └── selftest.js          # 测试专用代码（不参与正常启动路径）
 ├── src/
 │   ├── index.html           # 应用界面骨架
 │   ├── styles.css           # 主题与组件样式
