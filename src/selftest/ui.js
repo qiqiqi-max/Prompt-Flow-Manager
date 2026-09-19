@@ -96,7 +96,11 @@
 
       // ---- 文件树键盘导航 ----
       // 注意：导航只在文件行之间进行（.tree-row.file），当前项的类名是 active
-      const fileRows = Array.from(document.querySelectorAll('#tree .tree-row.file'));
+      // 起点必须挑真的看得见的行。折叠目录里的行用 JS 照样点得开，但它们不在
+      // 导航序列里，从那种行起步的话下面"切回上一个"会落到序列另一头（实测：
+      // 起点是折叠着的 prompts/code-generation 里的文件，ArrowUp 直接绕到末尾）。
+      const fileRows = Array.from(document.querySelectorAll('#tree .tree-row.file'))
+        .filter(r => r.offsetParent !== null);
       if (fileRows.length > 1) {
         const tree = document.getElementById('tree');
         await realClick(fileRows[0]);
@@ -115,6 +119,54 @@
           String(state.currentRel) + ' 应为 ' + String(firstRel));
       } else {
         check('文件树里有多于一个文件行可供导航', false, '只有 ' + fileRows.length + ' 个文件行');
+      }
+
+      // ---- 方向键不许跳进折叠起来的目录 ----
+      // 折叠用的是 .tree-children 上的 hidden 类，而不是行内 display:none。
+      // 导航如果按 style 属性判可见性，折叠目录里的文件仍在序列里，
+      // 方向键会 focus + click 打开一个屏幕上看不见的文件。
+      {
+        const tree = document.getElementById('tree');
+        // 挑一个当前展开、且里面有可见文件行的目录，把它折叠掉
+        let collapsedKids = null;
+        for (const dirRow of document.querySelectorAll('#tree .tree-row.dir')) {
+          const kids = dirRow.nextElementSibling;
+          if (!kids || !kids.classList.contains('tree-children')) continue;
+          if (kids.classList.contains('hidden')) continue;
+          const inside = Array.from(kids.querySelectorAll('.tree-row.file'));
+          if (!inside.length) continue;
+          // 折叠之前先把当前选中项移到这个目录之外，否则起点本身就在折叠区里
+          const outside = Array.from(document.querySelectorAll('#tree .tree-row.file'))
+            .filter(r => !inside.includes(r));
+          if (!outside.length) continue;
+          await realClick(outside[0]);
+          await sleep(250);
+          await realClick(dirRow);
+          await sleep(250);
+          if (inside.every(r => r.offsetParent === null)) collapsedKids = inside;
+          break;
+        }
+
+        // 这条无论成败都要报出来：它是下面那条断言的前提。
+        // 只在失败时 check() 的话，"前提没建立起来"和"根本没跑到这里"在输出里
+        // 长得一模一样，而 tests/ui-smoke.js 就没法要求它必须出现。
+        check('能折叠一个带文件的目录用于验证', !!collapsedKids,
+          collapsedKids ? '折叠了 ' + collapsedKids.length + ' 个文件行' : '没找到合适的目录，或折叠后子行仍然可见');
+        if (collapsedKids) {
+          // 沿着整圈走一遍。每走一步，当前选中的行都必须是真的看得见的行。
+          const visibleCount = Array.from(document.querySelectorAll('#tree .tree-row.file'))
+            .filter(r => r.offsetParent !== null).length;
+          const landed = [];
+          tree.focus();
+          for (let i = 0; i < visibleCount + 2; i++) {
+            tree.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+            await sleep(120);
+            const active = document.querySelector('#tree .tree-row.file.active');
+            if (active && active.offsetParent === null) landed.push(active.__rel || '?');
+          }
+          check('方向键不会跳进折叠目录里看不见的文件', landed.length === 0,
+            landed.length ? '落到了隐藏行：' + landed.slice(0, 3).join(', ') : '走了 ' + (visibleCount + 2) + ' 步都落在可见行上');
+        }
       }
 
       // ---- 右键菜单 ----

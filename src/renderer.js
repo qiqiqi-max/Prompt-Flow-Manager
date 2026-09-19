@@ -392,7 +392,13 @@ function renderTree() {
   root.onkeydown = (e) => {
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();
-      const rows = Array.from(root.querySelectorAll('.tree-row.file:not([style*="display: none"])'));
+      // 可见性按渲染结果判定，不去匹配 style 属性里的字符串。
+      // 原先是 :not([style*="display: none"])，只认得 applyFilter() 写的行内样式；
+      // 目录折叠用的是 .tree-children 上的 hidden 类（class，不是行内样式），
+      // 于是折叠目录里的文件仍然留在导航序列里，方向键会聚焦并 click 打开
+      // 一个屏幕上根本看不见的文件——看上去像"按一下方向键就跳到别处去了"。
+      // offsetParent 为 null 同时覆盖这两种隐藏方式（display:none 的元素没有 offsetParent）。
+      const rows = Array.from(root.querySelectorAll('.tree-row.file')).filter(r => r.offsetParent !== null);
       if (!rows.length) return;
       const current = root.querySelector('.tree-row.file.active') || root.querySelector('.tree-row.file:focus-within');
       let idx = current ? rows.indexOf(current) : -1;
