@@ -1039,6 +1039,39 @@ section('文档与代码一致');
     .map(([name, p]) => [name, fs.readFileSync(p, 'utf8')]);
 
   const pkgScripts = Object.keys(JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).scripts || {});
+
+  // 文档里有一类路径**故意**不在仓库里：装依赖或构建之后才生成的东西。
+  // `node_modules/electron/dist/version` 就是——「升级了 Electron 但跑的还是旧二进制」
+  // 那条坑必须指名这个文件，否则读者不知道去哪核对。它被 .gitignore 排除，
+  // 本地装了依赖所以存在，CI 上 npm ci 不解压二进制就不存在，于是同一份文档
+  // 本地绿、CI 红（这条 CI 只在 push main / PR 时跑，所以隔了几个提交才暴露）。
+  //
+  // 放行规则限定成「被 git 忽略的生成物」，不是按文件名开白名单：
+  // 后者每加一个路径就要改一次测试，迟早有人图省事把真实笔误也加进去。
+  const IGNORED_PREFIXES = ['node_modules/', 'dist/', 'logs/', '.versions/', '.trash/'];
+  const missingDocPaths = (src) => {
+    const found = new Set();
+    for (const m of src.matchAll(/`([\w.-]+(?:\/[\w.*-]+)+)`/g)) found.add(m[1]);
+    return [...found].filter(p =>
+      !p.includes('*') &&
+      !IGNORED_PREFIXES.some(pre => p.startsWith(pre)) &&
+      !fs.existsSync(path.join(root, p)));
+  };
+
+  // 上面放宽了检查，所以这里必须证明它没被放宽成筛子：
+  // 仓库里真实存在的路径照旧要能查（不是无条件放行），
+  // 而一个编造的路径必须被抓出来 —— 包括编在放行前缀**之外**的笔误。
+  // 少了这条，把 IGNORED_PREFIXES 写成 [''] 都照样全绿。
+  assert(missingDocPaths('`src/renderer.js` `lib/selftest.js`').length === 0,
+    '路径守卫不会误伤真实存在的路径');
+  assert(missingDocPaths('`src/nope-not-real.js`').length === 1,
+    '路径守卫仍能抓出编造的路径（放宽后没变成筛子）');
+  // 故意用一个**确定不存在**的 node_modules 路径。写 dist/version 的话，
+  // 本地它真的在，这条就分不清"被前缀放行"和"因为文件存在才过"——
+  // 本地绿而 CI 红的正是后者，那样等于没测。
+  assert(missingDocPaths('`node_modules/electron/dist/nope-xyz`').length === 0,
+    '装依赖后才生成的路径被放行（CI 上没有它也不该红）');
+
   for (const [name, src] of docs) {
     // `npm run x` 和 `npm test`（后者没有 run）
     const cited = new Set();
@@ -1056,11 +1089,9 @@ section('文档与代码一致');
     // 运行时文件（.trash/index.json，仓库里本来就不该有）。
     // 带斜杠的路径才是"读者会照着去打开"的断言，裸文件名是行文简称，
     // 强行校验只会逼着把散文改成路径，读起来更差。
-    const paths = new Set();
-    for (const m of src.matchAll(/`([\w.-]+(?:\/[\w.*-]+)+)`/g)) paths.add(m[1]);
-    const badPaths = [...paths].filter(p => !p.includes('*') && !fs.existsSync(path.join(root, p)));
+    const badPaths = missingDocPaths(src);
     assert(badPaths.length === 0,
-      name + ' 引用的文件路径都存在' + (badPaths.length ? '，查不到：' + badPaths.join(', ') : '（' + paths.size + ' 个）'));
+      name + ' 引用的文件路径都存在' + (badPaths.length ? '，查不到：' + badPaths.join(', ') : ''));
 
     // 自我复制：CLAUDE.md 曾经把整篇文档插进自己第 7 条的正中间（首个 H1 出现两次），
     // 结果那一条的句子被截断成半句，读的人只会以为是笔误。
