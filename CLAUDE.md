@@ -8,7 +8,9 @@ Prompt Flow Manager 是一个 Electron 桌面应用，用于管理项目开发�
 
 ## 技术栈
 
-- **运行时**：Electron ^28 / Node.js
+- **运行时**：Electron 43.7.2（内置 Node 24 / Chromium 150），版本在 package.json 里**锁死到确定版本**，
+  不写 `^`：`npm test` 会拿 `node_modules/electron/dist/version` 和声明值逐字比，不一致直接红。
+  原因见「踩过的坑」第 10 条。
 - **前端**：原生 HTML/CSS/JS（无框架）。marked（Markdown 预览）、DOMPurify（XSS 清洗）、diff-match-patch（版本对比）
 - **打包**：electron-builder → Windows portable exe
 - **运行时依赖只有两个**：archiver（导出压缩）、yauzl（导入解压）。渲染进程的三个库以构建产物形式放在 `src/vendor/`，属开发依赖。
@@ -252,3 +254,14 @@ npm run test:all # lint + 静态 + UI + 功能 + 标签恢复 + 防抖 + 关窗 
    并且弹层"可见"的判定必须包含"矩形落在视口内"，不能只看 hidden 类。
 9. **一条 console.log 能把应用打挂**：stdout 读取端消失后写入抛 EPIPE，
    主进程未捕获异常触发 Electron 错误弹窗。→ 给 stdout/stderr 挂 error 处理。
+10. **升级了 Electron，但跑的还是旧二进制，而且全绿**：`npm i -D electron@43` 只换了包，
+    二进制解压是 electron 自己的 `install.js` 干的，它开头的 `isInstalled()` 看到旧 `dist/`
+    还在就直接 return。于是 package.json 写着 43，`test:ui` / `test:fn` 拉起的是 38，
+    所有测试照常通过 —— 升级等于没做，结论却是"通过"。28→38→43 这轮真的这么绿过一次，
+    是手敲 `electron --version` 才发现的。→ `npm test` 增加二进制一致性断言（见上面「技术栈」）。
+11. **Electron 36 改了 `console-message` 的签名，静默杀掉一整道检查**：旧签名是
+    `(e, level, message)` 且 level 是整数（2=warning、3=error），新签名只传一个
+    `details` 对象、level 是字符串。这个监听器是"渲染进程报错就让自检失败"的**唯一**入口，
+    签名变了之后 `level >= 2` 恒为 false，页面里报什么错都收集不到，自检永远全绿。
+    → `lib/selftest.js` 里两套签名都认，不赌运行时是哪个版本；`npm test` 有断言卡住两条分支都在。
+    **这类"检查还在、但已经失效"的失效没有任何报错，全绿是症状而不是反驳。**

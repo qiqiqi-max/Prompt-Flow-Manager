@@ -53,7 +53,7 @@
   "devDependencies": {
     "diff-match-patch": "1.0.5",
     "dompurify": "3.4.14",
-    "electron": "38.8.6",
+    "electron": "43.7.2",
     "electron-builder": "^24.9.1",
     "eslint": "9.39.1",
     "marked": "11.2.0"

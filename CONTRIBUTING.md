@@ -169,6 +169,33 @@ npm run test:packaged # 对打包产物跑自检（必须先 dist）
 改了打包相关的东西（`build.files`、路径解析、`ensureSeedData`），必须跑一次
 `npm run dist && npm run test:packaged`。
 
+### 换 Electron 版本：先确认二进制真的换了
+
+`npm i -D electron@<版本>` **不保证**二进制跟着换。二进制的下载解压是 electron 包
+自己的 `install.js` 干的，它开头的 `isInstalled()` 看到旧 `node_modules/electron/dist/`
+还在就直接 return，退出码 0、一句话都不说。结果是 package.json 写着新版本，
+`test:ui` / `test:fn` 拉起的还是旧二进制，而所有测试照常全绿。
+
+`npm test` 现在有断言逐字比对 `node_modules/electron/dist/version` 和 package.json 的声明值，所以这条
+不会再静默通过（版本必须锁成确定版本，不能带 `^`，否则没法逐字比）。换版本的动作：
+
+```bash
+rm -rf node_modules/electron/dist
+npm i -D electron@43.7.2
+node -e "console.log(require('fs').readFileSync('node_modules/electron/dist/version','utf8'))"
+npx electron --version     # 两个都要是新版本才算换成功
+```
+
+下载卡住时走镜像。GitHub 的 release 主机在国内经常直接 504（实测三次重试全是
+`HTTPError: Response code 504`，手敲 curl 25 秒只下来 863KB）：
+
+```bash
+ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ npm i -D electron@43.7.2
+```
+
+注意 `electron-builder` 打包时下的是**另一份**二进制，和 `node_modules` 里那份无关。
+所以"打包产物是新版本"和"跑测试用的是新版本"是两件独立的事，得分别确认。
+
 ### 自检开关
 
 | 环境变量 | 作用 | 要求 |

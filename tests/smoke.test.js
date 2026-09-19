@@ -79,6 +79,34 @@ for (const dep of ['dompurify', 'marked', 'diff-match-patch']) {
   assert(/^\d+\.\d+\.\d+$/.test(range), dep + ' 锁定到确定版本（当前 ' + range + '）');
 }
 assert(!!(pkg.engines && pkg.engines.node), '声明了 engines.node');
+// electron 同样锁死到确定版本，理由比上面三个库更硬：它决定 Chromium 与 Node 的
+// 版本，而主进程/渲染进程的事件签名跟着大版本变（console-message 就在 36 变过，
+// 见 lib/selftest.js 里那处注释）。^28 那种范围写法下，两台机器 npm install
+// 出来的运行时可以不是一个大版本。
+assert(/^\d+\.\d+\.\d+$/.test((pkg.devDependencies || {}).electron || ''),
+  'electron 锁定到确定版本（当前 ' + ((pkg.devDependencies || {}).electron || '无') + '）');
+// 装在 node_modules 里的那个二进制必须和声明的版本一致。
+//
+// 为什么非要有这一条：升级时 npm 把包换成新版本，但二进制的解压是 electron 自己的
+// install.js 干的，它开头的 isInstalled() 会在旧 dist/ 还在时直接 return。于是
+// package.json 写着新版本，test:ui / test:fn 实际拉起的还是**旧二进制**，
+// 而所有测试照旧全绿——升级等于没升，测试却给了通过的结论。
+// 这次 28→38→43 的升级就真的这么绿过一轮（声明 43.7.2，跑的是 38.8.6），
+// 是手动敲 `electron --version` 才发现的，没有任何一条断言拦住它。
+{
+  const distVer = path.join(root, 'node_modules', 'electron', 'dist', 'version');
+  const declared = (pkg.devDependencies || {}).electron || '';
+  if (fs.existsSync(distVer)) {
+    const installed = fs.readFileSync(distVer, 'utf8').trim().replace(/^v/, '');
+    assert(installed === declared,
+      '装着的 electron 二进制与 package.json 一致（声明 ' + (declared || '无') +
+      '，实际 ' + installed + '）');
+  } else {
+    // 没装二进制的环境（只跑静态检查）不该因此变红。这里不发 PASS——
+    // 假绿比没有更糟；打一行说明就够了，真要跑起来时 test:ui/test:fn 会自己报错。
+    console.log('  – 未安装 electron 二进制，跳过版本一致性检查（test:ui/test:fn 会另行报错）');
+  }
+}
 
 section('JS 语法检查');
 const jsFiles = [
