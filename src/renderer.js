@@ -90,7 +90,8 @@ const state = {
   recent: [],                // 最近打开列表（存 rel，最多10条）
   lockedFiles: new Set(),     // 锁定文件集合（防止误删）
   tabs: [],                   // 多标签页：[{rel, content, meta, scroll}]
-  activeTab: null             // 当前激活标签的 rel
+  activeTab: null,            // 当前激活标签的 rel
+  fillMemory: {}              // 占位符填充记忆：token 原文 -> 上次填的值（见 rememberFillValues）
 };
 
 // ===== 工具 =====
@@ -201,8 +202,9 @@ function parseWorkflowFlow(content) {
     }
   }
   if (cur) steps.push(cur);
-  // 归一化 next：字符串 → 单元素数组；YAML 数组 [a, b] → 数组
+  // 归一化 next 与 prompt 路径（Windows 反斜杠统一转正斜杠）
   for (const s of steps) {
+    if (s.prompt) s.prompt = String(s.prompt).replace(/\\/g, '/');
     if (s.next == null || s.next === '') {
       s.next = [];
     } else if (Array.isArray(s.next)) {
@@ -595,9 +597,11 @@ function renderTabs() {
   bar.classList.remove('hidden');
   const closeLabel = t('close');
   bar.innerHTML = state.tabs.map(tab => {
-    const title = (tab.meta && tab.meta.title) || fileNameNoExt(tab.rel.split('/').pop());
+    let title = (tab.meta && tab.meta.title) || fileNameNoExt(tab.rel.split('/').pop());
+    const isCurrentDirty = tab.rel === state.activeTab && isDirty();
+    if (isCurrentDirty) title += ' *';
     const active = tab.rel === state.activeTab;
-    return `<div class="tab ${active ? 'active' : ''}" data-rel="${escapeHtml(tab.rel)}" title="${escapeHtml(tab.rel)}">
+    return `<div class="tab ${active ? 'active' : ''}${isCurrentDirty ? ' dirty' : ''}" data-rel="${escapeHtml(tab.rel)}" title="${escapeHtml(tab.rel)}">
       <span class="tab-title">${escapeHtml(title)}</span>
       <button class="tab-close" data-close="${escapeHtml(tab.rel)}" title="${escapeHtml(closeLabel)}">✕</button>
     </div>`;
@@ -755,12 +759,31 @@ function renderContent() {
 }
 
 function renderPromptPreview() {
+  if (flowResizeObserver) { flowResizeObserver.disconnect(); flowResizeObserver = null; }
   $('editor-wrap').classList.add('hidden');
   $('preview-wrap').classList.remove('hidden');
   const { body } = parseFrontmatter(state.currentContent);
   const preview = $('preview');
   preview.innerHTML = renderMarkdown(body);
   enhanceCodeBlocks(preview);
+
+  // 若含 {{include: ...}}，异步解析并刷新预览（带切文件守卫）
+  if (INCLUDES.hasInclude(body)) {
+    const rel = state.currentRel;
+    INCLUDES.resolveAsync(body, async (r) => {
+      try {
+        const res = await api.readFile(r);
+        return res ? res.content : null;
+      } catch {
+        return null;
+      }
+    }).then(resolved => {
+      if (state.currentRel === rel && !state.editMode) {
+        preview.innerHTML = renderMarkdown(resolved);
+        enhanceCodeBlocks(preview);
+      }
+    });
+  }
 }
 
 function renderWorkflowPreview() {
@@ -775,20 +798,88 @@ function renderWorkflowPreview() {
   }
   preview.innerHTML = flowHtml + renderMarkdown(body);
   enhanceCodeBlocks(preview);
-  // 绑定节点点击跳转
+  // 绑定节点点击跳转。
+  //
+  // 坏节点不再往 openFile 里送。原先无论引用在不在都直接 openFile(p)，
+  // 失败落到 openFile 的 catch，弹的是 openFailed —— "打开失败"。
+  // 那句话把"这个工作流引用的文件已经不在了"说成了"软件出问题了"，
+  // 用户拿到的信息指向错误的方向。现在直接说清坏在哪。
   preview.querySelectorAll('.flow-node').forEach(n => {
     n.addEventListener('click', () => {
+      if (n.dataset.broken) {
+        toast(n.getAttribute('title') || t('flowRefMissingTitle'), 'error');
+        return;
+      }
       const p = n.dataset.prompt;
       if (p) openFile(p);
     });
   });
   // 布局后绘制连线（等一帧，确保 DOM 已布局出尺寸）
   requestAnimationFrame(drawFlowEdges);
+  if (flowResizeObserver) {
+    flowResizeObserver.disconnect();
+    flowResizeObserver = null;
+  }
+  const canvas = preview.querySelector('.flow-canvas');
+  if (canvas && typeof ResizeObserver !== 'undefined') {
+    flowResizeObserver = new ResizeObserver(() => {
+      requestAnimationFrame(drawFlowEdges);
+    });
+    flowResizeObserver.observe(canvas);
+  }
+}
+
+// 体检一个工作流的引用完整性。返回 { issues: Map<stepId, issue>, count }。
+//
+// 为什么要有这个：坏引用在界面上和正常节点长得**一模一样**。
+//   - prompt 指向的文件被改名或删除 → 节点照常画出来，点下去才报"打开失败"，
+//     用户以为是软件的问题，而不是"这个工作流引用的文件已经不在了"。
+//   - next 写错一个 id → drawFlowEdges 那边是 `if (byId.has(n))`，那条线
+//     静默消失，节点还留在原地。图看起来只是"少画了一根线"，笔误无人发现。
+// 两种情况都不报错、不留痕，只是悄悄变得不对，所以必须在渲染时主动查一遍。
+//
+// 引用是否存在直接查 state.metaByRel（refreshTree 已经把全库元数据拉下来了，
+// 见 setMetaList），不走 IPC：这条路径在每次渲染工作流时都会跑，
+// 为此再发一轮文件存在性查询是白花的往返开销。
+function auditFlowRefs(steps) {
+  const ids = new Set(steps.map(s => s.id).filter(Boolean));
+  const issues = new Map();
+  for (const s of steps) {
+    const issue = {};
+    if (!s.prompt) {
+      issue.noPrompt = true;
+    } else if (!state.metaByRel.has(s.prompt)) {
+      issue.missingFile = s.prompt;
+    }
+    // next 指向不存在的步骤。空 next 是正常的（末步），不算问题。
+    const badNext = s.next.filter(n => !ids.has(n));
+    if (badNext.length) issue.missingNext = badNext;
+    if (Object.keys(issue).length) issues.set(s.id, issue);
+  }
+  // count 按"问题条数"算而不是"坏节点数"：一个节点可能同时缺文件和写错 next，
+  // 汇总里说"有 2 处失效"比"有 1 个坏节点"更贴近用户要修的工作量。
+  let count = 0;
+  for (const issue of issues.values()) {
+    if (issue.noPrompt) count++;
+    if (issue.missingFile) count++;
+    if (issue.missingNext) count += issue.missingNext.length;
+  }
+  return { issues, count };
+}
+
+// 把一个 issue 拼成人话。节点 title 和点击后的 toast 共用，保证两处说法一致。
+function flowIssueText(issue) {
+  const parts = [];
+  if (issue.noPrompt) parts.push(t('flowNoPrompt'));
+  if (issue.missingFile) parts.push(t('flowMissingFile', { path: issue.missingFile }));
+  if (issue.missingNext) parts.push(t('flowMissingNext', { ids: issue.missingNext.join(', ') }));
+  return parts.join('\n');
 }
 
 // 分支流程图：拓扑分层 + SVG 连线
 function renderFlowDiagram(steps, title) {
   const byId = new Map(steps.map(s => [s.id, s]));
+  const audit = auditFlowRefs(steps);
   // 入度计算
   const indeg = new Map(steps.map(s => [s.id, 0]));
   for (const s of steps) {
@@ -836,13 +927,22 @@ function renderFlowDiagram(steps, title) {
   for (const s of steps) layers[level.get(s.id) || 0].push(s);
   // 渲染：逐层横向，层内节点等高排列；连线由 drawFlowEdges 绘制
   let html = `<div class="flow-diagram"><div class="flow-title">${escapeHtml(t('flowDiagram'))}${title ? escapeHtml(t('sep')) + escapeHtml(title) : ''}</div>`;
+  // 有坏引用就在图上方挂一条汇总。单个节点的 ⚠ 要悬停才看得见，
+  // 而"这个工作流有问题"这件事应该一眼就能发现。
+  if (audit.count) {
+    html += `<div class="flow-warn" role="status">⚠ ${escapeHtml(t('flowBrokenSummary', { count: audit.count }))}</div>`;
+  }
   html += `<div class="flow-canvas">`;
   html += `<svg class="flow-edges" xmlns="http://www.w3.org/2000/svg"></svg>`;
   for (let lv = 0; lv < layers.length; lv++) {
     html += `<div class="flow-layer" data-level="${lv}">`;
     for (const s of layers[lv]) {
       const label = s.label || s.id || t('flowStep');
-      html += `<div class="flow-node" data-id="${escapeHtml(s.id || '')}" data-prompt="${escapeHtml(s.prompt || '')}" data-label="${escapeHtml(label)}">${escapeHtml(label)}</div>`;
+      const bad = audit.issues.get(s.id);
+      // data-broken 同时给两个用途：CSS 画虚线框，点击处理器据此换掉报错文案。
+      const brokenAttr = bad ? ` data-broken="1" title="${escapeHtml(flowIssueText(bad))}"` : '';
+      const mark = bad ? `<span class="flow-node-warn" aria-hidden="true">⚠</span>` : '';
+      html += `<div class="flow-node${bad ? ' broken' : ''}" data-id="${escapeHtml(s.id || '')}" data-prompt="${escapeHtml(s.prompt || '')}" data-label="${escapeHtml(label)}"${brokenAttr}>${escapeHtml(label)}${mark}</div>`;
     }
     html += `</div>`;
   }
@@ -858,6 +958,7 @@ function renderFlowDiagram(steps, title) {
 }
 
 let flowEdges = [];
+let flowResizeObserver = null;
 
 // 在 flow-canvas 内根据节点位置绘制 SVG 贝塞尔连线（布局后调用）
 function drawFlowEdges() {
@@ -866,6 +967,7 @@ function drawFlowEdges() {
   const svg = canvas.querySelector('.flow-edges');
   if (!svg) return;
   const cRect = canvas.getBoundingClientRect();
+  if (!cRect.width || !cRect.height) return;
   const nodes = new Map();
   canvas.querySelectorAll('.flow-node').forEach(n => {
     const r = n.getBoundingClientRect();
@@ -906,8 +1008,22 @@ function isDirty() {
 }
 
 function markDirtyIndicator() {
+  const dirty = isDirty();
   const btn = $('btn-edit');
-  if (btn) btn.textContent = isDirty() ? t('editing') + ' *' : t('editing');
+  if (btn) btn.textContent = dirty ? t('editing') + ' *' : t('editing');
+  if (state.activeTab) {
+    const selector = window.CSS && CSS.escape ? `.tab[data-rel="${CSS.escape(state.activeTab)}"]` : `.tab[data-rel="${state.activeTab.replace(/["\\]/g, '\\$&')}"]`;
+    const tabNode = document.querySelector(selector);
+    if (tabNode) {
+      tabNode.classList.toggle('dirty', dirty);
+      const titleEl = tabNode.querySelector('.tab-title');
+      if (titleEl) {
+        const tab = state.tabs.find(t => t.rel === state.activeTab);
+        const baseTitle = (tab && tab.meta && tab.meta.title) || fileNameNoExt(state.activeTab.split('/').pop());
+        titleEl.textContent = dirty ? baseTitle + ' *' : baseTitle;
+      }
+    }
+  }
 }
 
 async function enterEditMode() {
@@ -1028,23 +1144,156 @@ async function saveCurrent() {
 }
 
 // ===== 复制 =====
-async function copyContent() {
-  if (!state.currentRel) return;
-  const { body } = parseFrontmatter(state.currentContent);
+// 写剪贴板。navigator.clipboard 在权限被拒或非安全上下文下会抛，
+// 所以保留 textarea + execCommand 的兜底。抽成函数是因为现在有两个调用点
+// （原样复制、填完占位符再复制），两边的兜底必须是同一套。
+async function writeClipboard(text) {
   try {
-    await navigator.clipboard.writeText(body);
-    toast(t('copySuccess'), 'success');
+    await navigator.clipboard.writeText(text);
   } catch {
-    // fallback
     const ta = document.createElement('textarea');
-    ta.value = body;
+    ta.value = text;
     document.body.appendChild(ta);
     ta.select();
     document.execCommand('copy');
     document.body.removeChild(ta);
-    toast(t('copied'), 'success');
   }
 }
+
+// 复制正文。正文里有 [占位符] 就先弹面板让用户填。
+//
+// templates/prompt-template.md 从一开始就用 [提示文字] 标出"这里要换成你的内容"，
+// 但复制一直是原样进剪贴板，用户粘到对话框里再手改一遍。这个面板把那一步
+// 挪到复制之前——约定本来就在，只是一直没有实现它的代码。
+//
+// 必须先 parseFrontmatter 再扫：PLACEHOLDERS 不认识 yaml，把整个文件喂进去的话
+// `tags: [编码, 实现]` 看起来就是个占位符，填进去会把 frontmatter 改坏
+// （见 src/placeholders.js 文件头）。
+//
+// 返回是否真的复制了。调用点靠这个返回值决定要不要给"已复制"的反馈——
+// 取消也闪一下"已复制"的话，那句反馈就是假的。
+async function copyContent() {
+  if (!state.currentRel) return false;
+  let { body } = parseFrontmatter(state.currentContent);
+  if (INCLUDES.hasInclude(body)) {
+    body = await INCLUDES.resolveAsync(body, async (r) => {
+      try {
+        const res = await api.readFile(r);
+        return res ? res.content : null;
+      } catch {
+        return null;
+      }
+    });
+  }
+  const tokens = PLACEHOLDERS.extract(body);
+  // 没有占位符就保持原来的一步到位。为此多弹一个空面板只是多一次点击。
+  if (!tokens.length) {
+    await writeClipboard(body);
+    toast(t('copySuccess'), 'success');
+    return true;
+  }
+  const values = await promptFillPlaceholders(tokens);
+  if (values === null) return false;   // 取消：不碰剪贴板
+  const filled = PLACEHOLDERS.fill(body, values);
+  rememberFillValues(values);
+  const count = tokens.filter(it => String(values[it.token] == null ? '' : values[it.token]).trim()).length;
+  await writeClipboard(filled);
+  toast(count ? t('fillDone', { count }) : t('copySuccess'), 'success');
+  return true;
+}
+
+// 占位符填充面板。每个占位符一行输入框，标签是方括号里的文字。
+//
+// resolve 三种值，调用方据此分三路：
+//   null  取消（Esc、点外面、hideCtxMenu 兜底）—— 不复制
+//   {}    "直接复制原文" —— 所有 token 原样保留，等于旧行为
+//   对象   token -> 用户填的值
+//
+// 必须登记 pendingPromptDone。三条外部关闭路径（点弹层外面、Esc、hideCtxMenu）
+// 都只负责把弹层藏起来，不登记的话这个 await 永远等不到结算，整个复制流程卡死
+// （见 settlePendingPrompt 上方的说明，promptInput 当年就是踩了这个）。
+function promptFillPlaceholders(tokens) {
+  return new Promise(resolve => {
+    const menu = $('ctx-menu');
+    const rows = tokens.map((it, i) => {
+      // 上次填过的值预填。hint 为空（`[]` 之类）时退回显示 token 本身，
+      // 否则标签是一片空白，用户不知道这一行对应正文里的哪处。
+      const memo = (state.fillMemory && state.fillMemory[it.token]) || '';
+      return `
+        <div class="fill-row">
+          <label class="fill-label" for="fill-in-${i}">${escapeHtml(it.hint || it.token)}</label>
+          <input id="fill-in-${i}" class="ctx-prompt-input" data-token="${escapeHtml(it.token)}" value="${escapeHtml(memo)}" placeholder="${escapeHtml(it.token)}">
+        </div>`;
+    }).join('');
+    menu.innerHTML = `
+      <div class="ctx-prompt-wrap fill-wrap">
+        <div class="ctx-prompt-title">${escapeHtml(t('fillTitle'))}</div>
+        <div class="fill-hint">${escapeHtml(t('fillHint'))}</div>
+        <div class="fill-list">${rows}</div>
+        <div class="ctx-prompt-actions">
+          <button class="btn-link" id="fill-raw">${escapeHtml(t('fillCopyRaw'))}</button>
+          <button class="btn-primary" id="fill-ok">${escapeHtml(t('fillAndCopy'))}</button>
+        </div>
+      </div>`;
+    showCenteredMenu();
+    const done = (v) => {
+      pendingPromptDone = null;
+      hideCtxMenu();
+      menu.innerHTML = '';
+      resolve(v);
+    };
+    pendingPromptDone = done;
+    const inputs = Array.from(menu.querySelectorAll('[data-token]'));
+    const collect = () => {
+      const values = {};
+      for (const inp of inputs) values[inp.dataset.token] = inp.value;
+      return values;
+    };
+    $('fill-ok').onclick = () => done(collect());
+    $('fill-raw').onclick = () => done({});
+    for (const inp of inputs) {
+      inp.onkeydown = (e) => {
+        // 提交用 Ctrl+Enter 而不是 Enter：这里通常有好几个输入框，
+        // 裸 Enter 更像"下一项"，拿它提交会让人填到一半就被送出去。
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); done(collect()); }
+        if (e.key === 'Escape') done(null);
+      };
+    }
+    if (inputs.length) { inputs[0].focus(); inputs[0].select(); }
+  });
+}
+
+// 记住填过的值，下次遇到同名占位符预填。
+//
+// 按 token 文本存，不按文件存：[项目技术栈] 在哪个提示词里都是同一件事，
+// 按文件存的话换一个提示词就要重填一遍，这份记忆等于没有。
+const MAX_FILL_MEMORY = 200;
+function rememberFillValues(values) {
+  if (!state.fillMemory) state.fillMemory = {};
+  let changed = false;
+  for (const k of Object.keys(values)) {
+    const v = String(values[k] == null ? '' : values[k]).trim();
+    // 空值不记。用户这次故意留空，不该把上次填好的内容抹掉。
+    if (!v) continue;
+    if (state.fillMemory[k] === v) continue;
+    // 先删再插，让它排到 key 顺序的末尾——下面按"最旧"淘汰靠的就是这个顺序。
+    delete state.fillMemory[k];
+    state.fillMemory[k] = v;
+    changed = true;
+  }
+  if (!changed) return;
+  const keys = Object.keys(state.fillMemory);
+  // 上限存在的理由：这份记忆整体写进 config.json，没有上限就随使用无限长大，
+  // 而每次 setConfig 都要把整个对象序列化一遍。
+  if (keys.length > MAX_FILL_MEMORY) {
+    for (const k of keys.slice(0, keys.length - MAX_FILL_MEMORY)) delete state.fillMemory[k];
+  }
+  saveFillMemoryDebounced();
+}
+const saveFillMemoryDebounced = debounce(async () => {
+  try { await api.setConfig({ fillMemory: state.fillMemory }); }
+  catch (e) { console.error('保存占位符填充记忆失败:', e); } // i18n-exempt: 开发日志
+}, 500);
 
 // ===== 新建 =====
 async function pickProjectType() {
@@ -1146,6 +1395,163 @@ async function newFolder() {
   }
 }
 
+// ===== 项目装配器 (Project Composer) =====
+function openComposer() {
+  const modal = $('composer-modal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+  updateComposerPreview();
+}
+
+function closeComposer() {
+  const modal = $('composer-modal');
+  if (modal) modal.classList.add('hidden');
+}
+
+function getComposerValues() {
+  const name = ($('comp-proj-name').value || '').trim();
+  const desc = ($('comp-proj-desc').value || '').trim();
+  const roleRadio = document.querySelector('input[name="comp-role"]:checked');
+  const role = roleRadio ? roleRadio.value : 'prompts/snippets/roles/fullstack.md';
+  const stackInputs = Array.from(document.querySelectorAll('#comp-stacks input[type="checkbox"]:checked'));
+  const stacks = stackInputs.map(el => el.value);
+  const ruleInputs = Array.from(document.querySelectorAll('#comp-rules input[type="checkbox"]:checked'));
+  const rules = ruleInputs.map(el => el.value);
+  return { name, desc, role, stacks, rules };
+}
+
+function buildAssembledTemplate(vals) {
+  const lines = [];
+  lines.push('# ' + (vals.name || '[项目名称]')); // i18n-exempt: 模板变量占位符
+  lines.push('');
+  lines.push('> ' + (vals.desc || '[项目核心目标与需求描述]')); // i18n-exempt: 模板变量占位符
+  lines.push('');
+  if (vals.role) {
+    lines.push('{{include: ' + vals.role + '}}');
+    lines.push('');
+  }
+  if (vals.stacks.length) {
+    lines.push('### 技术栈规范'); // i18n-exempt: 组装文档结构小标题
+    lines.push('');
+    for (const s of vals.stacks) lines.push('{{include: ' + s + '}}');
+    lines.push('');
+  }
+  if (vals.rules.length) {
+    lines.push('### 工程与质量规约'); // i18n-exempt: 组装文档结构小标题
+    lines.push('');
+    for (const r of vals.rules) lines.push('{{include: ' + r + '}}');
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+async function resolveComposerMarkdown(vals) {
+  const template = buildAssembledTemplate(vals);
+  return await INCLUDES.resolveAsync(template, async (r) => {
+    try {
+      const res = await api.readFile(r);
+      return res ? res.content : null;
+    } catch {
+      return null;
+    }
+  });
+}
+
+const updateComposerPreviewDebounced = debounce(() => {
+  updateComposerPreview();
+}, 200);
+
+// 竞态守卫：每次输入/勾选都会触发一次异步 resolveAsync，若期间又有新输入，
+// 较早那次完成时直接丢弃，保证预览永远显示最新的一组勾选，
+// 而不是按完成序乱序落最后（见 renderPromptPreview 的同款守卫）。
+let composerPreviewSeq = 0;
+async function updateComposerPreview() {
+  const preview = $('comp-preview');
+  if (!preview) return;
+  const seq = ++composerPreviewSeq;
+  const vals = getComposerValues();
+  const resolved = await resolveComposerMarkdown(vals);
+  if (seq !== composerPreviewSeq) return;
+  preview.innerHTML = renderMarkdown(resolved);
+  enhanceCodeBlocks(preview);
+}
+
+async function copyComposerPrompt() {
+  const vals = getComposerValues();
+  const resolved = await resolveComposerMarkdown(vals);
+  await writeClipboard(resolved);
+  toast(t('copySuccess'), 'success');
+}
+
+async function saveComposerPrompt() {
+  const vals = getComposerValues();
+  // 项目名会直接拼成文件路径，必须净化：路径分隔符、盘符冒号、非法字符全部
+  // 替换，否则用户填个 "a/b" 就在 project-init 下挖出子目录，填 "../x" 直接逃出
+  // prompts/（主进程 create-file 走 safeJoinWritable 也会拦，但要在前端先报出来）。
+  // 净化规则和 sanitizeTitle 对齐（Windows 非法字符 + 首尾空白 + 尾点）。
+  const rawName = vals.name || '新项目架构设计'; // i18n-exempt: 默认文件命名
+  const name = rawName
+    .replace(/[\\/:*?"<>|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^\.+/, '')
+    .replace(/[. ]+$/, '');
+  if (!name) { toast(t('composerInvalidName'), 'error'); return; }
+  const rel = 'prompts/project-init/' + name + '.md';
+  const template = buildAssembledTemplate(vals);
+  const content = [
+    '---',
+    'title: ' + name,
+    'stage: project-init',
+    'projectType: 前端项目', // i18n-exempt: 用户数据
+    'tags: [脚手架, 规约, 初始化]', // i18n-exempt: 用户数据
+    'description: ' + (vals.desc || name),
+    '---',
+    '',
+    template
+  ].join('\n');
+  try {
+    await api.createFile(rel, content);
+    toast(t('created'), 'success');
+    closeComposer();
+    await refreshTree();
+    await openFile(rel);
+  } catch (e) {
+    toast(tErr('createFailed', e), 'error');
+  }
+}
+
+async function exportComposerRules() {
+  const vals = getComposerValues();
+  const resolved = await resolveComposerMarkdown(vals);
+  const projName = vals.name || 'Project Blueprint';
+  const claudeContent = [
+    '# ' + projName + ' - AI Engineering Guidelines',
+    '',
+    resolved
+  ].join('\n');
+  const cursorContent = [
+    '# Cursor Rules for ' + projName,
+    '',
+    resolved
+  ].join('\n');
+  try {
+    const res = await api.exportProjectRules({
+      files: [
+        { name: 'CLAUDE.md', content: claudeContent },
+        { name: '.cursorrules', content: cursorContent }
+      ]
+    });
+    if (res && res.ok) {
+      toast(t('composerExportSuccess', { dir: res.dir }), 'success');
+    } else if (res && res.canceled) {
+      toast(t('composerExportCanceled'), 'info');
+    }
+  } catch (e) {
+    toast(tErr('saveFailed', e), 'error');
+  }
+}
+
 async function pickStage(title = t('pickStageTitle')) {
   const opts = state.stages.map(s => dirLabel(s)).join(' / ');
   const input = await promptInput(title, opts);
@@ -1199,6 +1605,51 @@ function promptInput(title, placeholder) {
 }
 
 // ===== 重命名 / 删除 / 移动 =====
+
+// 改名/移动提示词后同步工作流引用。workflows/*.md 的 flow[].prompt 指向被移动的
+// 文件时，不更新就会在流程图上留一个死链节点（点开才报"打开失败"）。
+// 找到引用后先让用户确认：批量改用户的 workflow 前必须经手确认，不能静默代劳。
+// 确认并更新成功返回 true；用户拒绝、无需更新、或更新全部失败返回 false。
+// 失败只 toast 不抛——文件本身已经改名成功，引用不同步不该让"重命名"整体失败。
+async function syncWorkflowRefs(oldRel, newRel) {
+  if (!oldRel || !newRel || oldRel === newRel) return false;
+  let refs = [];
+  try {
+    refs = await api.findWorkflowRefs(oldRel);
+  } catch { return false; }
+  if (!refs || !refs.length) return false;
+  const ok = await confirmDialog(t('renameRefsConfirm', {
+    count: refs.length,
+    files: refs.map(r => '· ' + r).join('\n')
+  }));
+  if (!ok) return false;
+  try {
+    const n = await api.updateWorkflowRefs(refs, oldRel, newRel);
+    toast(t('renameRefsUpdated', { count: n || 0 }), 'success');
+    // 同步后正在标签页里打开的工作流正文是旧的，逐个重新读一遍
+    // （刷新树只更新元数据，改的是 frontmatter 里的 flow，不重读就仍显示坏节点）
+    await reloadOpenRefTabs(refs);
+    return true;
+  } catch (e) {
+    toast(tErr('renameRefsFailed', e), 'error');
+    return false;
+  }
+}
+
+// 重读 refs 里那些还开在标签页中的工作流。update-workflow-refs 会 bump version，
+// 重新读到的正文才是改后状态；不重读的话标签里缓存的是旧 flow。
+async function reloadOpenRefTabs(refs) {
+  const set = new Set(refs);
+  for (const tab of state.tabs) {
+    if (!set.has(tab.rel)) continue;
+    try {
+      const res = await api.readFile(tab.rel);
+      if (res) { tab.content = res.content; tab.meta = res.meta; }
+    } catch { /* 读失败保持旧内容，下次打开自然重读 */ }
+  }
+  await renderContent();
+}
+
 async function renameCurrent() {
   if (!state.currentRel) return;
   const oldRel = state.currentRel;
@@ -1217,6 +1668,7 @@ async function renameCurrent() {
     toast(t('renamed'), 'success');
     await refreshTree();
     await openFile(newRel);
+    await syncWorkflowRefs(oldRel, newRel);
   } catch (e) {
     toast(tErr('renameFailed', e), 'error');
   }
@@ -1271,9 +1723,12 @@ async function moveCurrent() {
     const tab = state.tabs.find(t => t.rel === state.currentRel);
     if (tab) tab.rel = newRel;
     if (state.activeTab === state.currentRel) state.activeTab = newRel;
+    const oldRel = state.currentRel;
+    state.currentRel = newRel;
     toast(t('moved'), 'success');
     await refreshTree();
     await openFile(newRel);
+    await syncWorkflowRefs(oldRel, newRel);
   } catch (e) {
     toast(tErr('moveFailed', e), 'error');
   }
@@ -1289,7 +1744,7 @@ async function moveFileToDir(srcRel, dirRel) {
   if (!dirRel.startsWith('prompts/')) { toast(t('onlyPromptsDir'), 'error'); return; }
   const fileName = srcRel.split('/').pop();
   const newRel = `${dirRel}/${fileName}`;
-  if (newRel === srcRel) { toast(t('alreadyInDir'), 'error'); return; }
+if (newRel === srcRel) { toast(t('alreadyInDir'), 'error'); return; }
   try {
     await api.rename(srcRel, newRel);
     migrateLock(srcRel, newRel);
@@ -1297,9 +1752,9 @@ async function moveFileToDir(srcRel, dirRel) {
     const tab = state.tabs.find(t => t.rel === srcRel);
     if (tab) tab.rel = newRel;
     if (state.activeTab === srcRel) state.activeTab = newRel;
-    toast(t('moved'), 'success');
     await refreshTree();
     if (state.currentRel === srcRel) await openFile(newRel);
+    await syncWorkflowRefs(srcRel, newRel);
   } catch (e) {
     toast(tErr('moveFailed', e), 'error');
   }
@@ -1453,20 +1908,46 @@ function showCenteredMenu() {
 }
 
 // ===== 搜索 =====
-// 高亮文本中的关键词（结果已 escapeHtml，此处安全地包 <mark>）
-function highlightTerm(text, q) {
-  if (!q || !text) return text;
+// 高亮文本中的关键词（分词匹配并在切片上执行 escapeHtml，安全地包 <mark>）
+function highlightTerm(rawText, q) {
+  if (!rawText) return '';
+  if (!q) return escapeHtml(rawText);
+  const text = String(rawText);
+  const tokens = String(q).trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return escapeHtml(text);
   const lower = text.toLowerCase();
-  const ql = q.toLowerCase();
-  const out = [];
-  let i = 0;
-  let idx = lower.indexOf(ql);
-  while (idx !== -1) {
-    out.push(text.slice(i, idx), '<mark>', text.slice(idx, idx + ql.length), '</mark>');
-    i = idx + ql.length;
-    idx = lower.indexOf(ql, i);
+  const intervals = [];
+  for (const token of tokens) {
+    let idx = lower.indexOf(token);
+    while (idx !== -1) {
+      intervals.push([idx, idx + token.length]);
+      idx = lower.indexOf(token, idx + 1);
+    }
   }
-  out.push(text.slice(i));
+  if (!intervals.length) return escapeHtml(text);
+  intervals.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  const merged = [intervals[0]];
+  for (let k = 1; k < intervals.length; k++) {
+    const cur = intervals[k];
+    const prev = merged[merged.length - 1];
+    if (cur[0] <= prev[1]) {
+      if (cur[1] > prev[1]) prev[1] = cur[1];
+    } else {
+      merged.push(cur);
+    }
+  }
+  const out = [];
+  let curIdx = 0;
+  for (const [start, end] of merged) {
+    if (start > curIdx) {
+      out.push(escapeHtml(text.slice(curIdx, start)));
+    }
+    out.push('<mark>', escapeHtml(text.slice(start, end)), '</mark>');
+    curIdx = end;
+  }
+  if (curIdx < text.length) {
+    out.push(escapeHtml(text.slice(curIdx)));
+  }
   return out.join('');
 }
 const doSearch = debounce(async (q) => {
@@ -1485,9 +1966,9 @@ const doSearch = debounce(async (q) => {
   }
   box.innerHTML = results.map(r => `
     <div class="search-item" data-rel="${escapeHtml(r.rel)}">
-      <div class="si-title">${highlightTerm(escapeHtml(r.name), q)}</div>
+      <div class="si-title">${highlightTerm(r.name, q)}</div>
       <div class="si-meta">${escapeHtml(r.stage ? dirLabel(r.stage) : '')}${r.projectType ? ' · ' + escapeHtml(r.projectType) : ''}</div>
-      ${r.snippet ? `<div class="si-snippet">${highlightTerm(escapeHtml(r.snippet), q)}</div>` : ''}
+      ${r.snippet ? `<div class="si-snippet">${highlightTerm(r.snippet, q)}</div>` : ''}
     </div>
   `).join('');
   box.querySelectorAll('.search-item').forEach(el => {
@@ -1929,6 +2410,7 @@ function initResizer() {
       dragging = false;
       resizer.classList.remove('dragging');
       document.body.style.cursor = '';
+      if (document.querySelector('.flow-canvas')) requestAnimationFrame(drawFlowEdges);
     }
   });
   // 双击重置侧边栏宽度
@@ -1937,6 +2419,10 @@ function initResizer() {
     sidebar.style.width = w + 'px';
     state.sidebarWidth = w;
     saveSidebarWidthDebounced(w);
+    if (document.querySelector('.flow-canvas')) requestAnimationFrame(drawFlowEdges);
+  });
+  window.addEventListener('resize', () => {
+    if (document.querySelector('.flow-canvas')) requestAnimationFrame(drawFlowEdges);
   });
 }
 
@@ -1958,6 +2444,11 @@ async function init() {
   if (Array.isArray(state.config.recent)) state.recent = state.config.recent;
   // 加载锁定文件
   if (Array.isArray(state.config.lockedFiles)) state.lockedFiles = new Set(state.config.lockedFiles);
+  // 加载占位符填充记忆。类型要卡：config.json 是可以被手改的，
+  // 这里拿到数组或字符串的话 rememberFillValues 会往非对象上写属性。
+  if (state.config.fillMemory && typeof state.config.fillMemory === 'object' && !Array.isArray(state.config.fillMemory)) {
+    state.fillMemory = state.config.fillMemory;
+  }
   // 加载标签页（config 里只存 rel，正文等首次切过去时再读）。
   // loaded:false 是关键标记——openFile/switchTab 靠它判断要不要补读，
   // 少了它正文会一直是空串，保存时反而把文件清空。
@@ -2060,7 +2551,10 @@ async function init() {
 
   // 内容区按钮
   $('btn-copy').onclick = async () => {
-    await copyContent();
+    // 按钮变成"已复制"要以真的复制了为前提。占位符面板可以被取消，
+    // 那时剪贴板没动过，再闪一下"已复制"就是在骗人。
+    const copied = await copyContent();
+    if (!copied) return;
     const btn = $('btn-copy');
     const orig = btn.textContent;
     btn.textContent = t('copySuccess');
@@ -2090,6 +2584,21 @@ async function init() {
   $('btn-trash-close').onclick = () => $('trash-drawer').classList.add('hidden');
   $('btn-version-close-detail').onclick = openHistory;
   $('btn-settings-close').onclick = () => $('settings-drawer').classList.add('hidden');
+
+  // 项目装配器事件绑定
+  $('btn-composer').onclick = openComposer;
+  if ($('empty-composer')) $('empty-composer').onclick = openComposer;
+  $('btn-composer-close').onclick = closeComposer;
+  $('composer-modal').onclick = (e) => { if (e.target === $('composer-modal')) closeComposer(); };
+  $('btn-comp-copy').onclick = copyComposerPrompt;
+  $('btn-comp-save').onclick = saveComposerPrompt;
+  $('btn-comp-export-rules').onclick = exportComposerRules;
+
+  $('comp-proj-name').addEventListener('input', updateComposerPreviewDebounced);
+  $('comp-proj-desc').addEventListener('input', updateComposerPreviewDebounced);
+  $('comp-roles').addEventListener('change', updateComposerPreviewDebounced);
+  $('comp-stacks').addEventListener('change', updateComposerPreviewDebounced);
+  $('comp-rules').addEventListener('change', updateComposerPreviewDebounced);
 
   // 升级检查的三个按钮 + 开关。
   //
@@ -2152,15 +2661,22 @@ async function init() {
 
   // 快捷键
   document.addEventListener('keydown', (e) => {
-    // 编辑器内 Tab 处理：插入两个空格
+    // 编辑器内 Tab 处理：插入两个空格（优先使用 execCommand 保留撤销栈）
     if (state.editMode && e.key === 'Tab' && document.activeElement === $('editor')) {
       e.preventDefault();
-      const editor = $('editor');
-      const start = editor.selectionStart;
-      const end = editor.selectionEnd;
-      const val = editor.value;
-      editor.value = val.slice(0, start) + '  ' + val.slice(end);
-      editor.selectionStart = editor.selectionEnd = start + 2;
+      let inserted = false;
+      try {
+        inserted = document.execCommand('insertText', false, '  ');
+      } catch {}
+      if (!inserted) {
+        const editor = $('editor');
+        const start = editor.selectionStart;
+        const end = editor.selectionEnd;
+        const val = editor.value;
+        editor.value = val.slice(0, start) + '  ' + val.slice(end);
+        editor.selectionStart = editor.selectionEnd = start + 2;
+      }
+      markDirtyIndicator();
       return;
     }
     // 快捷键归属：一个键只能有一个主人。
@@ -2168,8 +2684,11 @@ async function init() {
     // 所以 Ctrl+N（新建提示词）和 Ctrl+E（导出）由菜单负责——它们经
     // menu-action IPC 回到这里的 onMenuAction，功能不变。
     // 之前这里也各写了一份，那两个分支实际永远不会执行，属于误导性死代码。
-    // 菜单里没有的键才留在这边：Ctrl+S / Ctrl+Shift+F / Ctrl+I / Ctrl+Shift+L。
-    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+    // 菜单里没有的键才留在这边：Ctrl+W / Ctrl+S / Ctrl+Shift+F / Ctrl+I / Ctrl+Shift+L。
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'w') {
+      e.preventDefault();
+      if (state.activeTab) closeTab(state.activeTab);
+    } else if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
       if (state.editMode) saveCurrent();
     } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'f') {
@@ -2186,14 +2705,19 @@ async function init() {
       e.preventDefault();
       toggleTheme();
     } else if (e.key === 'Escape') {
-      // Esc 依次关闭：上下文菜单 → 抽屉 → 退出编辑
+      // Esc 依次关闭：上下文菜单 → 装配模态框 → 抽屉与面板 → 退出编辑
       const ctx = $('ctx-menu');
       // 走 hideCtxMenu 而不是自己加 .hidden：它会结算 promptInput 挂起的 Promise。
       // 直接改 class + innerHTML 会让按 Esc 取消命名框的流程永久卡住。
       if (!ctx.classList.contains('hidden')) { hideCtxMenu(); ctx.innerHTML = ''; return; }
-      const hd = $('history-drawer'), td = $('trash-drawer');
-      if (!hd.classList.contains('hidden')) { hd.classList.add('hidden'); return; }
-      if (!td.classList.contains('hidden')) { td.classList.add('hidden'); return; }
+      const cm = $('composer-modal');
+      if (cm && !cm.classList.contains('hidden')) { closeComposer(); return; }
+      const hd = $('history-drawer'), td = $('trash-drawer'), sd = $('settings-drawer');
+      if (hd && !hd.classList.contains('hidden')) { hd.classList.add('hidden'); return; }
+      if (td && !td.classList.contains('hidden')) { td.classList.add('hidden'); return; }
+      if (sd && !sd.classList.contains('hidden')) { sd.classList.add('hidden'); return; }
+      const fp = $('filter-panel');
+      if (fp && !fp.classList.contains('hidden')) { fp.classList.add('hidden'); return; }
       if (state.editMode) { e.preventDefault(); exitEditMode(false); }
     }
   });
@@ -2233,7 +2757,8 @@ window.__pfmFlushPending = async () => {
     saveTabsDebounced,
     saveRecentDebounced,
     saveLockedDebounced,
-    saveSidebarWidthDebounced
+    saveSidebarWidthDebounced,
+    saveFillMemoryDebounced
   ];
   // allSettled 而不是 all：单个失败（磁盘满/配置被占）不该让其余四个不落盘。
   await Promise.allSettled(all.map(d => d.flush()));

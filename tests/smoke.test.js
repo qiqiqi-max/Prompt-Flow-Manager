@@ -355,6 +355,23 @@ section('ZIP 真实往返（压缩 → 解压）');
   assert(/VERSION_FILE_RE/.test(mainSrc), '版本文件名有白名单校验');
   assert(!/path\.join\(versionDirFor\(rel\), file\)/.test(mainSrc), 'read-version 不再直接拼接未校验的 file');
 
+  // 防回归：export-project-rules 向"用户选定的任意目录"写文件，是全库仅有的
+  // 一个不落在 safeJoinWritable 白名单内的落盘点。目录由用户弹框确认，
+  // 但"写哪个文件名"必须由白名单收紧——否则渲染进程被外部内容劫持后，
+  // 这套入口能把它变成任意文件写入器（basename 只能挡 ../，挡不了这个）。
+  assert(/const RULE_EXPORT_ALLOWED = new Set\(\['CLAUDE\.md', '\.cursorrules'\]\)/.test(mainSrc),
+    '导出规则有文件名白名单常量（CLAUDE.md / .cursorrules）');
+  assert(/RULE_EXPORT_ALLOWED\.has\(base\)/.test(mainSrc), '导出规则 handler 真的校验白名单');
+
+  // 防回归：工作流引用同步的两个 handler 必须存在且白名单受限。
+  // find-workflow-refs 只扫 workflows/；update-workflow-refs 两侧路径都过
+  // safeJoinWritable，并走 ver: 写链防止和 save-file 交叉覆盖。
+  assert(/ipcMain\.handle\('find-workflow-refs'/.test(mainSrc), '有查找工作流引用的 IPC');
+  assert(/ipcMain\.handle\('update-workflow-refs'/.test(mainSrc), '有批量更新工作流引用的 IPC');
+  assert(/safeJoinWritable\(fromRel\);[\s\S]{0,200}safeJoinWritable\(toRel\)/.test(mainSrc),
+    'update-workflow-refs 对旧/新路径都做写入白名单校验');
+  assert(/queueWrite\('ver:' \+ wRel/.test(mainSrc), 'update-workflow-refs 走 ver: 写链（防与 save-file 交叉）');
+
   section('锁定与配置');
   // 防回归：锁定只存在渲染进程内存里，主进程照删不误
   assert(/async function isLocked\(/.test(mainSrc), '主进程有 isLocked');
@@ -484,6 +501,12 @@ const dropCount = (mainSrc.match(/dropFromCache\(/g) || []).length;
 assert(dropCount >= 8, '写入/改名/删除/回滚/恢复都清了缓存（' + dropCount + ' 处）');
 assert(fs.existsSync(path.join(root, 'tests/search-bench.js')), '存在搜索压测脚本 tests/search-bench.js');
 assert(!!pkg.scripts.bench, '有 npm run bench');
+// 多词搜索语义：单 token 时"标题命中"必须是最高优先级（rank 3，语义与原实现等价），
+// 多 token 时是 AND 语义（每个 token 都要在标题/标签/正文某处命中）。
+// 这条断言把"分词后的 rank 分支"锁定住，防止后续改动把标题优先级悄悄降掉。
+assert(/if \(allInTitle\) rank = 3/.test(mainSrc), '多词搜索：全部 token 命中标题仍是最高优先级（rank 3）');
+assert(/else if \(allInTagsOrTitle\) rank = 2/.test(mainSrc), '多词搜索：全部 token 命中标题/标签降为 rank 2');
+assert(/if \(!nameHit && !tagHit && !bodyHit\)/.test(mainSrc), '多词搜索：AND 语义——任一 token 未命中就排除该文件');
 
 section('对话框自动化');
 // 导出/导入四个流程要弹系统对话框，原先只能人工点

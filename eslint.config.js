@@ -22,9 +22,11 @@ const globals = require('globals');
 // 再用的，把同名全局也声明上去，那三行 const 就成了重复声明（no-redeclare 报错）。
 // 它们走 window.X，由 globals.browser 的 window 覆盖，不需要单独声明。
 const rendererGlobals = {
-  // src/i18n.js 与 src/frontmatter.js 在全局声明的常量
+  // src/i18n.js / src/frontmatter.js / src/placeholders.js 在全局声明的常量
   I18N: 'readonly',
-  FRONTMATTER: 'readonly'
+  FRONTMATTER: 'readonly',
+  PLACEHOLDERS: 'readonly',
+  INCLUDES: 'readonly'
 };
 
 // src/selftest/*.js 是由主进程读成文本、丢进页面上下文执行的，所以 renderer.js
@@ -169,7 +171,7 @@ module.exports = [
   {
     // 双用模块：浏览器里当 <script>，主进程里被 require。
     // 两套 global 都要给，否则结尾那句 typeof module !== 'undefined' 会报 no-undef。
-    files: ['src/i18n.js', 'src/frontmatter.js'],
+    files: ['src/i18n.js', 'src/frontmatter.js', 'src/placeholders.js', 'src/includes.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',

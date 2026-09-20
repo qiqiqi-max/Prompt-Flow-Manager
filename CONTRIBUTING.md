@@ -153,6 +153,8 @@ npm run test:logger   # 日志滚动/脱敏 + 诊断导出（裸 node，自带�
 npm run test:sandbox  # 沙箱降级状态机（裸 node，自带两组反向对照）
 npm run test:update   # 升级检查：版本比较 + 出网约束（裸 node，自带三组反向对照）
 npm run test:contrast # 配色对比度与焦点可见性（裸 node，自带一组反向对照）
+npm run test:placeholders # 占位符提取与填充（裸 node，自带一组反向对照）
+npm run test:includes     # 模板包含引擎（裸 node，自带一组反向对照）
 npm run test:reverse  # 把第一节那套流程自动化：逐条改坏源码，验证目标断言真的变红
 npm run test:reverse-split # 同上，针对「自检模块拆分」那一节的注入契约
 npm run test:all      # 以上除 packaged 外全跑

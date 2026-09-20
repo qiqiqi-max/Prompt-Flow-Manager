@@ -12,6 +12,9 @@ const api = {
   saveFile: (rel, content) => ipcRenderer.invoke('save-file', rel, content),
   createFile: (rel, content) => ipcRenderer.invoke('create-file', rel, content),
   rename: (oldRel, newRel) => ipcRenderer.invoke('rename', oldRel, newRel),
+  // 工作流引用同步：改名/移动提示词后，把 workflows 里指向旧路径的引用批量迁走
+  findWorkflowRefs: (rel) => ipcRenderer.invoke('find-workflow-refs', rel),
+  updateWorkflowRefs: (targets, oldRel, newRel) => ipcRenderer.invoke('update-workflow-refs', targets, oldRel, newRel),
   trash: (rel) => ipcRenderer.invoke('trash', rel),
   listTrash: () => ipcRenderer.invoke('list-trash'),
   restore: (id) => ipcRenderer.invoke('restore', id),
@@ -30,6 +33,8 @@ const api = {
   confirmUnsaved: (opts) => ipcRenderer.invoke('confirm-unsaved', opts),
   exportZip: () => ipcRenderer.invoke('export-zip'),
   exportSingle: (rel) => ipcRenderer.invoke('export-single', rel),
+  // 一键将装配好的 AI 规则（CLAUDE.md / .cursorrules）导出到用户指定的项目根目录
+  exportProjectRules: (payload) => ipcRenderer.invoke('export-project-rules', payload),
   getStages: () => ipcRenderer.invoke('get-stages'),
   addProjectType: (t) => ipcRenderer.invoke('add-project-type', t),
   removeProjectType: (t) => ipcRenderer.invoke('remove-project-type', t),

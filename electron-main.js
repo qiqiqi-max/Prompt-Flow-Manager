@@ -332,6 +332,12 @@ function safeJoin(relPath) {
 // 写入只应该发生在三个内容目录里的 .md（外加建目录用的 .gitkeep 占位），
 // 这里按顶层目录 + 扩展名双白名单卡死。
 const WRITABLE_TOPS = new Set(['prompts', 'workflows', 'templates']);
+// 导出项目规则的落盘白名单。用户会弹框选项目目录，但写进哪个文件必须由
+// 这个清单决定——渲染进程只传两份固定规则文件的构建内容，即便渲染进程被
+// 外部内容劫持，能覆盖的也只有这两个名字，写不了任意路径。
+// 这条只锁文件名，不锁目标目录（目录由用户每次弹框确认），语义和
+// safeJoinWritable 的"数据目录白名单"互补。
+const RULE_EXPORT_ALLOWED = new Set(['CLAUDE.md', '.cursorrules']);
 function safeJoinWritable(relPath) {
   const resolved = safeJoin(relPath);
   const rel = path.relative(DATA_ROOT_NORM, resolved).replace(/\\/g, '/');
@@ -818,24 +824,51 @@ async function getMetaList(includeContent = false) {
 async function searchAll(query) {
   const q = String(query || '').trim().toLowerCase();
   if (!q) return [];
+  const tokens = q.split(/\s+/).filter(Boolean);
+  if (!tokens.length) return [];
   // 复用 getMetaList 已经读到的正文，不再逐个重读（原先是 2N 次 I/O）
   const meta = await getMetaList(true);
   const results = [];
   for (const item of meta) {
-    const nameHit = (item.meta.title || item.name).toLowerCase().includes(q);
-    const tagHit = Array.isArray(item.meta.tags) && item.meta.tags.some(t => String(t).toLowerCase().includes(q));
+    const titleLower = (item.meta.title || item.name).toLowerCase();
+    const tagsLower = Array.isArray(item.meta.tags) ? item.meta.tags.map(t => String(t).toLowerCase()) : [];
     // bodyRaw / bodyLower 来自 contentCache（见 readParsedCached），
     // 不在这里重算——每敲一个字符重做全库的正则+toLowerCase 是搜索的主要开销。
     const bodyRaw = item.bodyRaw || '';
-    const bodyIdx = (item.bodyLower || '').indexOf(q);
-    let rank = 0, snippet = '';
-    if (nameHit) rank = 3;
-    else if (tagHit) rank = 2;
-    else if (bodyIdx >= 0) {
-      rank = 1;
-      const start = Math.max(0, bodyIdx - 30);
-      snippet = '…' + bodyRaw.slice(start, bodyIdx + 80) + '…';
-    } else continue;
+    const bodyLower = item.bodyLower || '';
+
+    let allHit = true;
+    let allInTitle = true;
+    let allInTagsOrTitle = true;
+    let firstBodyIdx = -1;
+
+    for (const token of tokens) {
+      const nameHit = titleLower.includes(token);
+      const tagHit = tagsLower.some(t => t.includes(token));
+      const bIdx = bodyLower.indexOf(token);
+      const bodyHit = bIdx >= 0;
+
+      if (!nameHit) allInTitle = false;
+      if (!nameHit && !tagHit) allInTagsOrTitle = false;
+      if (bodyHit && (firstBodyIdx === -1 || bIdx < firstBodyIdx)) {
+        firstBodyIdx = bIdx;
+      }
+      if (!nameHit && !tagHit && !bodyHit) {
+        allHit = false;
+        break;
+      }
+    }
+    if (!allHit) continue;
+
+    let rank = 1, snippet = '';
+    if (allInTitle) rank = 3;
+    else if (allInTagsOrTitle) rank = 2;
+
+    if (firstBodyIdx >= 0) {
+      const start = Math.max(0, firstBodyIdx - 30);
+      const end = Math.min(bodyRaw.length, firstBodyIdx + 80);
+      snippet = (start > 0 ? '…' : '') + bodyRaw.slice(start, end) + (end < bodyRaw.length ? '…' : '');
+    }
     results.push({ rel: item.rel, name: item.meta.title || item.name, stage: item.stage, projectType: item.meta.projectType, rank, snippet });
   }
   results.sort((a, b) => b.rank - a.rank);
@@ -979,6 +1012,72 @@ ipcMain.handle('rename', async (e, oldRel, newRel) => queueWriteMulti(
   }
   return true;
 }));
+
+// 工作流引用同步：`workflows/*.md` 的 flow[].prompt 指向 prompts/ 下的文件，
+// 改名/移动 prompt 后这些引用会变成死链，而流程图上没有任何报错——这个问题
+// 正是 auditFlowRefs（renderer.js）想解决的。下面两个 handler 把"发现引用 + 更新引用"
+// 做成主进程事务：扫描走 readParsedCached（正文缓存），更新走 ver: 写链避免和
+// save-file 交叉。调用方（渲染进程 rename/move 成功后）拿到引用列表再决定
+// 要不要批量更新。
+
+// 找出 flow[].prompt === rel 的所有工作流，返回它们的 rel 列表。
+// 归属字段里读不到 flow 就用字符串匹配兜底，兼容"frontmatter 里的 flow 是多行
+// 数组、全量解析不认"的旧格式（见 parseWorkflowFlow 的处理）。
+ipcMain.handle('find-workflow-refs', async (e, rel) => {
+  if (typeof rel !== 'string' || !rel) return [];
+  const wanted = String(rel).replace(/\\/g, '/');
+  const refs = [];
+  let files = [];
+  try { files = await fsp.readdir(WORKFLOWS_DIR); } catch { return []; }
+  for (const name of files) {
+    if (!name.toLowerCase().endsWith('.md')) continue;
+    const wRel = 'workflows/' + name;
+    const full = safeJoin(wRel);
+    let content;
+    try {
+      const entry = await readParsedCached(full);
+      content = entry.content;
+    } catch { continue; }
+    // 结构字段不在 meta 里，必须从原文找引用
+    if (content.includes(wanted)) refs.push(wRel);
+  }
+  return refs;
+});
+
+// 把 targets 里的每个工作流中指向 oldRel 的 prompt 改成指向 newRel。
+// targets 必须来自 find-workflow-refs（或等价的全量扫描），且 oldRel/newRel
+// 都过写入白名单。更新走 ver: 写链：读改写和 save-file 互斥，避免"读到旧值 →
+// save-file 写新 → 这里写回旧值"把正文盖掉。
+ipcMain.handle('update-workflow-refs', async (e, targets, oldRel, newRel) => {
+  if (!Array.isArray(targets)) throw appError('E_INVALID_PAYLOAD');
+  const fromRel = String(oldRel == null ? '' : oldRel).replace(/\\/g, '/');
+  const toRel = String(newRel == null ? '' : newRel).replace(/\\/g, '/');
+  if (!fromRel || !toRel || fromRel === toRel) return 0;
+  // 两侧都要是 prompts/ 下的合法写路径（防止把 workflow 改成指向 config 之类）
+  safeJoinWritable(fromRel);
+  safeJoinWritable(toRel);
+  const fromLiteral = fromRel.replace(/[/\\]/g, '/').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const replaced = new RegExp(fromLiteral, 'g');
+  let updated = 0;
+  for (const wRel of targets) {
+    if (typeof wRel !== 'string' || !wRel.startsWith('workflows/')) continue;
+    await queueWrite('ver:' + wRel, async () => {
+      const full = safeJoinWritable(wRel);
+      const prev = await readPrevContent(full); // ENOENT → null
+      if (prev == null) return;
+      if (!prev.includes(fromRel)) return;      // 没有这个引用，跳过
+      const next = prev.replace(replaced, toRel);
+      if (next === prev) return;
+      // 与 save-file 同款：旧正文留档 + bump 自动字段 + 原子写 + 清缓存
+      await saveVersion(wRel, prev);
+      const toWrite = bumpAutoFields(next, prev);
+      await writeFileAtomic(full, toWrite);
+      dropFromCache(full);
+      updated++;
+    });
+  }
+  return updated;
+});
 
 // 锁状态必须在 config 队列内读。原先是队列外裸 loadConfig()：渲染进程的
 // lockedFiles 是 400ms 防抖写盘，"点锁定 → 立刻按删除"这个连招里，
@@ -1464,6 +1563,41 @@ ipcMain.handle('export-single', async (e, rel) => {
   if (res.canceled || !res.filePath) return { ok: false };
   await fsp.writeFile(res.filePath, await fsp.readFile(full, 'utf8'), 'utf8');
   return { ok: true, path: res.filePath };
+});
+
+ipcMain.handle('export-project-rules', async (e, payload) => {
+  if (!payload || !Array.isArray(payload.files) || !payload.files.length) {
+    return { ok: false, error: 'E_INVALID_PAYLOAD' };
+  }
+  const res = await dialog.showOpenDialog(win, {
+    title: mt('dlgExportProjectRules'),
+    properties: ['openDirectory', 'createDirectory']
+  });
+  if (res.canceled || !res.filePaths || !res.filePaths[0]) {
+    return { ok: false, canceled: true };
+  }
+  const targetDir = res.filePaths[0];
+  const written = [];
+  for (const item of payload.files) {
+    if (!item || !item.name) continue;
+    // 防路径逃逸 + 落盘白名单：只允许固定两份规则文件名。path.basename 能挡住
+    // ../../ 这类相对跳转，但"渲染进程被劫持后写任意文件"的威胁不是 basename
+    // 的职责——目录由用户选，文件名由这里收紧到清单。两者一起才算完整。
+    const base = path.basename(item.name);
+    if (!RULE_EXPORT_ALLOWED.has(base)) continue;
+    if (base !== item.name || base === '.' || base === '..') continue;
+    const fullPath = path.join(targetDir, base);
+    try {
+      await fsp.writeFile(fullPath, item.content || '', 'utf8');
+    } catch (e) {
+      // 同名目录（CLAUDE.md/）或权限问题：跳过这一项，不让单文件失败掀翻其余。
+      logger.info('[export] 跳过规则文件 ' + base + '：' + e.message);
+      continue;
+    }
+    written.push(base);
+  }
+  logger.info('[export] 已向项目目录导出规则: ' + targetDir + ' (' + written.join(', ') + ')');
+  return { ok: true, dir: targetDir, files: written };
 });
 
 // 导出诊断信息。用户报障时把这个 JSON 贴出来，代替一来一回问"你的版本/系统/

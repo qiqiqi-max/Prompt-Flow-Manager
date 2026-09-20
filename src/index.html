@@ -13,6 +13,7 @@
       <div class="toolbar-left">
         <button class="btn-icon" id="btn-new-prompt" data-i18n="btnNewPrompt">＋ 提示词</button>
         <button class="btn-icon" id="btn-new-workflow" data-i18n="btnNewWorkflow">＋ 工作流</button>
+        <button class="btn-icon" id="btn-composer" data-i18n="btnComposer">＋ 项目装配</button>
         <button class="btn-icon" id="btn-import" data-i18n-title="btnImportTitle" title="导入 (Ctrl+I)">📥</button>
         <button class="btn-icon" id="btn-new-folder" data-i18n="btnNewFolder">＋ 目录</button>
       </div>
@@ -77,6 +78,7 @@
           <div class="empty-actions">
             <button class="btn-primary" id="empty-new-prompt" data-i18n="newPrompt">新建提示词</button>
             <button class="btn-secondary" id="empty-new-workflow" data-i18n="newWorkflow">新建工作流</button>
+            <button class="btn-secondary" id="empty-composer" data-i18n="btnComposer">＋ 项目装配</button>
           </div>
           <div id="stats-panel" class="stats-panel"></div>
           <div id="recent-panel" class="recent-panel hidden">
@@ -189,6 +191,65 @@
     </div>
   </div>
 
+  <!-- 项目脚手架装配器模态弹窗 -->
+  <div id="composer-modal" class="modal-backdrop hidden">
+    <div class="composer-dialog">
+      <div class="composer-header">
+        <div class="composer-header-text">
+          <h2 data-i18n="composerTitle">项目脚手架装配器</h2>
+          <p class="composer-subtitle" data-i18n="composerSubtitle">组合角色、技术栈与工程规约，一键生成项目启动提示词与 AI 规则文件</p>
+        </div>
+        <button class="btn-icon" id="btn-composer-close" data-i18n-aria="close" data-i18n-title="close">✕</button>
+      </div>
+      <div class="composer-body">
+        <div class="composer-left">
+          <div class="composer-field">
+            <label for="comp-proj-name" data-i18n="composerProjectName">项目名称</label>
+            <input type="text" id="comp-proj-name" data-i18n-placeholder="composerProjectNamePlaceholder" placeholder="例如: AI 提示词流程管理平台" autocomplete="off">
+          </div>
+          <div class="composer-field">
+            <label for="comp-proj-desc" data-i18n="composerProjectDesc">核心目标与需求</label>
+            <textarea id="comp-proj-desc" rows="3" data-i18n-placeholder="composerProjectDescPlaceholder" placeholder="简要描述项目要解决的核心问题、关键特性与边界约束…"></textarea>
+          </div>
+          <div class="composer-field">
+            <label data-i18n="composerRole">角色设定</label>
+            <div class="composer-radios" id="comp-roles">
+              <label class="comp-choice"><input type="radio" name="comp-role" value="prompts/snippets/roles/fullstack.md" checked><span data-i18n="composerRoleFullstack">全栈工程师</span></label>
+              <label class="comp-choice"><input type="radio" name="comp-role" value="prompts/snippets/roles/architect.md"><span data-i18n="composerRoleArchitect">系统架构师</span></label>
+            </div>
+          </div>
+          <div class="composer-field">
+            <label data-i18n="composerStack">技术栈</label>
+            <div class="composer-checks" id="comp-stacks">
+              <label class="comp-choice"><input type="checkbox" value="prompts/snippets/stacks/frontend-react.md" checked><span data-i18n="composerStackReact">React + TS + Tailwind 前端</span></label>
+              <label class="comp-choice"><input type="checkbox" value="prompts/snippets/stacks/client-electron.md"><span data-i18n="composerStackElectron">Electron 桌面客户端</span></label>
+              <label class="comp-choice"><input type="checkbox" value="prompts/snippets/stacks/backend-fastapi.md"><span data-i18n="composerStackFastAPI">FastAPI + Python 异步后端</span></label>
+            </div>
+          </div>
+          <div class="composer-field">
+            <label data-i18n="composerRules">工程与质量规约</label>
+            <div class="composer-checks" id="comp-rules">
+              <label class="comp-choice"><input type="checkbox" value="prompts/snippets/rules/ts-strict.md" checked><span data-i18n="composerRuleTsStrict">TypeScript 严格类型</span></label>
+              <label class="comp-choice"><input type="checkbox" value="prompts/snippets/rules/error-codes.md" checked><span data-i18n="composerRuleErrorCodes">结构化错误处理</span></label>
+              <label class="comp-choice"><input type="checkbox" value="prompts/snippets/rules/testing.md" checked><span data-i18n="composerRuleTesting">自动化测试与防回归</span></label>
+            </div>
+          </div>
+        </div>
+        <div class="composer-right">
+          <div class="composer-preview-header">
+            <label data-i18n="composerPreview">组装结果预览</label>
+          </div>
+          <div id="comp-preview" class="composer-preview markdown-body"></div>
+        </div>
+      </div>
+      <div class="composer-footer">
+        <button class="btn-primary" id="btn-comp-copy" data-i18n="composerBtnCopy">复制组装提示词</button>
+        <button class="btn-secondary" id="btn-comp-save" data-i18n="composerBtnSave">保存为新提示词</button>
+        <button class="btn-secondary" id="btn-comp-export-rules" data-i18n="composerBtnExportRules">导出项目规则 (CLAUDE.md / .cursorrules)</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 上下文菜单 -->
   <div id="ctx-menu" class="ctx-menu hidden"></div>
 
@@ -217,6 +278,11 @@
   <!-- frontmatter 解析与主进程共用同一份实现（src/frontmatter.js），
        必须在 renderer.js 之前加载。 -->
   <script src="frontmatter.js"></script>
+  <!-- 占位符提取与填充（src/placeholders.js）。同样是双用模块：这里当 <script>
+       声明全局，tests/placeholders.test.js 里 require 同一份文件。 -->
+  <script src="placeholders.js"></script>
+  <!-- 模板包含引擎（src/includes.js）。双用模块：声明全局 INCLUDES -->
+  <script src="includes.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

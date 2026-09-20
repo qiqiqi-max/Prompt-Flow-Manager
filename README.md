@@ -200,6 +200,8 @@ npm run test:logger     # 验证滚动日志与诊断信息导出
 npm run test:sandbox    # 验证渲染进程沙箱及起不来时的就地降级
 npm run test:update     # 验证启动时的版本检查（超时、静默失败、可关闭）
 npm run test:contrast   # 逐对计算两套主题的配色对比度与焦点可见性
+npm run test:placeholders # 占位符提取与填充
+npm run test:includes   # 模板片段引入与嵌套解析
 npm run test:reverse    # 反向对照：版本检查的每个修复点撤掉都必须变红
 npm run test:reverse-split # 反向对照：自检模块拆分的每个修复点撤掉都必须变红
 npm run test:all        # 依次运行上述全部检查

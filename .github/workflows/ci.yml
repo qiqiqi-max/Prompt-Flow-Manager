@@ -71,6 +71,19 @@ jobs:
       - name: 配色对比度与焦点可见
         run: npm run test:contrast
 
+      # 占位符提取与填充：src/placeholders.js 是纯函数，裸 node 就能跑。
+      # 难点全在"哪些 [方括号] 不是占位符"——Markdown 链接 [文字](url)、图片、
+      # 任务列表 [x]、行内代码和围栏代码块里的方括号都不能算，否则填充面板会
+      # 把链接文字当成要用户填的空。自带反向对照：不排除这些形式的朴素实现
+      # 必须红 20 条以上。
+      - name: 占位符提取与填充
+        run: npm run test:placeholders
+
+      # 模板片段引入与嵌套解析：src/includes.js 是纯逻辑，裸 node 就能跑。
+      # 支持 {{include: relPath}} 嵌套解析、防死循环递归深度限制、代码块遮罩及 frontmatter 剥离。
+      - name: 模板片段引入与嵌套解析
+        run: npm run test:includes
+
       # 纯逻辑测试，不用起 Electron：从 renderer.js 里抠出 debounce 单独验语义。
       # 自带反向对照（旧版一行 debounce 必须失败），所以它不会变成永远绿的空壳。
       - name: debounce 语义
