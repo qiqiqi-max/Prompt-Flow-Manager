@@ -75,7 +75,12 @@ child.on('exit', (code) => {
     /\[selftest:ui\] PASS 整条新建流程真的落盘了文件/,
     /\[selftest:ui\] PASS 点弹层外部能关闭/,
     /\[selftest:ui\] PASS 右键菜单能弹出且有菜单项/,
-    /\[selftest:ui\] PASS 文件树方向键能切到下一个文件/
+    /\[selftest:ui\] PASS 文件树方向键能切到下一个文件/,
+    // 折叠目录里的文件曾经仍留在方向键导航序列里（判可见性时只认行内 display:none，
+    // 认不出折叠用的 hidden 类），按一下方向键就打开一个屏幕上看不见的文件。
+    // 这条必须在输出里，否则"折叠场景根本没跑到"也会显示全绿。
+    /\[selftest:ui\] PASS 能折叠一个带文件的目录用于验证/,
+    /\[selftest:ui\] PASS 方向键不会跳进折叠目录里看不见的文件/
   ];
   const missing = mustHave.filter(re => !re.test(out));
   if (missing.length) console.error('[test:ui] 缺少必需的检查项: ' + missing.map(String).join(', '));

@@ -9,6 +9,10 @@ dist/
 .trash/
 config.json
 *.log
+# 开发模式下 DATA_ROOT 就是仓库根目录，所以滚动日志会落在这里。
+# *.log 已经覆盖 app.log / app-1.log，但显式写上目录名，免得以后有人
+# 往 logs/ 里加个别的后缀就悄悄进了提交。
+logs/
 
 # 编辑器 / 系统
 .vscode/

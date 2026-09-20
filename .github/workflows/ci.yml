@@ -23,11 +23,15 @@ jobs:
     timeout-minutes: 25
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          # Node 20 已经进入维护末期，GitHub 也开始对 node20 的 action 报废弃警告。
+          # 这里固定 22（当前 LTS）：package.json 声明的下限是 >=18，
+          # 用比下限更高的版本跑 CI 是故意的——新版 Node 的行为更严格，
+          # 能先一步暴露即将失效的写法。
+          node-version: 22
           cache: npm
 
       # 用 npm ci 而不是 npm install：严格按 lockfile 装，
@@ -53,14 +57,30 @@ jobs:
           fi
           echo "vendor 副本已是最新"
 
+      # 放在所有测试之前：lint 几秒钟就能跑完，语法/未定义变量这类问题
+      # 没必要等 Electron 起完再报。
+      - name: 静态检查（eslint）
+        run: npm run lint
+
       # 静态检查（语法、i18n 完整性、防回归断言），不需要图形环境
       - name: 冒烟测试
         run: npm test
+
+      # 配色对比度与焦点可见性：只读 src/styles.css 算数，不起 Electron。
+      # 自带反向对照——拿改动前的旧配色跑同一批断言，必须红 30 对以上。
+      - name: 配色对比度与焦点可见
+        run: npm run test:contrast
 
       # 纯逻辑测试，不用起 Electron：从 renderer.js 里抠出 debounce 单独验语义。
       # 自带反向对照（旧版一行 debounce 必须失败），所以它不会变成永远绿的空壳。
       - name: debounce 语义
         run: npm run test:debounce
+
+      # 日志滚动 + 诊断采集：lib/logger.js 和 lib/diagnostics.js 刻意不 require
+      # electron（目录由 init({dir}) 传进来），所以这一层用裸 node 就能跑完。
+      # 自带两组反向对照：不滚动/不脱敏/失败即抛的桩，以及"每次都滚"的桩。
+      - name: 日志滚动与诊断采集
+        run: npm run test:logger
 
       # 下面三个会真的拉起 Electron。各自 PFM_DATA_DIR 指向临时目录，
       # 不会碰仓库里的提示词库（脚本内部自己建临时副本）。
@@ -82,3 +102,99 @@ jobs:
       # 自带反向对照——两组结果必须不同，否则说明测的不是握手本身。
       - name: 关窗落盘握手
         run: npm run test:close
+
+      # 启动自愈：故意构造一个坏数据目录（幽灵条目 / 孤立正文 / 越界 store /
+      # 残留 .part），跑完从进程外读磁盘定论。自带反向对照——同一个坏目录再跑
+      # 一个走不到自愈的进程，四类损坏必须原样还在。
+      - name: 启动自愈
+        run: npm run test:heal
+
+      # 沙箱跨启动判定：lib/sandbox-state.js 刻意不 require electron（目录由参数
+      # 传进来），所以这层也是裸 node。它测的是"沙箱默认开、只在这台机器上被证明
+      # 起不来之后才降级"这套状态机，不测真实沙箱能不能起——后者只有打包产物
+      # 那一层测得到。自带两组反向对照：一组退化三个行为，一组还原改动前
+      # "无条件关沙箱"的老实现。
+      - name: 沙箱跨启动判定
+        run: npm run test:sandbox
+
+      # 升级检查：lib/update-check.js 是本项目唯一主动出网的模块，但这一层
+      # **不出网**——transport 是注入的，所有网络失败都用桩模拟。真出网的话 CI
+      # 就会依赖 GitHub API 的可用性和限流额度，偶发红是必然的。
+      # 断言分两类：判定逻辑（版本比较、要不要查）和出网约束（不跟重定向、有超时、
+      # 有字节上限、发布页地址不来自响应）。自带三组反向对照。
+      - name: 升级检查判定
+        run: npm run test:update
+
+      # 反向对照：把「升级检查」那一节的每条断言逐个撤掉修复，要求**指定的那条**
+      # 变红。放在最后是因为它要跑 21 次 npm test（每个用例一次，外加基线和还原后
+      # 各一次）。
+      #
+      # 为什么必须有这一步：CONTRIBUTING 里"两种情况都通过的算空断言"这条规矩
+      # 光靠跑一遍全绿是验证不了的。实际开发这一节时就写出过三条恒真断言
+      # （切片锚点取错、锚在注释上、黑名单挡不住新写法），全都是靠这个脚本
+      # 才发现的。
+      #
+      # 它会临时改真实源文件再还原（内存 + 临时目录双份备份，md5 校验，
+      # SIGINT/SIGTERM 也接管）。CI 里是一次性的干净工作区，不影响任何人。
+      - name: 反向对照（升级检查断言不是空的）
+        run: npm run test:reverse
+
+      # 同一套流程，对象换成「自检模块拆分」那一节。单列一个脚本而不是并进上面
+      # 那个：两者管的还原文件集不同（这个要管 lib/selftest.js），混在一起的话
+      # 失败信息很难定位到底是哪块契约破了。
+      #
+      # 这一节为什么特别需要：把 1354 行测试代码搬进 lib/selftest.js 之后，两个
+      # 文件之间多了一份**手写的依赖清单**（模块的 REQUIRED、init 的解构、主进程
+      # 调用点的传参，三份必须逐字一致）。清单漂移不会让启动就炸，只会让某个自检项
+      # 在几百行之后拿到 undefined。更隐蔽的是四个跨边界的可变绑定——按值注入的话
+      # 压测永远报 0 次读 0 命中，而所有测试照旧全绿。
+      # 实测这个脚本在这一节里抓出了四条恒真断言（数 requireInit 的出现次数、
+      # 只切函数签名查 win、只查 app.getPath、以及把 init 校验的整块当锚点）。
+      - name: 反向对照（自检模块拆分断言不是空的）
+        run: npm run test:reverse-split
+
+  # 打包验证单独成 job，不并进上面那串：
+  # 它要下载 108MB 的 Electron 二进制再打包，实测首次约 10 分钟，
+  # 而上面那些测试 3 分钟内就能给出反馈。合成一个 job 的话，
+  # 一个拼写错误也要等十几分钟才知道。两个 job 并行跑，互不阻塞。
+  #
+  # 为什么非要有这一层：唯一一次"打包后界面全白"的故障，
+  # 根因是 preload / index.html 路径指向了数据目录而不是 asar 内的代码目录。
+  # 开发模式下 CODE_ROOT 和 DATA_ROOT 是同一个目录，指错了也照样能读到文件，
+  # 所以上面 8 个测试全绿也拦不住它。必须真的打成 exe 才测得到。
+  package:
+    runs-on: windows-latest
+    # 首次要下 Electron 二进制（108MB）+ NSIS 工具链，给足时间
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装依赖
+        shell: bash
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      # predist 钩子会自动跑 sync-vendor，所以打出来的包一定带最新 vendor
+      - name: 打包（portable exe）
+        run: npm run dist
+
+      # 对打包产物本身跑自检：验 asar 内路径、contextBridge、vendor 加载、
+      # 以及只在打包模式执行的 ensureSeedData 首启种子拷贝。
+      - name: 打包产物自检
+        run: npm run test:packaged
+
+      # 留下产物便于人工验证/回归复现。构建号区分不同次运行。
+      # retention 短一些：这是每次 push 都产生的中间产物，不是发布物。
+      - name: 上传打包产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: portable-exe-${{ github.run_number }}
+          path: dist/*.exe
+          if-no-files-found: error
+          retention-days: 14

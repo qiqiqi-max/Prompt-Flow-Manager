@@ -174,6 +174,17 @@
             <button class="btn-link" id="btn-lang-en">English</button>
           </div>
         </div>
+        <div class="settings-section">
+          <h3 data-i18n="settingsUpdate">升级检查</h3>
+          <!-- 这是本应用唯一主动出网的地方，说明文字必须把"查什么、不查什么"写清楚，
+               并且开关就在旁边。不能只给一个勾选框让用户猜它到底会发什么出去。 -->
+          <p class="settings-desc" data-i18n="updateCheckDesc">会连接 GitHub 查询最新发布版本。只查询版本号，不会自动下载或安装，也不会发送任何本机信息。关闭后完全不联网。</p>
+          <label class="settings-toggle">
+            <input type="checkbox" id="chk-update-check">
+            <span data-i18n="updateCheckLabel">启动时检查新版本</span>
+          </label>
+          <p class="settings-hint" id="update-status"></p>
+        </div>
       </div>
     </div>
   </div>
@@ -183,6 +194,19 @@
 
   <!-- 提示通知 -->
   <div id="toast" class="toast hidden"></div>
+
+  <!-- 新版本提示条。不用 toast：toast 1.8 秒就消失，而这条要让用户有时间决定
+       去不去看发布页。也不用模态框——用户没要求检查更新，不该被挡住操作。
+       文字内容由 renderer 用 textContent 写入，不拼 HTML（版本号来自网络响应，
+       虽然已经过 VERSION_RE 收窄，但拼 HTML 这个习惯本身不该出现在这条路上）。 -->
+  <div id="update-banner" class="update-banner hidden">
+    <span id="update-banner-text"></span>
+    <div class="update-banner-actions">
+      <button class="btn-link" id="btn-update-open" data-i18n="updateOpenPage">查看发布页</button>
+      <button class="btn-link" id="btn-update-skip" data-i18n="updateSkipThis">忽略此版本</button>
+      <button class="btn-icon" id="btn-update-close" data-i18n-aria="close" data-i18n-title="close">✕</button>
+    </div>
+  </div>
 
   <!-- 第三方依赖：由 npm run sync-vendor 从 node_modules 同步到 src/vendor/。
        contextIsolation 下渲染进程没有 require，必须以普通脚本加载。 -->

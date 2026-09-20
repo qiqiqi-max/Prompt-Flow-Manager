@@ -16,6 +16,11 @@ function assert(cond, msg) {
 function section(name) { console.log('--- ' + name + ' ---'); }
 
 const mainSrc = fs.readFileSync(path.join(root, 'electron-main.js'), 'utf8');
+// 自检 / 压测 / 安全回归已经搬到 lib/selftest.js（原先占 electron-main.js 的 35%）。
+// 下面凡是查"自检里有没有某段逻辑"的断言都改读这一份，**不是**把两份源码拼起来查。
+// 拼起来的话，断言就不再关心那段代码住在哪个文件里：哪天有人把对话框桩搬回主进程、
+// 或者把生产逻辑塞进自检模块，检查照样全绿——而这次拆分的全部意义就是这条边界。
+const selftestSrc = fs.readFileSync(path.join(root, 'lib/selftest.js'), 'utf8');
 const preloadSrc = fs.readFileSync(path.join(root, 'preload.js'), 'utf8');
 const rendererSrc = fs.readFileSync(path.join(root, 'src/renderer.js'), 'utf8');
 const htmlSrc = fs.readFileSync(path.join(root, 'src/index.html'), 'utf8');
@@ -65,13 +70,43 @@ for (const p of ['lib/**/*', 'src/**/*', 'preload.js']) {
 // 理由：vendor 副本是提交进仓库的，而 ^x.y.z 允许 npm install 装到别的版本，
 // 于是"package.json 声明的版本"和"实际加载的那份文件"可以静默不一致，
 // 出问题时按声明的版本号去查 changelog 会查错。
-// DOMPurify 尤其重要：sandbox 是关的（见 webPreferences 注释），
-// 它是提示词正文渲染唯一的 XSS 边界，版本必须是确定的。
+// DOMPurify 尤其重要：沙箱现在默认开着，但它会在探测失败的机器上自动降级
+// （见"渲染进程隔离"一节和 lib/sandbox-state.js），也就是说总有一部分用户
+// 实际跑在无沙箱模式下。DOMPurify 是那种情况下提示词正文渲染唯一的 XSS 边界，
+// 版本必须是确定的。
 for (const dep of ['dompurify', 'marked', 'diff-match-patch']) {
   const range = (pkg.devDependencies || {})[dep] || '';
   assert(/^\d+\.\d+\.\d+$/.test(range), dep + ' 锁定到确定版本（当前 ' + range + '）');
 }
 assert(!!(pkg.engines && pkg.engines.node), '声明了 engines.node');
+// electron 同样锁死到确定版本，理由比上面三个库更硬：它决定 Chromium 与 Node 的
+// 版本，而主进程/渲染进程的事件签名跟着大版本变（console-message 就在 36 变过，
+// 见 lib/selftest.js 里那处注释）。^28 那种范围写法下，两台机器 npm install
+// 出来的运行时可以不是一个大版本。
+assert(/^\d+\.\d+\.\d+$/.test((pkg.devDependencies || {}).electron || ''),
+  'electron 锁定到确定版本（当前 ' + ((pkg.devDependencies || {}).electron || '无') + '）');
+// 装在 node_modules 里的那个二进制必须和声明的版本一致。
+//
+// 为什么非要有这一条：升级时 npm 把包换成新版本，但二进制的解压是 electron 自己的
+// install.js 干的，它开头的 isInstalled() 会在旧 dist/ 还在时直接 return。于是
+// package.json 写着新版本，test:ui / test:fn 实际拉起的还是**旧二进制**，
+// 而所有测试照旧全绿——升级等于没升，测试却给了通过的结论。
+// 这次 28→38→43 的升级就真的这么绿过一轮（声明 43.7.2，跑的是 38.8.6），
+// 是手动敲 `electron --version` 才发现的，没有任何一条断言拦住它。
+{
+  const distVer = path.join(root, 'node_modules', 'electron', 'dist', 'version');
+  const declared = (pkg.devDependencies || {}).electron || '';
+  if (fs.existsSync(distVer)) {
+    const installed = fs.readFileSync(distVer, 'utf8').trim().replace(/^v/, '');
+    assert(installed === declared,
+      '装着的 electron 二进制与 package.json 一致（声明 ' + (declared || '无') +
+      '，实际 ' + installed + '）');
+  } else {
+    // 没装二进制的环境（只跑静态检查）不该因此变红。这里不发 PASS——
+    // 假绿比没有更糟；打一行说明就够了，真要跑起来时 test:ui/test:fn 会自己报错。
+    console.log('  – 未安装 electron 二进制，跳过版本一致性检查（test:ui/test:fn 会另行报错）');
+  }
+}
 
 section('JS 语法检查');
 const jsFiles = [
@@ -104,6 +139,98 @@ assert(!/path\.join\(DATA_ROOT, 'src'/.test(mainSrc), '未从数据目录加载 
 section('渲染进程隔离');
 assert(/contextIsolation: true/.test(mainSrc), 'contextIsolation 已开启');
 assert(/nodeIntegration: false/.test(mainSrc), 'nodeIntegration 已关闭');
+{
+  // 沙箱有**两个半边**，必须取同一个结论：
+  //   webPreferences.sandbox            窗口级
+  //   app.commandLine 的 --no-sandbox   进程级，会盖掉上面那个
+  // 历史写法是两边都无条件关闭。只改其中一处是这次改动最容易犯的错——
+  // 只开 webPreferences 的话进程开关照旧盖掉它，诊断包会报"开着"而实际没开，
+  // 比一直关着更糟（它给出一个假的安全结论）。
+  assert(!/sandbox: false/.test(mainSrc), '没有写死 sandbox: false');
+  // 窗口级开关取 sandboxActive（此刻生效的模式），不是 sandboxDecision.sandbox
+  // （启动时的判定）。就地降级之后重建窗口时两者不同，取判定的话重建出来的
+  // 窗口又会把沙箱打开、又崩一次，降级路径实际是死的——而且只在真降级时才暴露。
+  assert(/sandbox: sandboxActive/.test(mainSrc),
+    'webPreferences.sandbox 取当前生效模式 sandboxActive');
+  assert(/let sandboxActive = sandboxDecision\.sandbox/.test(mainSrc),
+    'sandboxActive 初值来自跨启动判定');
+  assert(!/^\s*app\.commandLine\.appendSwitch\('no-sandbox'\);\s*$/m.test(mainSrc),
+    '没有无条件 appendSwitch(no-sandbox)');
+  assert(/if \(!sandboxDecision\.sandbox\) app\.commandLine\.appendSwitch\('no-sandbox'\)/.test(mainSrc),
+    '进程级开关和窗口级取同一个判定（两个半边不许分叉）');
+  // 判定必须在 app ready 之前完成，否则 appendSwitch 赶不上这一进程的命令行。
+  const decideAt = mainSrc.indexOf('const sandboxDecision');
+  const readyAt = mainSrc.indexOf('app.whenReady()');
+  assert(decideAt > 0 && readyAt > 0 && decideAt < readyAt,
+    '沙箱判定在 app.whenReady 之前（appendSwitch 之后再改就无效了）');
+  // 探测标记必须在 loadFile 之前按下去：先加载再按标记的话，
+  // 加载失败那一瞬间盘上还没有 pending，下次启动看不出上次失败过。
+  const probeAt = mainSrc.indexOf('attachSandboxProbe(win)');
+  const loadAt = mainSrc.indexOf("win.loadFile(path.join(CODE_ROOT, 'src', 'index.html'))");
+  assert(probeAt > 0 && loadAt > 0 && probeAt < loadAt,
+    '探测在 loadFile 之前挂上（标记要先落盘）');
+  // 降级是持久的，所以两个触发信号都必须过滤，否则一次无关失败就永久关掉隔离。
+  assert(/reason === 'clean-exit'/.test(mainSrc),
+    'render-process-gone 排掉正常退出（否则加载完成前退出会被当成沙箱起不来）');
+  assert(/if \(!isMainFrame\) return;/.test(mainSrc),
+    'did-fail-load 只认主 frame（子 frame 失败与沙箱无关）');
+  // 只在 did-fail-load 的处理体里查 isSelfUrl，不能全文查：
+  // attachNavigationGuard 里本来就有一处 isSelfUrl(url)，全文匹配等于恒真
+  // （写第一版时就是这么写的，删掉过滤照样全绿）。
+  {
+    const at = mainSrc.indexOf("wc.on('did-fail-load'");
+    const body = at > 0 ? mainSrc.slice(at, at + 400) : '';
+    assert(/isSelfUrl\(url\)/.test(body), 'did-fail-load 只认自己那个页面（不是任意 URL）');
+  }
+  // 状态文件目录和 CONFIG_PATH 用同一个三元表达式。写死成 DATA_ROOT 会让
+  // 打包版把它写进 asar 旁边（只读），降级结论永远存不下来。
+  assert(/const SANDBOX_STATE_DIR = process\.env\.PFM_DATA_DIR/.test(mainSrc),
+    '沙箱状态目录跟着 PFM_DATA_DIR 走（测试隔离）');
+  assert(!/SANDBOX_STATE_DIR = path\.join\(DATA_ROOT/.test(mainSrc),
+    '沙箱状态不落在 DATA_ROOT（打包后那是 asar，只读）');
+
+  // ---- 就地降级（不重启）----
+  // 实测依据：本机缺 VC++ 运行库，sandbox:true 必崩（0xC0000135），而
+  // sandbox:false 且**不带**进程级 --no-sandbox 能正常渲染。所以降级只需要
+  // 换掉窗口级开关，不必 app.relaunch()。
+  assert(/async function rebuildWindowWithoutSandbox\(/.test(mainSrc),
+    '有就地重建窗口的降级路径');
+  // 必须先剥掉注释再查：上面那段解释"为什么不用重启"的注释里就原样写着
+  // app.relaunch()，直接全文匹配会把自己的说明文字当成违规代码
+  // （实测第一版就是这么假红的，和 packaged-smoke.js 那条踩的是同一个坑）。
+  {
+    const code = mainSrc.split(/\r?\n/).filter(l => !/^\s*(\/\/|\*)/.test(l)).join('\n');
+    assert(!/app\.relaunch\(\)/.test(code),
+      '降级不走 app.relaunch（不需要重启，且重启在自检下必须特例跳过）');
+  }
+  // destroy 而不是 close：close 会走关窗落盘握手，那里要等已经死掉的渲染进程
+  // 回话，必然空等到 3 秒超时。
+  {
+    const at = mainSrc.indexOf('async function rebuildWindowWithoutSandbox');
+    const body = at > 0 ? mainSrc.slice(at, at + 700) : '';
+    assert(/old\.destroy\(\)/.test(body), '重建时 destroy 旧窗口（不触发要等死渲染进程的落盘握手）');
+    assert(/await createWindow\(\)/.test(body), '重建时重新建窗口');
+  }
+  // 这条守的是整条降级路里最隐蔽的一环：destroy 旧窗口到新窗口建出来之间
+  // 有一瞬间零窗口，Windows 上 window-all-closed 会在那时 app.quit()，
+  // 表现为"开了一下就没了"。没有这个 guard，就地降级整条是死的。
+  {
+    const at = mainSrc.indexOf("app.on('window-all-closed'");
+    const body = at > 0 ? mainSrc.slice(at, at + 500) : '';
+    assert(/sandboxRuntime\.rebuilding/.test(body),
+      'window-all-closed 在重建窗口期间不退出（否则零窗口的一瞬会 app.quit）');
+  }
+  // 诊断包必须报"此刻生效的模式"而不是"启动时的判定"。就地降级之后两者不同，
+  // 报判定的话诊断包会说沙箱开着、而用户正跑在无沙箱窗口上——本次改动要消灭的
+  // 假安全读数换个地方又出现了。
+  {
+    const at = mainSrc.indexOf('sandbox: (() => {');
+    const body = at > 0 ? mainSrc.slice(at, at + 500) : '';
+    assert(/enabled: sandboxActive/.test(body),
+      '诊断包报当前生效的沙箱模式（不是启动判定）');
+    assert(/degradedThisRun/.test(body), '诊断包报出本次是否发生过降级');
+  }
+}
 assert(/contextBridge\.exposeInMainWorld/.test(preloadSrc), 'preload 走 contextBridge');
 // 防回归：contextBridge 暴露的属性不可配置，若叫 'api' 会和 renderer.js 里
 // const api = ... 撞车，抛 "Identifier 'api' has already been declared"，整段脚本不执行。
@@ -291,6 +418,17 @@ assert(shadow.length === 0, '没有在遮蔽了 t 的回调里调用 t()' + (sha
   for (const m of rendererSrc.matchAll(/\bt(?:Err)?\('([^']+)'/g)) used.add(m[1]);
   const missingR = [...used].filter(k => !(k in I18N.zh));
   assert(missingR.length === 0, 'renderer.js 引用的 i18n 键都存在' + (missingR.length ? '，缺失：' + missingR.join(', ') : ''));
+  // 主进程的 mt() 同样要查。它查不到键时回退成键名本身，而键名里没有中文，
+  // 所以"英文界面下无残留中文"那条运行时断言抓不到——写这段时就真漏过一次：
+  // 四个文件对话框的标题全是 dlgExportBackup 这样的键名，测试却全绿。
+  const mtUsed = new Set();
+  for (const m of mainSrc.matchAll(/\bmt\('([^']+)'\)/g)) mtUsed.add(m[1]);
+  assert(mtUsed.size >= 15, '收集到主进程用的 mt() 键（' + mtUsed.size + ' 个）');
+  const missingMt = [...mtUsed].filter(k => !(k in I18N.zh) || !(k in I18N.en));
+  assert(missingMt.length === 0,
+    '主进程 mt() 引用的键中英都存在' + (missingMt.length ? '，缺失：' + missingMt.join(', ') : ''));
+  assert(/console\.error\('\[i18n\] 主进程用了不存在的键/.test(mainSrc),
+    'mt() 查不到键时会报错（否则界面上只是露出键名，静默且检查抓不到）');
   assert(htmlKeys.size >= 40, 'index.html 上挂了足够多的 data-i18n（' + htmlKeys.size + ' 个）');
 }
 
@@ -299,9 +437,18 @@ section('错误码本地化');
 // 现在统一成 appError('E_XXX', detail)，渲染侧 describeError() 负责翻译。
 assert(/function appError\(/.test(mainSrc), '主进程有 appError 工具');
 assert(!/throw new Error\('[^']*[\u4e00-\u9fa5]/.test(mainSrc), '主进程不再抛中文字面量错误');
+// lib/ 下**每个**文件都要查，不是只查 zip-import.js。
+// 原先这里写死了那一个文件名，于是后来新增的 lib/logger.js、lib/diagnostics.js
+// 落进来时完全没人管——diagnostics 里真的就有一句 throw new Error('E_..|中文')，
+// 而这条断言照旧全绿。按目录枚举之后，下一个新文件自动进检查范围。
+const LIB_FILES = fs.readdirSync(path.join(root, 'lib'))
+  .filter(n => n.endsWith('.js'))
+  .map(n => ['lib/' + n, fs.readFileSync(path.join(root, 'lib', n), 'utf8')]);
 {
-  const libSrc = fs.readFileSync(path.join(root, 'lib/zip-import.js'), 'utf8');
-  assert(!/(throw|reject\()\s*new Error\('[^']*[\u4e00-\u9fa5]/.test(libSrc), 'lib/zip-import.js 不再抛中文字面量错误');
+  assert(LIB_FILES.length >= 3, 'lib/ 下枚举到了文件（' + LIB_FILES.map(([n]) => n).join(', ') + '）');
+  const bad = LIB_FILES.filter(([, src]) => /(throw|reject\()\s*new Error\('[^']*[\u4e00-\u9fa5]/.test(src));
+  assert(bad.length === 0,
+    'lib/ 下没有抛中文字面量错误的文件' + (bad.length ? '，违规：' + bad.map(([n]) => n).join(', ') : ''));
 }
 assert(/function describeError\(/.test(rendererSrc), '渲染进程有 describeError');
 assert(/describeError\(e\)/.test(rendererSrc), 'tErr 走 describeError');
@@ -309,7 +456,9 @@ assert(/describeError\(e\)/.test(rendererSrc), 'tErr 走 describeError');
   const I18N = require('../src/i18n.js');
   // 主进程用到的每个错误码都必须有对应文案，否则界面上会露出 E_XXX
   const codes = new Set();
-  for (const src of [mainSrc, fs.readFileSync(path.join(root, 'lib/zip-import.js'), 'utf8')]) {
+  // 同样按目录枚举，而不是列举文件名：新 lib 文件里的错误码要自动进"必须有中英文案"
+  // 这条检查，否则界面上会直接露出 E_XXX。
+  for (const src of [mainSrc, ...LIB_FILES.map(([, s]) => s)]) {
     for (const m of src.matchAll(/appError\('([A-Z0-9_]+)'/g)) codes.add(m[1]);
   }
   assert(codes.size >= 10, '收集到足够多的错误码（' + codes.size + ' 个）');
@@ -338,18 +487,18 @@ assert(!!pkg.scripts.bench, '有 npm run bench');
 
 section('对话框自动化');
 // 导出/导入四个流程要弹系统对话框，原先只能人工点
-assert(/function installSelfTestDialogStubs\(/.test(mainSrc), '有自检用的对话框桩');
-assert(/PFM_SELFTEST_DIALOGS/.test(mainSrc), '对话框桩由 PFM_SELFTEST_DIALOGS 队列驱动');
+assert(/function installSelfTestDialogStubs\(/.test(selftestSrc), '有自检用的对话框桩');
+assert(/PFM_SELFTEST_DIALOGS/.test(selftestSrc), '对话框桩由 PFM_SELFTEST_DIALOGS 队列驱动');
 assert(/process\.env\.PFM_SELFTEST === '1' && process\.env\.PFM_SELFTEST_DIALOGS/.test(mainSrc),
   '对话框桩只在自检模式生效（生产行为不变）');
 // 消息框也要能桩：confirm-unsaved 是三选一的"保存/不保存/取消"，
 // 没有桩就只能人工点，于是三条分支各自的静默坏法（取消照切、不保存却写盘、
 // 保存却没落盘）一直没有自动化覆盖。
-assert(/dialog\.showMessageBox = async/.test(mainSrc), '消息框（确认/未保存三选一）也有桩');
+assert(/dialog\.showMessageBox = async/.test(selftestSrc), '消息框（确认/未保存三选一）也有桩');
 // 按 kind 分流是必须的：文件对话框和消息框的调用时机互不相干，
 // 混在一条流水线里，插一个消息框应答就会把导出/导入四项全错位一格。
-assert(/q\.kind \? q\.kind : 'file'/.test(mainSrc), '对话框队列按 kind 分流，两类互不错位');
-assert(/Number\.isInteger\(opts\.cancelId\) \? opts\.cancelId : 0/.test(mainSrc),
+assert(/q\.kind \? q\.kind : 'file'/.test(selftestSrc), '对话框队列按 kind 分流，两类互不错位');
+assert(/Number\.isInteger\(opts\.cancelId\) \? opts\.cancelId : 0/.test(selftestSrc),
   '队列没料到的消息框按调用方的 cancelId 回退（对未保存提示＝保住草稿）');
 {
   const fnSrc = fs.readFileSync(path.join(root, 'tests/functional-smoke.js'), 'utf8');
@@ -419,10 +568,16 @@ assert(/menu\.classList\.remove\('ctx-centered'\); \/\/ 右键菜单按坐标定
 
 section('UI 点击自检');
 // 之前所有测试都直接调 IPC，绕过了 UI，所以"点了没反应"一路没被发现。
-assert(/PFM_SELFTEST_UI/.test(mainSrc), '主进程支持 UI 点击自检（PFM_SELFTEST_UI）');
-assert(/dispatchEvent\(new MouseEvent\(type/.test(mainSrc), '用真实事件序列 mousedown→mouseup→click 点击');
-assert(/r\.bottom <= window\.innerHeight \+ 1/.test(mainSrc), '弹层可见性判定包含"矩形在视口内"，不只看 hidden 类');
-assert(/拒绝在真实库上点/.test(mainSrc), 'UI 自检未设 PFM_DATA_DIR 时拒绝执行');
+assert(/PFM_SELFTEST_UI/.test(selftestSrc), '自检模块支持 UI 点击自检（PFM_SELFTEST_UI）');
+// 这两条查的是点击逻辑本身，而它已经从主进程的模板字符串搬到了
+// src/selftest/ui.js。继续查 mainSrc 的话两条恒为假——搬代码时就是这么红的。
+// 反过来说，如果当时这两条写成"宽松匹配"，搬完还是绿的，就再也没人知道它们已经空了。
+{
+  const uiScriptSrc = fs.readFileSync(path.join(root, 'src/selftest/ui.js'), 'utf8');
+  assert(/dispatchEvent\(new MouseEvent\(type/.test(uiScriptSrc), '用真实事件序列 mousedown→mouseup→click 点击');
+  assert(/r\.bottom <= window\.innerHeight \+ 1/.test(uiScriptSrc), '弹层可见性判定包含"矩形在视口内"，不只看 hidden 类');
+}
+assert(/拒绝在真实库上点/.test(selftestSrc), 'UI 自检未设 PFM_DATA_DIR 时拒绝执行');
 {
   const uiSrc = fs.readFileSync(path.join(root, 'tests/ui-smoke.js'), 'utf8');
   assert(/PFM_SELFTEST_UI/.test(uiSrc), 'test:ui 会跑 UI 点击自检');
@@ -448,9 +603,15 @@ assert(/else break;/.test(rendererSrc), '遇到顶格行才结束 flow 段');
 }
 
 section('只读体检');
-assert(/PFM_SELFTEST_READONLY/.test(mainSrc), '主进程支持只读体检（PFM_SELFTEST_READONLY）');
-assert(/renderFlowDiagram\(steps/.test(mainSrc), '只读体检会真的渲染一遍流程图并数节点');
-assert(/brokenLinks/.test(mainSrc), '只读体检会检查流程图节点指向的文件是否存在');
+assert(/PFM_SELFTEST_READONLY/.test(selftestSrc), '自检模块支持只读体检（PFM_SELFTEST_READONLY）');
+// 探测逻辑本身已经搬到 src/selftest/readonly.js（见"自检脚本是真实文件"一节），
+// 所以要查那个文件而不是主进程。查错文件的话断言只是"在 mainSrc 里找不到"，
+// 会变成永远红或者（把模式放宽后）永远绿，两种都不再指向真实行为。
+{
+  const roSrc = fs.readFileSync(path.join(root, 'src/selftest/readonly.js'), 'utf8');
+  assert(/renderFlowDiagram\(steps/.test(roSrc), '只读体检会真的渲染一遍流程图并数节点');
+  assert(/brokenLinks/.test(roSrc), '只读体检会检查流程图节点指向的文件是否存在');
+}
 {
   const uiSrc = fs.readFileSync(path.join(root, 'tests/ui-smoke.js'), 'utf8');
   assert(/PFM_SELFTEST_READONLY/.test(uiSrc), 'test:ui 会跑只读体检');
@@ -460,10 +621,527 @@ assert(/brokenLinks/.test(mainSrc), '只读体检会检查流程图节点指向�
 
 section('测试防护');
 // 功能自检会增删文件，必须拒绝在没有 PFM_DATA_DIR 的情况下运行
-assert(/拒绝在真实数据目录上跑/.test(mainSrc), '功能自检未设 PFM_DATA_DIR 时会拒绝执行');
+assert(/拒绝在真实数据目录上跑/.test(selftestSrc), '功能自检未设 PFM_DATA_DIR 时会拒绝执行');
 assert(fs.existsSync(path.join(root, 'tests/ui-smoke.js')), '存在 tests/ui-smoke.js');
 assert(fs.existsSync(path.join(root, 'tests/functional-smoke.js')), '存在 tests/functional-smoke.js');
 assert(!!pkg.scripts['test:fn'] && !!pkg.scripts['test:ui'], '有 test:ui / test:fn 脚本');
+
+section('静态检查（lint）');
+// node --check 只看语法，抓不到拼错的变量名、改名后残留的死变量、新增的 eval——
+// 而渲染进程里打错一个函数名不会有任何提示，要点到那个按钮才炸。
+assert(fs.existsSync(path.join(root, 'eslint.config.js')), '存在 eslint.config.js');
+assert(!!pkg.scripts.lint, '有 npm run lint');
+// lint 必须挂进 test:all，否则它只是个"需要记得手动跑"的脚本，等于没有。
+assert(/\bnpm run lint\b/.test(pkg.scripts['test:all'] || ''), 'test:all 里包含 lint');
+assert(/^\d+\.\d+\.\d+$/.test((pkg.devDependencies || {}).eslint || ''),
+  'eslint 锁定到确定版本（当前 ' + ((pkg.devDependencies || {}).eslint || '无') + '）');
+{
+  const lintCfg = fs.readFileSync(path.join(root, 'eslint.config.js'), 'utf8');
+  // 三种运行环境的 global 必须分开配：混成一份，no-undef 要么把渲染进程里的
+  // window 判成未定义，要么把主进程里拼错的名字当成浏览器全局放过去。
+  assert(/files: \['src\/renderer\.js'\]/.test(lintCfg), 'renderer.js 单独配置（浏览器环境，无 require）');
+  // 必须只在 renderer 那一段里找 sourceType，不能全文匹配：
+  // 双用模块（i18n / frontmatter）那段也写着 sourceType: 'script'，
+  // 全文匹配的话把 renderer 改成 module 依然是绿的——那条断言就是空的。
+  {
+    const at = lintCfg.indexOf("files: ['src/renderer.js']");
+    const block = at === -1 ? '' : lintCfg.slice(at, at + 400);
+    assert(/sourceType: 'script'/.test(block),
+      '渲染进程按 script 解析（顶层 const 是全局声明，不是模块作用域）');
+  }
+  assert(/'src\/i18n\.js', 'src\/frontmatter\.js'/.test(lintCfg), '双用模块两套 global 都给');
+  assert(/ignores: \['src\/vendor\/\*\*'/.test(lintCfg), 'vendor 副本不 lint（第三方原样文件，改了也会被 sync-vendor 覆盖）');
+  // 几条真正指向缺陷的规则必须是 error，降成 warn 等于关掉（lint 退出码会变 0）
+  for (const rule of ['no-undef', 'no-unused-vars', 'no-redeclare', 'no-dupe-keys', 'no-eval']) {
+    assert(new RegExp("'" + rule + "':\\s*\\[?'error'").test(lintCfg), rule + ' 是 error 级别');
+  }
+}
+assert(fs.existsSync(path.join(root, '.editorconfig')), '存在 .editorconfig');
+
+section('CI 覆盖');
+// 一个测试套件只要没挂进 CI，就等于"需要有人记得手动跑"——
+// 而人不会记得。这里把 package.json 里的 test* 脚本和 ci.yml 对账，
+// 新加了套件却忘了配 CI 步骤时直接变红。
+{
+  const ciPath = path.join(root, '.github/workflows/ci.yml');
+  assert(fs.existsSync(ciPath), '存在 .github/workflows/ci.yml');
+  const ci = fs.readFileSync(ciPath, 'utf8');
+  const testScripts = Object.keys(pkg.scripts).filter(k => k === 'test' || k.startsWith('test:'));
+  // test:all 是本地一键入口（串行跑完所有套件），CI 里拆成独立步骤是故意的：
+  // 拆开才能在页面上直接看到是哪一个套件红的，不用翻日志。
+  const needInCi = testScripts.filter(k => k !== 'test:all');
+  assert(needInCi.length >= 8, '收集到需要进 CI 的测试脚本（' + needInCi.length + ' 个）');
+  const notInCi = needInCi.filter(k => {
+    const cmd = k === 'test' ? 'npm test' : 'npm run ' + k;
+    return !ci.includes(cmd);
+  });
+  assert(notInCi.length === 0,
+    '每个测试脚本都有对应的 CI 步骤' + (notInCi.length ? '，漏了：' + notInCi.join(', ') : ''));
+  assert(ci.includes('npm run lint'), 'CI 跑了 lint');
+
+  // GitHub 已经在对 node20 运行时的 action 报废弃警告，@v4 那批就是 node20。
+  // 不锁具体版本（会天天过期），只卡"不能退回到已废弃的 v4"。
+  const oldActions = [...ci.matchAll(/uses: (actions\/[\w-]+)@v(\d+)/g)]
+    .filter(m => Number(m[2]) <= 4)
+    .map(m => m[1] + '@v' + m[2]);
+  assert(oldActions.length === 0,
+    '没有使用 node20 运行时的旧版 action' + (oldActions.length ? '：' + oldActions.join(', ') : ''));
+
+  // 打包验证：唯一一次"打包后白屏"的故障，开发模式的 8 个套件全绿也拦不住，
+  // 因为开发模式下 CODE_ROOT 和 DATA_ROOT 是同一个目录。必须真打成 exe。
+  assert(/^  package:/m.test(ci), 'CI 里有独立的 package job');
+  assert(ci.includes('npm run dist'), 'CI 真的执行打包');
+  assert(ci.includes('npm run test:packaged'), 'CI 对打包产物跑自检');
+  // if-no-files-found 默认是 warn：路径写错时 artifact 是空的，但 CI 照样绿。
+  assert(/if-no-files-found: error/.test(ci), 'artifact 找不到文件时报错（默认只是 warning）');
+}
+{
+  assert(fs.existsSync(path.join(root, 'tests/packaged-smoke.js')), '存在 tests/packaged-smoke.js');
+  assert(!!pkg.scripts['test:packaged'], '有 npm run test:packaged');
+  const pkgTest = fs.readFileSync(path.join(root, 'tests/packaged-smoke.js'), 'utf8');
+  // dist/ 是增量目录，历史版本的 exe 会一直堆在里面。按任意版本号匹配的话
+  // readdirSync 可能先返回几周前那个 exe——检查全绿，但验的是陈旧产物。
+  // 这是实测踩到的：第一版就把 1.3.0 的 exe 当成被测对象了。
+  assert(/pkgVersion/.test(pkgTest), '打包检查按 package.json 的当前版本号定位产物');
+  // 必须先剥注释再查：上面那段解释为什么不能这么写的注释里就原样写着这个模式，
+  // 直接全文匹配会把自己的说明文字当成违规代码（实测第一版就是这么假红的）。
+  {
+    const code = pkgTest.split(/\r?\n/).filter(l => !/^\s*\/\//.test(l)).join('\n');
+    assert(!/\/\\d\+\\\.\\d\+\\\.\\d\+\//.test(code), '不用"任意版本号"匹配 exe');
+  }
+  // 打包产物只验退出码是不够的：portable 是 GUI 子系统，抓不到 stdout，
+  // 启动器解压失败也可能返回 0。必须用磁盘副作用证明它真跑到了业务逻辑。
+  assert(/ensureSeedData/.test(pkgTest), '验证了只在打包模式执行的首启种子拷贝');
+  assert(/portable 产物失败时返回非零/.test(pkgTest), '验证了打包产物失败时确实非零（否则 exit=0 无意义）');
+}
+
+section('自检脚本是真实文件（不是模板字符串）');
+// 这三段一共 415 行真代码。写成主进程里的 `...` 模板字符串时，对所有静态检查
+// 都是不透明的——实测在里面塞一个 `const const x = 1`，node --check、eslint、
+// 冒烟测试三层全绿，而它一运行必炸。
+// 拆成真实 .js 之后 eslint 立刻抓出两个真问题：一个死变量，
+// 以及 `new RegExp('\b' + code + '\b')` —— 模板层里那两个 \b 被转义吃掉一层，
+// 实际构造出的是退格符（码位 8）而不是词边界，于是 4 条"错误码已本地化"
+// 恒为绿，永远不可能失败。
+{
+  const dir = path.join(root, 'src/selftest');
+  assert(fs.existsSync(dir), '存在 src/selftest 目录');
+  for (const f of ['probe.js', 'functional.js', 'ui.js', 'readonly.js', 'lang.js']) {
+    const p = path.join(dir, f);
+    assert(fs.existsSync(p), '存在 src/selftest/' + f);
+    if (!fs.existsSync(p)) continue;
+    const body = fs.readFileSync(p, 'utf8');
+    // 每个文件都必须是单个可求值表达式：executeJavaScript 要的是表达式，
+    // 不是语句序列。写成 `const x = 1; ...` 会直接 SyntaxError。
+    assert(/^\(async \(\) => \{/.test(body.trim()), f + ' 是 executeJavaScript 能直接求值的表达式');
+    assert(/\}\)\(\)$/.test(body.trim()), f + ' 以 })() 结尾（立即执行）');
+    // 退格符（\b 少转义一层的产物）在这些脚本里没有任何正当用途。
+    // 它出现过一次，而且让 4 条断言彻底失效。
+    assert(!body.includes('\b'), f + ' 里没有退格符（\\b 少转义一层的产物）');
+  }
+  // 主进程只能剩下 loader 调用，不能再有内联的大段脚本
+  assert(/function loadSelfTestScript\(/.test(selftestSrc), '自检模块有 loadSelfTestScript');
+  assert(/loadSelfTestScript\('probe\.js'\)/.test(selftestSrc), 'probe 从文件读');
+  assert(/loadSelfTestScript\('functional\.js'\)/.test(selftestSrc), 'functional 从文件读');
+  assert(/loadSelfTestScript\('ui\.js'\)/.test(selftestSrc), 'ui 从文件读');
+  // 从 CODE_ROOT 读而不是 DATA_ROOT：这是代码资源，打包后在 asar 内，
+  // 数据目录里没有这些文件（这正是当年"打包后白屏"的成因）。
+  assert(/path\.join\(CODE_ROOT, 'src', 'selftest', name\)/.test(selftestSrc),
+    '自检脚本从 CODE_ROOT 读（DATA_ROOT 里没有这些文件）');
+  // 防回归：不能再把脚本写回模板字符串。
+  //
+  // 这条守卫的第一版只扫 /executeJavaScript\(`/ —— 也就是"模板字符串直接当参数传"
+  // 那一种写法。反向对照当场证明它是空的：把 133 行的 ui.js 塞回主进程写成
+  // `const uiScript = \`...\`;`，守卫依然全绿。而这恰好就是原来的形状。
+  // 所以改成扫所有未转义反引号、按配对切出每一段模板字符串，不管它被赋给谁。
+  // 两个文件都要扫。自检那 1354 行搬进 lib/selftest.js 之后，
+  // "把脚本写回模板字符串"这个坏法的落点也跟着搬了过去——只扫 electron-main.js
+  // 的话，这条守卫会在主文件里永远绿着，而它要防的东西已经不在那里了。
+  for (const [label, src] of [['electron-main.js', mainSrc], ['lib/selftest.js', selftestSrc]]) {
+    const longTemplates = [];
+    const lines = src.split('\n');
+    let open = null;              // 当前模板字符串的起始行号
+    for (let li = 0; li < lines.length; li++) {
+      const line = lines[li];
+      for (let ci = 0; ci < line.length; ci++) {
+        if (line[ci] !== '`') continue;
+        // 数前面连续的反斜杠：偶数个才说明这个反引号没被转义
+        let bs = 0;
+        for (let k = ci - 1; k >= 0 && line[k] === '\\'; k--) bs++;
+        if (bs % 2 === 1) continue;
+        if (open === null) open = li;
+        else { if (li - open + 1 > 10) longTemplates.push((open + 1) + ' 行起共 ' + (li - open + 1) + ' 行'); open = null; }
+      }
+    }
+    // 上限取 10 行：短的内联 DOM 探测（两三行）是合理的，没必要一律禁止；
+    // 但十行以上的逻辑就该是真实文件，否则又变回检查盲区。
+    assert(longTemplates.length === 0,
+      label + ' 里没有超过 10 行的内联脚本模板字符串' +
+      (longTemplates.length ? '（发现：' + longTemplates.join('；') + '）' : ''));
+  }
+  // eslint 必须真的覆盖这个目录，否则拆文件就只是搬了个位置
+  {
+    const lintCfg = fs.readFileSync(path.join(root, 'eslint.config.js'), 'utf8');
+    assert(/files: \['src\/selftest\/\*\.js'\]/.test(lintCfg), 'eslint 配了 src/selftest/*.js');
+    const at = lintCfg.indexOf("files: ['src/selftest/*.js']");
+    const block = at === -1 ? '' : lintCfg.slice(at, at + 400);
+    assert(/globals\.browser/.test(block), '自检脚本按浏览器环境 lint（它们在页面上下文里跑）');
+    // selftestRendererGlobals 是手写的白名单：自检脚本用的那些渲染进程全局
+    // （state / openFile / setLang …）在这里被声明成"存在"，no-undef 才会放行。
+    // 风险是它会和 renderer.js 静默脱节——renderer.js 把 openFile 改名了，
+    // 白名单还留着旧名字，于是自检脚本里那个已经失效的调用反而不报错，
+    // 要等真跑到那一行才炸。所以这里逐个回查 renderer.js 是否真有顶层声明。
+    const listed = [];
+    {
+      const at2 = lintCfg.indexOf('const selftestRendererGlobals = {');
+      const end2 = at2 === -1 ? -1 : lintCfg.indexOf('};', at2);
+      const block2 = at2 === -1 ? '' : lintCfg.slice(at2, end2);
+      for (const m of block2.matchAll(/^\s{2}(\$|[A-Za-z_][\w$]*):/gm)) listed.push(m[1]);
+    }
+    assert(listed.length >= 8, '取到了自检脚本的全局白名单（' + listed.length + ' 个）');
+    const notInRenderer = listed.filter(name => {
+      const esc = name.replace(/[$]/g, '\\$&');
+      // 结尾不能用 \b：$ 是非单词字符，`const $ = ...` 里 $ 后面跟的是空格，
+      // 两侧都非单词就不存在词边界，于是 \b 永远匹配不上——这条断言第一版
+      // 就是这么把 $ 误报成"renderer.js 里没有"的。改成"后面不接标识符字符"。
+      const re = new RegExp('^(?:const|let|var|function|async function)\\s+' + esc + '(?![\\w$])', 'm');
+      return !re.test(rendererSrc);
+    });
+    assert(notInRenderer.length === 0,
+      '白名单里的全局在 renderer.js 里都有顶层声明' +
+      (notInRenderer.length ? '，查不到：' + notInRenderer.join(', ') : ''));
+  }
+}
+
+section('自检模块拆分（注入契约）');
+// 1354 行测试专用代码从 electron-main.js 搬进 lib/selftest.js。这一节盯的不是
+// "搬没搬"（行数一看就知道），而是**搬完之后新出现的那类故障**：
+// 主进程和模块之间多了一份手写的依赖清单，它会静默脱节。
+{
+  // 注释里原样写着 require('electron')、cacheStats、win 这些词（在解释为什么
+  // 不那样做），全文匹配会把解释当成违规代码。本仓库已经为这件事红过四次。
+  const strip = (s) => s.split(/\r?\n/).filter(l => !/^\s*(\/\/|\*)/.test(l)).join('\n');
+  const mainCode = strip(mainSrc);
+  const selftestCode = strip(selftestSrc);
+
+  // ---- 搬走了，而不是抄了一份 ----
+  // 复制比漏搬危险得多：两份会各自演化，而自检跑的是模块那份，
+  // 读主文件的人以为自己在看生效的代码。
+  for (const fn of ['installSelfTestDialogStubs', 'attachSelfTest', 'runSecurityRegression', 'loadSelfTestScript', 'runSearchBench']) {
+    assert(new RegExp('function ' + fn + '\\(').test(selftestCode), 'lib/selftest.js 里有 ' + fn);
+    assert(!new RegExp('function ' + fn + '\\(').test(mainCode), 'electron-main.js 里不再有 ' + fn + ' 的定义（是搬走，不是抄一份）');
+  }
+  // 模块只对外暴露三个入口，另外两个（runSecurityRegression / loadSelfTestScript）
+  // 是它的内部实现，不该被主进程直接调。
+  {
+    const at = selftestCode.indexOf('module.exports');
+    const line = at === -1 ? '' : selftestCode.slice(at, selftestCode.indexOf('\n', at) + 1 || undefined);
+    assert(/\binit\b/.test(line) && /runSearchBench/.test(line) &&
+           /installSelfTestDialogStubs/.test(line) && /attachSelfTest/.test(line),
+      '模块导出 init 和三个入口');
+    assert(!/runSecurityRegression/.test(line) && !/loadSelfTestScript/.test(line),
+      '模块不导出内部实现（runSecurityRegression / loadSelfTestScript）');
+  }
+
+  // ---- 三份清单必须一致 ----
+  // REQUIRED（校验用）、init 里的解构（赋值用）、主进程的调用点（传值用）。
+  // 任意两份脱节都是静默的：REQUIRED 少一项 → 校验放过 undefined；解构少一项 →
+  // 模块里那个变量永远是 undefined；调用点少一项 → 启动时才报。
+  const names = (s) => (s.match(/[A-Za-z_$][\w$]*/g) || []);
+  const REQ = (() => {
+    const at = selftestCode.indexOf('const REQUIRED = [');
+    const end = selftestCode.indexOf('];', at);
+    if (at === -1 || end === -1) return [];
+    return (selftestCode.slice(at, end).match(/'[A-Za-z_$][\w$]*'/g) || []).map(s => s.slice(1, -1));
+  })();
+  const DESTRUCT = (() => {
+    const end = selftestCode.indexOf('} = ctx);');
+    const at = end === -1 ? -1 : selftestCode.lastIndexOf('({', end);
+    if (at === -1) return [];
+    return names(selftestCode.slice(at + 2, end));
+  })();
+  const PASSED = (() => {
+    const at = mainCode.indexOf('selftest.init({');
+    const end = at === -1 ? -1 : mainCode.indexOf('});', at);
+    if (at === -1 || end === -1) return [];
+    return names(mainCode.slice(at + 'selftest.init({'.length, end));
+  })();
+  // 先卡数量：切片取空会让下面每条比较都恒真（本仓库栽过一次——锚点是注释，
+  // 剥注释之后 indexOf 变 -1，整段断言全部变成空断言还是绿的）。
+  assert(REQ.length >= 30, 'REQUIRED 清单解析到了（' + REQ.length + ' 项）');
+  assert(DESTRUCT.length >= 30, 'init 的解构清单解析到了（' + DESTRUCT.length + ' 项）');
+  assert(PASSED.length >= 30, '主进程调用点的传参清单解析到了（' + PASSED.length + ' 项）');
+  const diff = (a, b) => a.filter(x => !b.includes(x));
+  assert(diff(REQ, DESTRUCT).length === 0 && diff(DESTRUCT, REQ).length === 0,
+    'REQUIRED 与 init 解构完全一致' +
+    (diff(REQ, DESTRUCT).length ? '，REQUIRED 多：' + diff(REQ, DESTRUCT).join(', ') : '') +
+    (diff(DESTRUCT, REQ).length ? '，解构多：' + diff(DESTRUCT, REQ).join(', ') : ''));
+  assert(diff(REQ, PASSED).length === 0 && diff(PASSED, REQ).length === 0,
+    '主进程传的和模块要的完全一致' +
+    (diff(REQ, PASSED).length ? '，模块要但没传：' + diff(REQ, PASSED).join(', ') : '') +
+    (diff(PASSED, REQ).length ? '，传了但模块没声明：' + diff(PASSED, REQ).join(', ') : ''));
+  // 漏传要在启动时就报名字，而不是等自检跑到一半 undefined is not a function。
+  //
+  // 这条第一版在**全文**里查 /missing\.length/ 和 /throw new Error\(/。反向对照
+  // 证明它是空的：把 init 里那行校验整条删掉，断言照绿——因为这两个词在模块别处
+  // 也有（某个自检项自己在算 missing，requireInit 里也有 throw new Error）。
+  // 全文匹配回答的是"这个文件里有没有这两个字符串"，和"init 有没有校验"无关。
+  {
+    // init 的闭合花括号在第 0 列，而解构那行是 `  } = ctx);`（有缩进），
+    // 所以 \n} 切到的就是函数末尾，不会被内部的 } 截断。
+    const m = selftestCode.match(/function init\(ctx\) \{([\s\S]*?)\n\}/);
+    assert(!!m, '取到了 init 的函数体');
+    const body = m ? m[1] : '';
+    assert(/REQUIRED\.filter\(/.test(body) && /missing\.length/.test(body) && /\bthrow\b/.test(body),
+      'init 自己校验漏传（照 REQUIRED 逐项查并抛出）');
+    // 只抛不报名字的话，启动失败只能知道"少了东西"，不知道少哪一个——
+    // 而这正是拆分之后最可能出现的错误形态（三份清单漂移）。
+    assert(/missing\.join\(/.test(body), 'init 抛出的消息里带上缺失项的名字');
+  }
+  // 三个入口各自挡一道：没注入就跑，产出的是一堆没有意义的失败项，比直接炸更难查。
+  //
+  // 这条的第一版是 `(match(/requireInit\(/g)||[]).length >= 4`——数出现次数。
+  // 反向对照当场证明它是空的：把 requireInit 的函数体换成 `void who;`，四处文本
+  // 一个没少，断言照绿，而守卫已经形同虚设。数文本量证明不了文本在干活。
+  // 所以两头都查：定义里真的抛，且每个入口的**第一条语句**就是它
+  // （挪到后面等于前面那些活已经干完了，守卫只剩装饰作用）。
+  {
+    const def = selftestCode.match(/function requireInit\(\w+\)\s*\{([\s\S]*?)\n\}/);
+    assert(!!def, '取到了 requireInit 的定义');
+    const body = def ? def[1] : '';
+    assert(/!initialized/.test(body) && /\bthrow\b/.test(body),
+      'requireInit 未初始化时真的抛（不是空壳）');
+    for (const fn of ['runSearchBench', 'installSelfTestDialogStubs', 'attachSelfTest']) {
+      const at = selftestCode.indexOf('function ' + fn + '(');
+      const first = at === -1 ? ''
+        : (selftestCode.slice(selftestCode.indexOf('\n', at) + 1).split('\n')[0] || '');
+      assert(new RegExp("requireInit\\('" + fn + "'\\)").test(first),
+        fn + ' 的第一条语句就是 requireInit 守卫');
+    }
+  }
+
+  // ---- 可变绑定：必须共享同一个对象 ----
+  // fileReadCount / cacheHits / cacheMisses / CONTENT_CACHE_MAX 四项，主文件的
+  // 热路径在写，模块里的压测和 LRU 自检也在写。按值传进模块的话，模块清零写的是
+  // 自己那份副本，热路径继续加在原变量上——压测永远报 0 次读 0 命中，而且看不出错。
+  // 所以它们只能是同一个对象上的字段。
+  assert(REQ.includes('cacheStats'), '注入契约里有 cacheStats');
+  for (const c of ['fileReadCount', 'cacheHits', 'cacheMisses', 'CONTENT_CACHE_MAX']) {
+    assert(!REQ.includes(c), c + ' 不单独注入（按值传会写进死副本）');
+    assert(!new RegExp('^\\s*let\\s+' + c + '\\b', 'm').test(selftestCode),
+      'lib/selftest.js 没有自己声明 ' + c + '（否则改的是模块内的影子变量）');
+    assert(!new RegExp('^let\\s+' + c + '\\b', 'm').test(mainCode),
+      'electron-main.js 也不再有模块级 ' + c + '（已并入 cacheStats）');
+  }
+  // 两侧都必须通过同一个对象读写
+  assert(/cacheStats\.fileReadCount\+\+/.test(mainCode), '主进程的读计数加在 cacheStats 上');
+  assert(/contentCache\.size > cacheStats\.CONTENT_CACHE_MAX/.test(mainCode), 'LRU 上限判断读 cacheStats');
+  assert(/cacheStats\.fileReadCount = 0/.test(selftestCode), '压测清零写的是 cacheStats');
+  assert(/cacheStats\.CONTENT_CACHE_MAX = 3/.test(selftestCode), 'LRU 自检调小的也是 cacheStats');
+
+  // ---- win 不能注入 ----
+  // 它是 let，沙箱降级会重建窗口换成新实例（见 attachSandboxProbe）。注入时那个
+  // 引用之后会指向已销毁的旧窗口，而自检会对着它 executeJavaScript，
+  // 症状是自检在一个不存在的窗口上超时，跟被测功能毫无关系。
+  assert(!REQ.includes('win'), 'win 不在注入契约里（它会被重建窗口换掉）');
+  // 这条原先只切函数签名来查 win，反向对照证明它是空的：在模块里加
+  // `let win = null;` 再写 `targetWin = targetWin || win;`，签名里干干净净，
+  // 断言全绿，而模块已经重新拿到了一个会被换掉的窗口引用。
+  // 所以改成盯**整个模块**：除了 win.ini 那几个字面量，不允许出现裸的 win 标识符。
+  {
+    const winRefs = [];
+    for (const m of selftestCode.matchAll(/(?<![\w$.'"])win(?![\w$])/g)) {
+      // win.ini 是路径穿越回归用的测试数据（other + ':\\Windows\\win.ini'），
+      // 与窗口引用无关；上面的前后界已排除 .win / win_ 之类，这里再排掉 win.ini。
+      if (selftestCode.slice(m.index, m.index + 7) === 'win.ini') continue;
+      winRefs.push(selftestCode.slice(Math.max(0, m.index - 30), m.index + 20).replace(/\n/g, '\\n'));
+    }
+    assert(winRefs.length === 0,
+      '模块里没有裸的 win 引用（窗口只能由调用方逐次传入）' +
+      (winRefs.length ? '（发现 ' + winRefs.length + ' 处：' + winRefs.slice(0, 3).join(' | ') + '）' : ''));
+  }
+  assert(/function attachSelfTest\(targetWin\)/.test(selftestCode), 'attachSelfTest 的窗口由调用方传入');
+  // 传进来的窗口不能被兜底成别的东西：`targetWin = targetWin || 某个模块级引用`
+  // 就是上面那个假绿场景的落地形式。
+  assert(!/targetWin\s*=\s*targetWin\s*\|\|/.test(selftestCode), 'targetWin 不做兜底替换');
+  // console-message 的两套签名都要认。Electron 36 把它从 (e, level, message)
+  // 改成只传一个 details 对象，且 level 从整数（2=warning/3=error）变成字符串。
+  //
+  // 为什么专门盯这一处：它是"渲染进程报错就让自检失败"的唯一入口。只写旧签名的话，
+  // 在新版里 level 会变成那个 details 对象，`level >= 2` 恒为 false——页面里报什么错
+  // 都收不到，自检照旧全绿。升 Electron 时这类失效不会有任何报错，只会让一道检查
+  // 静默消失，而"测试还是全绿"恰好是它的症状而不是反证。
+  {
+    const at = selftestCode.indexOf("on('console-message'");
+    const body = at === -1 ? '' : selftestCode.slice(at, at + 700);
+    assert(at > 0, '找到 console-message 监听（渲染进程报错的唯一入口）');
+    assert(/'error'/.test(body) && /'warning'/.test(body),
+      'console-message 认新签名的字符串 level（Electron 36+ 传 details 对象）');
+    assert(/typeof level === 'number'/.test(body) || /typeof\s+\w+\s*===\s*'number'/.test(body),
+      'console-message 同时认旧签名的整数 level（不赌运行时是哪个版本）');
+    assert(/consoleErrors\.push/.test(body), '两条分支都把消息收进 consoleErrors');
+  }
+
+  // ---- 和其它 lib 模块同样的约定 ----
+  // 自己 require('electron') 会拿到同一个模块实例，看着能用；但路径常量不行——
+  // DATA_ROOT / CODE_ROOT 的判断只允许存在一份，抄第二份的代价这个项目付过（打包版白屏）。
+  assert(!/require\(['"]electron['"]\)/.test(selftestCode), 'lib/selftest.js 不自己 require electron');
+  // 原先只查 app.getPath(，反向对照用 `process.env.PFM_DATA_DIR || __dirname`
+  // 绕过去了——那同样是第二份数据目录真值。改成白名单：数据目录只能从注入的
+  // 常量来，模块自己不许**推导**路径根。
+  // 注意 process.env.PFM_DATA_DIR 本身在模块里是合法的：四处自检用它判断
+  // "有没有隔离数据目录"（拒绝在真实库上跑）。区别在于读它做判断 vs 拿它当路径用。
+  assert(!/app\.getPath\(/.test(selftestCode), '不自己解析数据目录（DATA_ROOT 只有一处真值来源）');
+  assert(!/app\.isPackaged/.test(selftestCode), '不自己判断打包状态（路径分支只有主进程一处）');
+  {
+    const derived = (selftestCode.match(/process\.env\.PFM_DATA_DIR\s*(\|\||&&\s*path|\+)/g) || []);
+    assert(derived.length === 0,
+      'PFM_DATA_DIR 只用于判断是否隔离，不用来拼路径' +
+      (derived.length ? '（发现：' + derived.join('、') + '）' : ''));
+    // 允许的用法只有"真假判断"。逐个回查每一处都是 if (!process.env.PFM_DATA_DIR)。
+    const uses = [...selftestCode.matchAll(/process\.env\.PFM_DATA_DIR/g)];
+    const nonGuard = uses.filter(m => !/if \(!process\.env\.PFM_DATA_DIR\)/.test(
+      selftestCode.slice(Math.max(0, m.index - 20), m.index + 30)));
+    assert(uses.length >= 4 && nonGuard.length === 0,
+      'PFM_DATA_DIR 的每一处用法都是 if (!…) 形式的隔离检查（共 ' + uses.length + ' 处）');
+  }
+  // 主进程只留三个带前缀的调用点
+  assert(/selftest\.attachSelfTest\(win\)/.test(mainCode), '主进程调 selftest.attachSelfTest');
+  assert(/selftest\.runSearchBench\(/.test(mainCode), '主进程调 selftest.runSearchBench');
+  assert(/selftest\.installSelfTestDialogStubs\(\)/.test(mainCode), '主进程调 selftest.installSelfTestDialogStubs');
+  // init 必须在所有被注入的东西都定义好之后才调用。SELF_URL / isSelfUrl 是最后
+  // 定义的两个（就在导航守卫那一节），所以用它们当下界；提前调用会把 undefined
+  // 冻进模块，而 init 的非空校验恰好会当场报出来——但报的是"缺依赖"，
+  // 跟"调用点放错位置"这个真实原因隔着一层，所以这里直接盯位置。
+  {
+    const initAt = mainCode.indexOf('selftest.init({');
+    const selfUrlAt = mainCode.indexOf('const SELF_URL =');
+    const isSelfUrlAt = mainCode.indexOf('function isSelfUrl(');
+    assert(initAt > 0 && selfUrlAt > 0 && isSelfUrlAt > 0, '取到了 init 调用点与 SELF_URL/isSelfUrl 的位置');
+    assert(initAt > selfUrlAt && initAt > isSelfUrlAt,
+      'selftest.init() 在它注入的所有东西都定义之后才调用');
+  }
+}
+
+section('文档与代码一致');
+{
+  // 文档漂移是静默的：脚本改名、开关删掉，文档照旧，读文档的人照着敲然后失败。
+  // 所以这里把 CONTRIBUTING.md / CLAUDE.md 里引用的 npm 脚本、环境变量、文件路径
+  // 全部回查一遍代码。
+  const contribPath = path.join(root, 'CONTRIBUTING.md');
+  assert(fs.existsSync(contribPath), 'CONTRIBUTING.md 存在');
+  const docs = [
+    ['CONTRIBUTING.md', contribPath],
+    ['CLAUDE.md', path.join(root, 'CLAUDE.md')],
+    ['README.md', path.join(root, 'README.md')]
+  ]
+    .filter(([, p]) => fs.existsSync(p))
+    .map(([name, p]) => [name, fs.readFileSync(p, 'utf8')]);
+
+  const pkgScripts = Object.keys(JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).scripts || {});
+
+  // 文档里有一类路径**故意**不在仓库里：装依赖或构建之后才生成的东西。
+  // `node_modules/electron/dist/version` 就是——「升级了 Electron 但跑的还是旧二进制」
+  // 那条坑必须指名这个文件，否则读者不知道去哪核对。它被 .gitignore 排除，
+  // 本地装了依赖所以存在，CI 上 npm ci 不解压二进制就不存在，于是同一份文档
+  // 本地绿、CI 红（这条 CI 只在 push main / PR 时跑，所以隔了几个提交才暴露）。
+  //
+  // 放行规则限定成「被 git 忽略的生成物」，不是按文件名开白名单：
+  // 后者每加一个路径就要改一次测试，迟早有人图省事把真实笔误也加进去。
+  const IGNORED_PREFIXES = ['node_modules/', 'dist/', 'logs/', '.versions/', '.trash/'];
+  const missingDocPaths = (src) => {
+    const found = new Set();
+    for (const m of src.matchAll(/`([\w.-]+(?:\/[\w.*-]+)+)`/g)) found.add(m[1]);
+    return [...found].filter(p =>
+      !p.includes('*') &&
+      !IGNORED_PREFIXES.some(pre => p.startsWith(pre)) &&
+      !fs.existsSync(path.join(root, p)));
+  };
+
+  // 上面放宽了检查，所以这里必须证明它没被放宽成筛子：
+  // 仓库里真实存在的路径照旧要能查（不是无条件放行），
+  // 而一个编造的路径必须被抓出来 —— 包括编在放行前缀**之外**的笔误。
+  // 少了这条，把 IGNORED_PREFIXES 写成 [''] 都照样全绿。
+  assert(missingDocPaths('`src/renderer.js` `lib/selftest.js`').length === 0,
+    '路径守卫不会误伤真实存在的路径');
+  assert(missingDocPaths('`src/nope-not-real.js`').length === 1,
+    '路径守卫仍能抓出编造的路径（放宽后没变成筛子）');
+  // 故意用一个**确定不存在**的 node_modules 路径。写 dist/version 的话，
+  // 本地它真的在，这条就分不清"被前缀放行"和"因为文件存在才过"——
+  // 本地绿而 CI 红的正是后者，那样等于没测。
+  assert(missingDocPaths('`node_modules/electron/dist/nope-xyz`').length === 0,
+    '装依赖后才生成的路径被放行（CI 上没有它也不该红）');
+
+  for (const [name, src] of docs) {
+    // `npm run x` 和 `npm test`（后者没有 run）
+    const cited = new Set();
+    for (const m of src.matchAll(/npm run ([a-z][\w:-]*)/g)) cited.add(m[1]);
+    for (const m of src.matchAll(/npm test\b/g)) { void m; cited.add('test'); }
+    const badScripts = [...cited].filter(s => !pkgScripts.includes(s));
+    assert(badScripts.length === 0,
+      name + ' 引用的 npm 脚本都存在' + (badScripts.length ? '，查不到：' + badScripts.join(', ') : '（' + cited.size + ' 个）'));
+
+    // 文档里写的路径必须真的在仓库里。
+    //
+    // 只查**带目录分隔符**的，不查裸文件名。第一版把 `` `i18n.js` `` 和
+    // `` `index.json` `` 也算进来，于是误报了两条：前者是散文里的简称
+    // （真实路径 src/i18n.js，同一段上下文已经写清楚了），后者是回收站里的
+    // 运行时文件（.trash/index.json，仓库里本来就不该有）。
+    // 带斜杠的路径才是"读者会照着去打开"的断言，裸文件名是行文简称，
+    // 强行校验只会逼着把散文改成路径，读起来更差。
+    const badPaths = missingDocPaths(src);
+    assert(badPaths.length === 0,
+      name + ' 引用的文件路径都存在' + (badPaths.length ? '，查不到：' + badPaths.join(', ') : ''));
+
+    // 自我复制：CLAUDE.md 曾经把整篇文档插进自己第 7 条的正中间（首个 H1 出现两次），
+    // 结果那一条的句子被截断成半句，读的人只会以为是笔误。
+    // 这类损坏靠肉眼翻很难发现——文档很长，前半段看起来完全正常。
+    const firstLine = src.split('\n')[0];
+    if (/^# /.test(firstLine)) {
+      const dupAt = src.indexOf(firstLine, 1);
+      assert(dupAt === -1, name + ' 没有把自己的标题重复一遍（自我复制损坏）',
+        dupAt === -1 ? '' : '第二次出现在偏移 ' + dupAt);
+    }
+  }
+
+  // 反向：主进程里的自检开关必须都被 CONTRIBUTING.md 记录到，
+  // 否则新增开关只有作者知道，等同于没有。
+  //
+  // lib/ 也要扫：PFM_SANDBOX 的读取点在 lib/sandbox-state.js 的 decide() 里
+  // （env 是调用方传进来的），只扫 mainSrc 的话它在文档里缺失也照样全绿。
+  // 这和上面"lib/ 下不许抛中文"是同一类漏法——按文件名写死的检查，
+  // 新文件落进来时自动脱离覆盖。
+  {
+    const contrib = fs.readFileSync(contribPath, 'utf8');
+    const inCode = new Set(
+      [mainSrc, ...LIB_FILES.map(([, s]) => s)]
+        .flatMap(src => [...src.matchAll(/PFM_[A-Z_]+/g)].map(m => m[0]))
+    );
+    const undocumented = [...inCode].filter(v => !contrib.includes(v));
+    assert(undocumented.length === 0,
+      '主进程与 lib/ 的开关都写进了 CONTRIBUTING.md' +
+      (undocumented.length ? '，漏了：' + undocumented.join(', ') : '（' + inCode.size + ' 个）'));
+  }
+
+  // 反向：package.json 里的每个 test* 脚本都要在 CONTRIBUTING.md 里出现。
+  // 上面那条查的是"文档写的脚本存在"，方向是文档→代码，挡不住
+  // "加了新测试但没人知道"——那种漏法下文档依然全绿。
+  {
+    const contrib = fs.readFileSync(contribPath, 'utf8');
+    const testScripts = pkgScripts.filter(s => s === 'test' || s.startsWith('test:'));
+    const notDocumented = testScripts.filter(s => !contrib.includes(s === 'test' ? 'npm test' : 'npm run ' + s));
+    assert(notDocumented.length === 0,
+      '每个 test 脚本都写进了 CONTRIBUTING.md' +
+      (notDocumented.length ? '，漏了：' + notDocumented.join(', ') : '（' + testScripts.length + ' 个）'));
+  }
+
+  // 反向对照这条规则本身要出现在文档里，否则新人不会知道它存在
+  {
+    const contrib = fs.readFileSync(contribPath, 'utf8');
+    assert(/反向对照/.test(contrib), 'CONTRIBUTING.md 写了反向对照规则');
+    assert(/空断言/.test(contrib), 'CONTRIBUTING.md 解释了什么算空断言');
+  }
+}
 
 section('调试残留');
   // 防回归：buildSubTree/listTree 每次调用都同步 appendFileSync，日志无限增长
@@ -471,6 +1149,162 @@ section('调试残留');
   assert(!mainSrc.includes('\uFFFD'), 'electron-main.js 无编码乱码字符');
   for (const junk of ['.shot.ps1', '.screenshot.png', '.screenshot-v2.png', 'debug.log']) {
     assert(!fs.existsSync(path.join(root, junk)), '开发残留已清理: ' + junk);
+  }
+
+  section('升级检查（本项目唯一主动出网的地方）');
+  // 这一节盯的不是"版本比较对不对"（那在 tests/update.test.js 里，裸 node 跑），
+  // 而是**主进程接线**上那些单测看不到的约束。加这个功能等于给一个此前零出网的
+  // 应用开一个出网口，所以每条都指向"这个口会不会被用歪"。
+  {
+    // 三个文件都先剥掉整行注释再查。这一节的注释里原样写着 html_url、assets、
+    // await runUpdateCheck() 这些"反面写法"，不剥就会把自己的说明文字当成违规代码
+    // （本仓库已经踩过三次这个坑，最近一次在 packaged-smoke.js）。
+    const strip = (s) => s.split(/\r?\n/).filter(l => !/^\s*(\/\/|\*)/.test(l)).join('\n');
+    const updSrc = fs.readFileSync(path.join(root, 'lib/update-check.js'), 'utf8');
+    const updCode = strip(updSrc);
+    const mainCode = strip(mainSrc);
+    const renderCode = strip(rendererSrc);
+    assert(!/\.html_url/.test(updCode),
+      '模块不读响应里的 html_url（发布页地址只能是本地常量）');
+    assert(!/\.assets\b/.test(updCode), '模块不读响应里的 assets（不自动下载）');
+
+    // 发布页 URL 只能在主进程里出现，且不接受渲染进程传参。
+    // 反面情形：ipcMain.handle('open-release-page', (e, url) => shell.openExternal(url))
+    // ——那样"地址不来自响应"这条约束在最后一步就白做了，因为渲染进程的 url
+    // 可以一路追溯到响应内容。
+    {
+      const at = mainCode.indexOf("ipcMain.handle('open-release-page'");
+      assert(at > 0, '有打开发布页的 IPC');
+      const body = at > 0 ? mainCode.slice(at, at + 300) : '';
+      assert(/shell\.openExternal\(updateCheck\.RELEASE_PAGE_URL\)/.test(body),
+        '打开发布页用模块里的本地常量（不接受调用方传 URL）');
+      assert(!/async \(e, url\)/.test(body) && !/\(e, url\)/.test(body),
+        'open-release-page 不接收 url 参数（否则外部内容能决定打开什么）');
+    }
+    // 出网不能挡住窗口。fetchLatest 最坏要等满超时，await 它就等于让窗口
+    // 晚那么久才出来——而升级检查是用户没要求的后台行为，凭什么让它拖慢启动。
+    //
+    // 锚点用 `await runStartupHeal();`，不用 `await createWindow();`：后者在
+    // electron-main.js 里有两处（启动链路一处，沙箱降级重建一处），indexOf 会
+    // 命中降级那一处，于是"不 await"这条会在一段根本没有 runUpdateCheck 的
+    // 文本上恒真——空断言。第一版就是这么写的，靠"启动时会跑升级检查"那条
+    // 变红才发现窗口取错了。
+    {
+      const at = mainCode.indexOf('await runStartupHeal();');
+      assert(at > 0, '启动链路里有自愈步骤（升级检查断言的锚点）');
+      const body = at > 0 ? mainCode.slice(at, at + 400) : '';
+      assert(/runUpdateCheck\(\)/.test(body), '启动时会跑升级检查');
+      assert(!/await runUpdateCheck\(\)/.test(body),
+        '升级检查不 await（否则窗口要等出网超时才出来）');
+    }
+    // 自检/压测进程不许出网：否则测试依赖网络，变慢且偶发失败。
+    // 这个判断在模块里（shouldCheck），这里确认它真的被接上了。
+    assert(/PFM_SELFTEST/.test(updCode), '模块自己排除自检进程');
+    assert(/updateCheck\.shouldCheck\(/.test(mainCode), '主进程走 shouldCheck 判定');
+    // 用户可关，且开关要能真的写盘（走 updateConfig 而不是直接改内存）
+    assert(/updateCheck: true/.test(mainCode), '配置默认值里有 updateCheck');
+    assert(/config\.updateCheck === false/.test(updCode), '关掉之后连请求都不发');
+    // 时间戳必须无论成功失败都记。只在成功时记的话，离网用户每次启动都会
+    // 重新发起请求并等满超时。
+    //
+    // 顺序也要查：时间戳那句必须排在 `if (res.error)` 之前。只比较"两句都在"
+    // 证明不了任何东西——把写时间戳挪到失败返回之后，两句依然都在。
+    {
+      const at = mainCode.indexOf('async function runUpdateCheck');
+      const body = at > 0 ? mainCode.slice(at, at + 2000) : '';
+      assert(/updateConfig\(\{ updateLastCheckedAt: at \}\)/.test(body),
+        '检查时间走 updateConfig（串行化的读改写，不会和渲染进程的配置写互相覆盖）');
+      const errAt = body.indexOf('if (res.error)');
+      const tsAt = body.indexOf('updateLastCheckedAt: at');
+      assert(tsAt > 0 && errAt > 0 && tsAt < errAt,
+        '失败也记检查时间（否则离网用户每次启动都等满超时）');
+    }
+    // 整个 runUpdateCheck 是 fire-and-forget 调用的，内部必须自己兜住异常，
+    // 否则就是主进程里一个没人接的 rejection。
+    //
+    // 查的是"函数体第一句就是 try"这个结构，不是"函数体里出现过 try/catch"：
+    // 这个函数里另有一处内层 try/catch（包住 updateConfig 那次写盘），
+    // 所以宽松的 /try \{/ 在**外层被删掉之后照样是绿的**——正好是那种"改坏了
+    // 也不报"的空断言。锚定到签名后面第一句，才真的能证明整段被包住了。
+    assert(/async function runUpdateCheck\(\) \{\s*try \{/.test(mainCode),
+      'runUpdateCheck 整个函数体被 try 包住（它是 fire-and-forget 调用的）');
+    {
+      // 兜住之后要留下痕迹。静默失败不等于装作没发生过——这是排障时唯一的线索。
+      //
+      // 只查"函数体里有 logger.error('[update]"是不够的：里头那处内层 catch
+      // （updateConfig 写盘失败）自己就有一条同前缀的日志，所以把**外层** catch
+      // 的日志删掉，宽松写法照样是绿的。锚到最后一个 `} catch (e) {` 之后的
+      // 那一段，查的才是外层那条。
+      const at = mainCode.indexOf('async function runUpdateCheck');
+      const end = mainCode.indexOf('\n}', at);
+      const fn = at > 0 && end > at ? mainCode.slice(at, end) : '';
+      const lastCatch = fn.lastIndexOf('} catch (e) {');
+      const tail = lastCatch > 0 ? fn.slice(lastCatch) : '';
+      assert(/logger\.error\('\[update\]/.test(tail),
+        '最外层兜住的异常会记日志（静默不等于无痕）');
+    }
+    // 渲染进程侧：版本号在插进界面之前要再过一次白名单。
+    // 不能因为"主进程已经校验过"就省掉——那种跨层信任一旦上游放宽就变成注入点。
+    //
+    // 这几条都**限定在升级提示那段函数体内**查。整个 renderer.js 里 textContent
+    // 出现几十次，不限定范围的 /textContent/ 永远是绿的：横幅改用 innerHTML 它
+    // 照样通过，那就是 CONTRIBUTING 里说的空断言。
+    //
+    // 切片的两端都锚在**代码行**上，不锚注释：这一节用的是剥过注释的 renderCode，
+    // 原来那个 `\n// ===== 分隔条拖拽` 结束锚点在剥完之后根本不存在，
+    // indexOf 返回 -1，body 直接变成空串——三条断言会一起假绿。
+    {
+      const at = renderCode.indexOf('function showUpdateBanner');
+      const end = renderCode.indexOf('const saveSidebarWidthDebounced', at);
+      assert(at > 0 && end > at, '找到升级提示那段渲染代码');
+      const body = at > 0 && end > at ? renderCode.slice(at, end) : '';
+      // 白名单必须真的**用在**版本号上，而不只是声明在文件里。
+      assert(/VERSION_DISPLAY_RE\.test\(/.test(renderCode),
+        '渲染进程的版本号白名单真的被调用（不是只声明）');
+      // 把响应内容写进界面的路径有**两条**：横幅靠主进程推送，设置面板那行状态
+      // 文字靠主动拉取。两条都要过白名单，所以分开切、分开查——合在一起查的话
+      // 失败信息说不出是哪条断的。
+      //
+      // 查法是"剥掉所有 safeVersion(...) 调用之后，还有没有裸读 info.version"，
+      // 不是"出现过 safeVersion"也不是数调用次数。前两种写法都被反向对照证明过是
+      // 漏的：横幅函数里本来就有两处 safeVersion（一处包版本号、一处包当前版本），
+      // 删掉包版本号那处，"出现过"照样成立；数次数则只会让**另一条**断言变红，
+      // 报错指向的不是真正坏掉的地方。剥完看残留，查的才是"每一次读都被包住"。
+      const unguarded = (s) => /\binfo\s*(?:&&\s*info\s*)?\.(?:version|currentVersion)\b/
+        .test(s.replace(/safeVersion\([^)]*\)/g, ''));
+
+      const bEnd = renderCode.indexOf('function hideUpdateBanner', at);
+      const banner = at > 0 && bEnd > at ? renderCode.slice(at, bEnd) : '';
+      assert(banner.length > 0 && !unguarded(banner),
+        '横幅里每一次读推过来的版本号都过白名单');
+
+      const sAt = renderCode.indexOf('async function renderUpdateStatus');
+      const status = sAt > 0 && end > sAt ? renderCode.slice(sAt, end) : '';
+      assert(status.length > 0 && !unguarded(status),
+        '设置面板那行状态文字里的版本号也过白名单');
+      assert(/\.textContent = /.test(body), '横幅文案走 textContent');
+      assert(!/innerHTML/.test(body), '横幅不用 innerHTML（版本号来自外部响应）');
+    }
+    // 请求里不许带本机标识。
+    //
+    // 这条必须写成**白名单**：枚举请求头里允许出现的字段名，多一个就红。
+    // 第一版写的是黑名单（查 machineId / os.hostname() 这类词），反向对照里
+    // 加一行 'X-Machine': require('os').hostname() 就绕过去了——黑名单只能拦
+    // 它想得到的写法，而"别往外发本机信息"这件事的反面有无穷多种拼法。
+    {
+      const at = updCode.indexOf('headers: {');
+      const end = updCode.indexOf('timeout: timeoutMs', at);
+      assert(at > 0 && end > at, '找到出网请求的请求头');
+      const hdr = at > 0 && end > at ? updCode.slice(at, end) : '';
+      const allowed = ['User-Agent', 'Accept', 'Accept-Encoding'];
+      const names = (hdr.match(/'[A-Za-z][A-Za-z-]*':/g) || []).map(s => s.slice(1, -2));
+      const extra = names.filter(n => !allowed.includes(n));
+      assert(names.length > 0 && extra.length === 0,
+        '请求头只有固定的三个字段，不带任何本机标识' + (extra.length ? '（多了: ' + extra.join(', ') + '）' : ''));
+      // UA 的内容也要是常量。带上主机名/用户名同样是本机标识，而它不会多出一个字段名。
+      assert(/userAgent: o\.userAgent \|\| 'Prompt-Flow-Manager'/.test(updCode),
+        'User-Agent 是固定常量（不拼接任何本机信息）');
+    }
   }
 
   section('i18n 键完整性');

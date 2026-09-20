@@ -1,6 +1,6 @@
 {
   "name": "prompt-flow-manager",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "提示词流程管理系统 - 本地桌面应用",
   "main": "electron-main.js",
   "scripts": {
@@ -12,7 +12,17 @@
     "test:debounce": "node tests/debounce.test.js",
     "test:close": "node tests/close-flush.test.js",
     "test:render": "node tests/render-guard.test.js",
-    "test:all": "npm test && npm run test:ui && npm run test:fn && npm run test:tabs && npm run test:debounce && npm run test:close && npm run test:render",
+    "test:heal": "node tests/heal.test.js",
+    "test:logger": "node tests/logger.test.js",
+    "test:sandbox": "node tests/sandbox.test.js",
+    "test:update": "node tests/update.test.js",
+    "test:contrast": "node tests/contrast.test.js",
+    "test:reverse": "node tests/reverse-control-update.js",
+    "test:reverse-split": "node tests/reverse-control-split.js",
+    "test:packaged": "node tests/packaged-smoke.js",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test:all": "npm run lint && npm test && npm run test:ui && npm run test:fn && npm run test:tabs && npm run test:debounce && npm run test:close && npm run test:render && npm run test:heal && npm run test:logger && npm run test:sandbox && npm run test:update && npm run test:contrast && npm run test:reverse && npm run test:reverse-split",
     "bench": "node tests/search-bench.js",
     "sync-vendor": "node scripts/sync-vendor.js",
     "prebuild": "node scripts/sync-vendor.js",
@@ -44,8 +54,9 @@
   "devDependencies": {
     "diff-match-patch": "1.0.5",
     "dompurify": "3.4.14",
-    "electron": "^28.0.0",
+    "electron": "43.7.2",
     "electron-builder": "^24.9.1",
+    "eslint": "9.39.1",
     "marked": "11.2.0"
   },
   "dependencies": {

@@ -173,6 +173,20 @@ const I18N = {
     added: '已添加',
     deleted: '已删除',
     langSwitched: '语言：中文',
+    // 升级检查。这是本软件唯一主动联网的功能，所以设置项的说明必须把"会联网"
+    // 说清楚，而不是只写"检查更新"——用户有权知道哪个开关会让软件自己出网。
+    settingsUpdate: '升级检查',
+    updateCheckLabel: '启动时检查新版本',
+    updateCheckDesc: '会连接 GitHub 查询最新发布版本。只查询版本号，不会自动下载或安装，也不会发送任何本机信息。关闭后完全不联网。',
+    updateNever: '尚未检查过',
+    updateLastChecked: '上次检查：{at}',
+    updateCurrent: '当前版本 {version}',
+    // 发现新版本时的提示条。措辞上只说"有新版本"，不承诺内容——发布说明没有被
+    // 读进来（那是外部富文本），用户点过去自己看。
+    updateFound: '有新版本 {version}（当前 {current}）',
+    updateOpenPage: '查看发布页',
+    updateSkipThis: '忽略此版本',
+    updateSkipped: '已忽略 {version}，下个版本会再提示',
     // 主进程错误码（键名 = err_ + 错误码；未知码原样显示）
     err_E_PATH_EMPTY: '路径为空',
     err_E_PATH_BAD_CHAR: '路径含非法字符',
@@ -208,7 +222,13 @@ const I18N = {
     err_E_EXPORT_ARCHIVE: '生成备份包失败：{detail}',
     err_E_CONTENT_NOT_STRING: '内容必须是文本：{detail}',
     err_E_CONFIG_WRITE: '设置保存失败，磁盘可能已满或配置文件被占用：{detail}',
+    // 编程错误而不是运行时故障：诊断导出没拿到注入的原子写函数。
+    // 正常路径下用户看不到它，但错误码一旦露出来必须有话可说。
+    err_E_DIAG_NO_WRITER: '导出诊断信息失败：内部调用缺少写入函数（{detail}）',
     err_E_PREV_READ: '读取原文件失败，为避免覆盖已放弃保存。请关闭占用该文件的程序后重试：{detail}',
+    // 只有渲染进程传了一个不合法的版本号才会出现。正常界面点不出来，
+    // 但错误码露出来就必须有话可说。
+    err_E_UPDATE_BAD_VERSION: '版本号不合法，无法记录忽略：{detail}',
     // 原生菜单。主进程 buildMenu() 用这些键，语言切换时会重建菜单
     // （updateConfig 检测到 lang 变化就调 buildMenu）。
     menuFile: '文件',
@@ -243,6 +263,13 @@ const I18N = {
     importPickTitle: '选择导入方式',
     importSingleMd: '导入单个 .md',
     importZipBackup: '导入 ZIP 备份',
+    // 系统对话框的标题（主进程 dialog.show*Dialog 用，和菜单一样走 mt()）。
+    // 原先这四个标题和 confirm 的按钮都写死中文，英文界面下弹出的是中英混排的框。
+    dlgExportZip: '导出备份',
+    dlgExportSingle: '导出提示词',
+    dlgImportSingle: '导入提示词',
+    dlgImportZip: '导入备份包',
+    dlgExportDiagnostics: '导出诊断信息',
     // 通用
     sep: '：',
     confirm: '确认',
@@ -422,6 +449,18 @@ const I18N = {
     added: 'Added',
     deleted: 'Deleted',
     langSwitched: 'Language: English',
+    // 升级检查。这是本软件唯一主动联网的功能，所以设置项的说明必须把"会联网"
+    // 说清楚，而不是只写"检查更新"——用户有权知道哪个开关会让软件自己出网。
+    settingsUpdate: 'Update Check',
+    updateCheckLabel: 'Check for new versions at startup',
+    updateCheckDesc: 'Connects to GitHub to look up the latest release. It only reads the version number, never downloads or installs anything, and sends no information about your machine. Turning this off disables all network access.',
+    updateNever: 'Never checked',
+    updateLastChecked: 'Last checked: {at}',
+    updateCurrent: 'Current version {version}',
+    updateFound: 'Version {version} is available (you have {current})',
+    updateOpenPage: 'Open release page',
+    updateSkipThis: 'Skip this version',
+    updateSkipped: 'Skipped {version}; you will be notified about the next release',
     // 主进程错误码（键名 = err_ + 错误码；未知码原样显示）
     err_E_PATH_EMPTY: 'Path is empty',
     err_E_PATH_BAD_CHAR: 'Path contains invalid characters',
@@ -453,7 +492,13 @@ const I18N = {
     err_E_EXPORT_ARCHIVE: 'Failed to build the backup archive: {detail}',
     err_E_CONTENT_NOT_STRING: 'Content must be text: {detail}',
     err_E_CONFIG_WRITE: 'Failed to save settings; the disk may be full or the config file is locked: {detail}',
+    // 编程错误而不是运行时故障：诊断导出没拿到注入的原子写函数。
+    // 正常路径下用户看不到它，但错误码一旦露出来必须有话可说。
+    err_E_DIAG_NO_WRITER: 'Failed to export diagnostics: the internal call is missing a write function ({detail})',
     err_E_PREV_READ: 'Could not read the existing file, so the save was aborted to avoid overwriting it. Close any program using the file and retry: {detail}',
+    // 只有渲染进程传了一个不合法的版本号才会出现。正常界面点不出来，
+    // 但错误码露出来就必须有话可说。
+    err_E_UPDATE_BAD_VERSION: 'Invalid version number; cannot record the skip: {detail}',
     // 原生菜单。主进程 buildMenu() 用这些键，语言切换时会重建菜单
     // （updateConfig 检测到 lang 变化就调 buildMenu）。
     menuFile: 'File',
@@ -488,6 +533,13 @@ const I18N = {
     importPickTitle: 'Choose import method',
     importSingleMd: 'Import a single .md',
     importZipBackup: 'Import ZIP backup',
+    // 系统对话框的标题（主进程 dialog.show*Dialog 用，和菜单一样走 mt()）。
+    // 原先这四个标题和 confirm 的按钮都写死中文，英文界面下弹出的是中英混排的框。
+    dlgExportZip: 'Export Backup',
+    dlgExportSingle: 'Export Prompt',
+    dlgImportSingle: 'Import Prompt',
+    dlgImportZip: 'Import Backup',
+    dlgExportDiagnostics: 'Export Diagnostics',
     // 通用
     sep: ': ',
     confirm: 'Confirm',
