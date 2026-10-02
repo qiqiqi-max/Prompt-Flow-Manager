@@ -1006,45 +1006,12 @@ ipcMain.handle('trash', async (e, rel) => queueWriteMulti(['ver:' + String(rel),
   let st;
   try { st = await fsp.stat(full); } catch { return true; }
   if (st.isDirectory()) throw appError('E_TRASH_DIR_UNSUPPORTED', rel);
-  await ensureDir(TRASH_DIR);
-  const id = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const ext = path.extname(rel);
-  const storeName = trashStore.uniqueStoreName(id, ext);
-  const storePath = trashStorePath(storeName);
-  await fsp.rename(full, storePath);
-  dropFromCache(full);
-  const index = await readTrashIndex();
-  // 版本目录一并移入回收站（若存在），恢复时一起还原
-  let versionStore = null;
-  const vDir = versionDirFor(rel);
-  if (fs.existsSync(vDir)) {
-    const vStoreName = trashStore.uniqueVersionStoreName(id);
-    const vStorePath = trashStorePath(vStoreName);
-    await fsp.rename(vDir, vStorePath);
-    versionStore = vStoreName;
-  }
-  index.items.unshift({ id, originalRel: rel, name: path.basename(rel), trashedAt: new Date().toISOString(), store: storeName, versionStore });
-  // 索引写失败必须把文件搬回原处。原先是直接把异常抛出去：正文已经躺在 .trash 里，
-  // 索引里却没有对应条目，于是文件树看不到、回收站列不出、empty-trash 也不会碰它，
-  // 等于永久丢失，而用户看到的只是一句"删除失败"——照字面理解文件应该还在。
-  try {
-    await writeTrashIndex(index);
-  } catch (err) {
-    let back = true;
-    try {
-      await fsp.rename(storePath, full);
-      dropFromCache(full);
-    } catch (e2) {
-      back = false;
-      console.error('删除回滚失败，正文留在回收站但索引没有条目:', storePath, e2.message);
-    }
-    if (versionStore) {
-      try { await fsp.rename(trashStorePath(versionStore), vDir); } catch (e2) {
-        console.error('删除回滚：版本目录没能搬回:', versionStore, e2.message);
-      }
-    }
-    throw appError(back ? 'E_TRASH_INDEX_WRITE' : 'E_TRASH_ORPHANED', rel);
-  }
+  await trashStore.moveToTrash({
+    rel,
+    fullPath: full,
+    versionDir: versionDirFor(rel),
+    onFileMoved: dropFromCache
+  });
   // 清掉锁列表里的残留条目。和 rename 同理：读改写整个进配置队列，
   // 失败只记日志——文件已经在回收站里了，抛出去会显示"删除失败"但东西确实删了。
   try {
