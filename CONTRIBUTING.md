@@ -151,13 +151,19 @@ npm run test:render   # markdown 渲染成本上限
 npm run test:heal     # 启动自愈修坏数据目录（自带反向对照）
 npm run test:logger   # 日志滚动/脱敏 + 诊断导出（裸 node，自带两组反向对照）
 npm run test:sandbox  # 沙箱降级状态机（裸 node，自带两组反向对照）
+npm run test:sandbox-required # 强制沙箱启动，禁止降级（CI 跑；本机环境不支持沙箱时会红）
 npm run test:update   # 升级检查：版本比较 + 出网约束（裸 node，自带三组反向对照）
 npm run test:contrast # 配色对比度与焦点可见性（裸 node，自带一组反向对照）
 npm run test:placeholders # 占位符提取与填充（裸 node，自带一组反向对照）
+npm run test:frontmatter # frontmatter 安全生成：用户输入不能改写其他字段（裸 node）
+npm run test:project-types # 项目类型新增、删除和最少保留规则（裸 node）
+npm run test:rule-export # 规则文件导出时保护已有文件（裸 node）
+npm run test:composer-meta # 装配器根据技术栈生成项目类型和标签（裸 node）
 npm run test:includes     # 模板包含引擎（裸 node，自带一组反向对照）
 npm run test:reverse  # 把第一节那套流程自动化：逐条改坏源码，验证目标断言真的变红
 npm run test:reverse-split # 同上，针对「自检模块拆分」那一节的注入契约
-npm run test:all      # 以上除 packaged 外全跑
+npm run test:quick    # 日常快速检查：lint + 静态检查 + 裸 node 单测
+npm run test:all      # 完整检查（不含 sandbox-required 和 packaged）
 npm run bench         # 搜索压测（临时目录）
 
 npm run dist          # 打包
@@ -218,6 +224,7 @@ node -e "require('fs').writeFileSync('node_modules/electron/dist/version','43.7.
 | `PFM_SELFTEST_FUNCTIONAL=1` | 端到端功能自检 | 必须配 `PFM_DATA_DIR` |
 | `PFM_SELFTEST_UI=1` | 真实事件序列点界面 | 必须配 `PFM_DATA_DIR` |
 | `PFM_SELFTEST_LANG=en` | 切语言后查残留中文 | 必须配 `PFM_DATA_DIR` |
+| `PFM_SANDBOX_REQUIRED=1` | 沙箱启动失败时直接退出，不降级 | 只给 `test:sandbox-required` 使用 |
 | `PFM_SELFTEST_CLOSE=<模式>` | 关窗落盘握手 | 必须配 `PFM_DATA_DIR` |
 | `PFM_SELFTEST_READONLY=1` | 只读体检：每个文件能否读取/解析/渲染 | 只读，不写 |
 | `PFM_SELFTEST_DIALOGS=<json>` | 用队列文件替换系统对话框 | 顺序必须与调用顺序一致 |

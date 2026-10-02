@@ -1318,17 +1318,7 @@ async function newPrompt() {
   if (!name) return;
   const projectType = (await pickProjectType()) || '其他'; // i18n-exempt: 用户数据默认值
   const rel = `prompts/${stage}/${name}.md`;
-  const content = `---
-title: ${name}
-stage: ${stage}
-projectType: ${projectType}
-tags: []
-description:
----
-
-# ${name}
-
-`;
+  const content = FRONTMATTER.stringify({ title: name, stage, projectType, tags: [], description: '' }, `\n# ${name}\n\n`);
   try {
     await api.createFile(rel, content);
     toast(t('created'), 'success');
@@ -1499,17 +1489,14 @@ async function saveComposerPrompt() {
   if (!name) { toast(t('composerInvalidName'), 'error'); return; }
   const rel = 'prompts/project-init/' + name + '.md';
   const template = buildAssembledTemplate(vals);
-  const content = [
-    '---',
-    'title: ' + name,
-    'stage: project-init',
-    'projectType: 前端项目', // i18n-exempt: 用户数据
-    'tags: [脚手架, 规约, 初始化]', // i18n-exempt: 用户数据
-    'description: ' + (vals.desc || name),
-    '---',
-    '',
-    template
-  ].join('\n');
+  const composerMeta = COMPOSER_META.infer(vals);
+  const content = FRONTMATTER.stringify({
+    title: name,
+    stage: 'project-init',
+    projectType: composerMeta.projectType,
+    tags: composerMeta.tags,
+    description: vals.desc || name
+  }, '\n' + template);
   try {
     await api.createFile(rel, content);
     toast(t('created'), 'success');
@@ -1543,7 +1530,13 @@ async function exportComposerRules() {
       ]
     });
     if (res && res.ok) {
-      toast(t('composerExportSuccess', { dir: res.dir }), 'success');
+      const files = res.files || [];
+      const skipped = res.skipped || [];
+      const failed = res.failed || [];
+      if (failed.length) toast(t('composerExportFailed', { files: failed.join(', ') }), 'error');
+      else if (!files.length && skipped.length) toast(t('composerExportNothing'), 'info');
+      else if (skipped.length) toast(t('composerExportPartial', { dir: res.dir, files: skipped.join(', ') }), 'success');
+      else toast(t('composerExportSuccess', { dir: res.dir }), 'success');
     } else if (res && res.canceled) {
       toast(t('composerExportCanceled'), 'info');
     }
@@ -1856,17 +1849,7 @@ async function newPromptInDir(dirNode) {
   if (!name) return;
   const projectType = (await pickProjectType()) || '其他'; // i18n-exempt: 用户数据默认值
   const rel = `${dirNode.rel}/${name}.md`;
-  const content = `---
-title: ${name}
-stage: ${stage}
-projectType: ${projectType}
-tags: []
-description:
----
-
-# ${name}
-
-`;
+  const content = FRONTMATTER.stringify({ title: name, stage, projectType, tags: [], description: '' }, `\n# ${name}\n\n`);
   try {
     await api.createFile(rel, content);
     toast(t('created'), 'success');

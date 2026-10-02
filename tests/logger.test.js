@@ -306,7 +306,7 @@ async function runDiagnostics() {
     };
 
     const d = diagnostics.collect({
-      appVersion: '1.4.0',
+      appVersion: PKG_VERSION,
       versions: process.versions,
       isPackaged: false,
       dataRoot: root,
@@ -316,7 +316,7 @@ async function runDiagnostics() {
       configPath: path.join(root, 'config.json')
     });
 
-    ok(d.app.version === '1.4.0', 'app.version 采到了：' + d.app.version);
+    ok(d.app.version === PKG_VERSION, 'app.version 采到了：' + d.app.version);
     ok(!!d.runtime.node, 'node 版本采到了：' + d.runtime.node);
     ok(d.system.platform === process.platform, 'platform 采到了：' + d.system.platform);
     ok(d.app.packaged === false, 'packaged 标记正确：' + d.app.packaged);
@@ -354,7 +354,7 @@ async function runDiagnostics() {
     let seen = null;
     const fakeWriter = async (p, data) => { seen = { p, data }; fs.writeFileSync(p, data, 'utf8'); };
     const out = path.join(root, diagnostics.defaultFileName(new Date('2026-01-02T03:04:05Z')));
-    const res = await diagnostics.exportTo(out, { appVersion: '1.4.0', dirs }, fakeWriter);
+    const res = await diagnostics.exportTo(out, { appVersion: PKG_VERSION, dirs }, fakeWriter);
     ok(res.ok === true && res.bytes > 0, 'exportTo 返回写入字节数：' + JSON.stringify(res));
     ok(seen && seen.p === out, 'writer 收到的是调用方给的完整路径');
     ok(JSON.parse(seen.data).schema === 1, '写出的是可解析 JSON，带 schema 版本');
@@ -440,3 +440,4 @@ function countFails(results) {
     + '（真实实现失败 ' + realFails + ' 项，控制组失败 ' + stubFails + ' 项）');
   process.exit(passed ? 0 : 1);
 })();
+const PKG_VERSION = require('../package.json').version;

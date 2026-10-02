@@ -26,7 +26,8 @@ const rendererGlobals = {
   I18N: 'readonly',
   FRONTMATTER: 'readonly',
   PLACEHOLDERS: 'readonly',
-  INCLUDES: 'readonly'
+  INCLUDES: 'readonly',
+  COMPOSER_META: 'readonly'
 };
 
 // src/selftest/*.js 是由主进程读成文本、丢进页面上下文执行的，所以 renderer.js
@@ -171,7 +172,7 @@ module.exports = [
   {
     // 双用模块：浏览器里当 <script>，主进程里被 require。
     // 两套 global 都要给，否则结尾那句 typeof module !== 'undefined' 会报 no-undef。
-    files: ['src/i18n.js', 'src/frontmatter.js', 'src/placeholders.js', 'src/includes.js'],
+    files: ['src/i18n.js', 'src/frontmatter.js', 'src/placeholders.js', 'src/includes.js', 'src/composer-meta.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',

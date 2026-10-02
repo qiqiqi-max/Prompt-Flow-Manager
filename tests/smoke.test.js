@@ -361,7 +361,10 @@ section('ZIP 真实往返（压缩 → 解压）');
   // 这套入口能把它变成任意文件写入器（basename 只能挡 ../，挡不了这个）。
   assert(/const RULE_EXPORT_ALLOWED = new Set\(\['CLAUDE\.md', '\.cursorrules'\]\)/.test(mainSrc),
     '导出规则有文件名白名单常量（CLAUDE.md / .cursorrules）');
-  assert(/RULE_EXPORT_ALLOWED\.has\(base\)/.test(mainSrc), '导出规则 handler 真的校验白名单');
+  const ruleExportSrc = fs.readFileSync(path.join(root, 'lib/rule-export.js'), 'utf8');
+  assert(/ruleExport\.plan\(targetDir, payload\.files, RULE_EXPORT_ALLOWED\)/.test(mainSrc)
+    && /allowed\.has\(name\)/.test(ruleExportSrc),
+  '导出规则 handler 真的校验白名单');
 
   // 防回归：工作流引用同步的两个 handler 必须存在且白名单受限。
   // find-workflow-refs 只扫 workflows/；update-workflow-refs 两侧路径都过
@@ -654,8 +657,10 @@ section('静态检查（lint）');
 // 而渲染进程里打错一个函数名不会有任何提示，要点到那个按钮才炸。
 assert(fs.existsSync(path.join(root, 'eslint.config.js')), '存在 eslint.config.js');
 assert(!!pkg.scripts.lint, '有 npm run lint');
-// lint 必须挂进 test:all，否则它只是个"需要记得手动跑"的脚本，等于没有。
-assert(/\bnpm run lint\b/.test(pkg.scripts['test:all'] || ''), 'test:all 里包含 lint');
+// lint 必须挂进 test:all。test:all 也可以通过 test:quick 间接包含 lint。
+assert(/\bnpm run lint\b/.test(pkg.scripts['test:all'] || '')
+  || (/\bnpm run test:quick\b/.test(pkg.scripts['test:all'] || '') && /\bnpm run lint\b/.test(pkg.scripts['test:quick'] || '')),
+'test:all 里包含 lint');
 assert(/^\d+\.\d+\.\d+$/.test((pkg.devDependencies || {}).eslint || ''),
   'eslint 锁定到确定版本（当前 ' + ((pkg.devDependencies || {}).eslint || '无') + '）');
 {
@@ -692,7 +697,7 @@ section('CI 覆盖');
   const testScripts = Object.keys(pkg.scripts).filter(k => k === 'test' || k.startsWith('test:'));
   // test:all 是本地一键入口（串行跑完所有套件），CI 里拆成独立步骤是故意的：
   // 拆开才能在页面上直接看到是哪一个套件红的，不用翻日志。
-  const needInCi = testScripts.filter(k => k !== 'test:all');
+  const needInCi = testScripts.filter(k => k !== 'test:all' && k !== 'test:quick');
   assert(needInCi.length >= 8, '收集到需要进 CI 的测试脚本（' + needInCi.length + ' 个）');
   const notInCi = needInCi.filter(k => {
     const cmd = k === 'test' ? 'npm test' : 'npm run ' + k;
@@ -1342,6 +1347,9 @@ section('调试残留');
   section('frontmatter 示例格式');
   const sampleMd = fs.readFileSync(path.join(root, 'prompts/project-init/需求分析.md'), 'utf8');
   assert(/^---\r?\n[\s\S]*?\r?\n---/.test(sampleMd), '示例提示词含 frontmatter');
+  const rendererForFrontmatter = fs.readFileSync(path.join(root, 'src/renderer.js'), 'utf8');
+  assert(!/['"`]description:\s*['"`]?\s*\+/.test(rendererForFrontmatter), '渲染进程不再手工拼接 description frontmatter');
+  assert((rendererForFrontmatter.match(/FRONTMATTER\.stringify\(/g) || []).length >= 3, '新建与装配入口统一走 FRONTMATTER.stringify');
 
   section('图标');
   const iconPng = fs.readFileSync(path.join(root, 'build/icon.png'));

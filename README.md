@@ -198,13 +198,19 @@ npm run test:render     # 验证 markdown 渲染成本上限
 npm run test:heal       # 验证启动时的数据目录自愈
 npm run test:logger     # 验证滚动日志与诊断信息导出
 npm run test:sandbox    # 验证渲染进程沙箱及起不来时的就地降级
+npm run test:sandbox-required # 强制沙箱启动并禁止降级（CI 环境验证）
 npm run test:update     # 验证启动时的版本检查（超时、静默失败、可关闭）
 npm run test:contrast   # 逐对计算两套主题的配色对比度与焦点可见性
 npm run test:placeholders # 占位符提取与填充
+npm run test:frontmatter # frontmatter 安全生成与解析
+npm run test:project-types # 项目类型新增、删除和最少保留规则
+npm run test:rule-export # 规则文件导出时保护已有文件
+npm run test:composer-meta # 装配器项目类型与标签推断
 npm run test:includes   # 模板片段引入与嵌套解析
 npm run test:reverse    # 反向对照：版本检查的每个修复点撤掉都必须变红
 npm run test:reverse-split # 反向对照：自检模块拆分的每个修复点撤掉都必须变红
-npm run test:all        # 依次运行上述全部检查
+npm run test:quick      # 日常快速检查，不启动 Electron
+npm run test:all        # 完整检查（不含 sandbox-required 和 packaged）
 npm run bench           # 生成 1000 条提示词并执行搜索性能基准
 ```
 

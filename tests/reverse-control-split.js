@@ -29,6 +29,16 @@ const { spawnSync } = require('child_process');
 
 const root = path.resolve(__dirname, '..');
 const md5 = (s) => crypto.createHash('md5').update(s).digest('hex');
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+function writeFileRetry(file, text) {
+  for (let attempt = 0; ; attempt++) {
+    try { fs.writeFileSync(file, text); return; }
+    catch (e) {
+      if (attempt >= 20 || !['UNKNOWN', 'EBUSY', 'EPERM'].includes(e.code)) throw e;
+      sleepSync(100);
+    }
+  }
+}
 
 const FILES = ['electron-main.js', 'lib/selftest.js'];
 const BACKUP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'pfm-rc-split-'));
@@ -44,7 +54,7 @@ for (const rel of FILES) {
 function restoreAll() {
   let bad = 0;
   for (const [rel, o] of original) {
-    fs.writeFileSync(o.path, o.text);
+    writeFileRetry(o.path, o.text);
     const now = md5(fs.readFileSync(o.path, 'utf8'));
     if (now !== o.hash) {
       console.error('!! 还原失败: ' + rel + ' (期望 ' + o.hash + ' 实得 ' + now + ')');
@@ -84,7 +94,7 @@ function mutate(edits) {
     if (!cur.includes(e.find)) return e;
     staged.set(e.rel, cur.split(e.find).join(e.replace));
   }
-  for (const [rel, text] of staged) fs.writeFileSync(original.get(rel).path, text);
+  for (const [rel, text] of staged) writeFileRetry(original.get(rel).path, text);
   return null;
 }
 

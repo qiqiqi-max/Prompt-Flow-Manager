@@ -28,6 +28,16 @@ const { spawnSync } = require('child_process');
 
 const root = path.resolve(__dirname, '..');
 const md5 = (s) => crypto.createHash('md5').update(s).digest('hex');
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+function writeFileRetry(file, text) {
+  for (let attempt = 0; ; attempt++) {
+    try { fs.writeFileSync(file, text); return; }
+    catch (e) {
+      if (attempt >= 20 || !['UNKNOWN', 'EBUSY', 'EPERM'].includes(e.code)) throw e;
+      sleepSync(100);
+    }
+  }
+}
 
 const FILES = ['electron-main.js', 'lib/update-check.js', 'src/renderer.js'];
 // 磁盘备份目录。mkdtemp 的随机后缀保证两个进程同时跑不会互相覆盖备份。
@@ -44,7 +54,7 @@ for (const rel of FILES) {
 function restoreAll() {
   let bad = 0;
   for (const [rel, o] of original) {
-    fs.writeFileSync(o.path, o.text);
+    writeFileRetry(o.path, o.text);
     const now = md5(fs.readFileSync(o.path, 'utf8'));
     if (now !== o.hash) {
       console.error('!! 还原失败: ' + rel + ' (期望 ' + o.hash + ' 实得 ' + now + ')');
@@ -71,7 +81,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
 function mutate(rel, find, replace) {
   const o = original.get(rel);
   if (!o.text.includes(find)) return false;
-  fs.writeFileSync(o.path, o.text.split(find).join(replace));
+  writeFileRetry(o.path, o.text.split(find).join(replace));
   return true;
 }
 

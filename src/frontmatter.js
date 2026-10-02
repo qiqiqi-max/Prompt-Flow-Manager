@@ -24,7 +24,13 @@ const FRONTMATTER = {
       const key = line.slice(0, idx).trim();
       let val = line.slice(idx + 1).trim();
       if (val.startsWith('[') && val.endsWith(']')) {
-        val = val.slice(1, -1).split(',').map(s => s.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
+        let parsed = null;
+        try { parsed = JSON.parse(val); } catch { parsed = null; }
+        val = Array.isArray(parsed)
+          ? parsed.map(String)
+          : val.slice(1, -1).split(',').map(s => s.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
+      } else if (val.startsWith('"') && val.endsWith('"')) {
+        try { val = JSON.parse(val); } catch { val = val.slice(1, -1); }
       } else if (val === 'true') {
         val = true;
       } else if (val === 'false') {
@@ -37,6 +43,23 @@ const FRONTMATTER = {
       meta[key] = val;
     }
     return { meta, body };
+  },
+
+  // 生成单行 frontmatter。字符串和数组使用 JSON 兼容的 YAML 引号写法，
+  // 防止用户输入中的换行、冒号或方括号改写其他字段。
+  stringify(meta, body = '') {
+    const scalar = (value) => JSON.stringify(String(value == null ? '' : value).replace(/\s+/g, ' ').trim());
+    const lines = ['---'];
+    for (const [key, value] of Object.entries(meta || {})) {
+      if (!/^[A-Za-z_][\w-]*$/.test(key)) throw new Error('E_BAD_FRONTMATTER_KEY|' + key);
+      let encoded;
+      if (Array.isArray(value)) encoded = '[' + value.map(scalar).join(', ') + ']';
+      else if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) encoded = String(value);
+      else encoded = scalar(value);
+      lines.push(key + ': ' + encoded);
+    }
+    lines.push('---', String(body == null ? '' : body));
+    return lines.join('\n');
   },
 
   // 只要正文。和 parse().body 的区别：这里不解析 yaml，搜索路径上对全库调用，

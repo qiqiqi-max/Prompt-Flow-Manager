@@ -103,6 +103,8 @@ const { readZipMarkdownEntries, sanitizeTitle, uniqueRel } = require('./lib/zip-
 const I18N_TABLE = require('./src/i18n.js');
 // frontmatter 解析同样两边共用（src/frontmatter.js 结尾也有 module.exports）。
 const FRONTMATTER = require('./src/frontmatter.js');
+const projectTypes = require('./lib/project-types');
+const ruleExport = require('./lib/rule-export');
 // 滚动文件日志 + 诊断包。两个模块都刻意不 require('electron')：
 // 目录、版本号、两个根目录全部由这里传进去，DATA_ROOT / CODE_ROOT 的判断
 // 只允许存在下面那一份（见 123-133 行的说明）。
@@ -126,10 +128,11 @@ const selftest = require('./lib/selftest');
 // 当前菜单语言。buildMenu 只在启动和语言变化时调用（见 syncMenuLang），
 // 所以文案取值统一读这个变量，不用每个调用点都把 lang 传一遍。
 let menuLang = null;
-function mt(key) {
+function mt(key, vars) {
   const tbl = I18N_TABLE[menuLang === 'en' ? 'en' : 'zh'] || I18N_TABLE.zh;
-  if (tbl[key] != null) return tbl[key];
-  if (I18N_TABLE.zh[key] != null) return I18N_TABLE.zh[key];
+  const fill = (s) => vars ? String(s).replace(/\{(\w+)\}/g, (m, k) => (vars[k] == null ? m : String(vars[k]))) : s;
+  if (tbl[key] != null) return fill(tbl[key]);
+  if (I18N_TABLE.zh[key] != null) return fill(I18N_TABLE.zh[key]);
   // 查不到就回退成键名本身，界面上会露出 dlgExportZip 这样的字符串。
   // 这个回退很容易骗过检查：键名里没有中文，所以"英文界面下没有残留中文"
   // 那条断言照样是绿的（写这段时就真的这样漏过去一次——四个对话框标题全是
@@ -1577,27 +1580,27 @@ ipcMain.handle('export-project-rules', async (e, payload) => {
     return { ok: false, canceled: true };
   }
   const targetDir = res.filePaths[0];
-  const written = [];
-  for (const item of payload.files) {
-    if (!item || !item.name) continue;
-    // 防路径逃逸 + 落盘白名单：只允许固定两份规则文件名。path.basename 能挡住
-    // ../../ 这类相对跳转，但"渲染进程被劫持后写任意文件"的威胁不是 basename
-    // 的职责——目录由用户选，文件名由这里收紧到清单。两者一起才算完整。
-    const base = path.basename(item.name);
-    if (!RULE_EXPORT_ALLOWED.has(base)) continue;
-    if (base !== item.name || base === '.' || base === '..') continue;
-    const fullPath = path.join(targetDir, base);
-    try {
-      await fsp.writeFile(fullPath, item.content || '', 'utf8');
-    } catch (e) {
-      // 同名目录（CLAUDE.md/）或权限问题：跳过这一项，不让单文件失败掀翻其余。
-      logger.info('[export] 跳过规则文件 ' + base + '：' + e.message);
-      continue;
-    }
-    written.push(base);
+  // 文件名只接受固定白名单，目录由用户选择。已有文件必须由用户决定是否覆盖。
+  const plan = await ruleExport.plan(targetDir, payload.files, RULE_EXPORT_ALLOWED);
+  let mode = 'overwrite';
+  if (plan.existing.length) {
+    const answer = await dialog.showMessageBox(win, {
+      type: 'warning',
+      buttons: [mt('ruleExportOverwrite'), mt('ruleExportSkip'), mt('cancel')],
+      defaultId: 1,
+      cancelId: 2,
+      noLink: true,
+      message: mt('ruleExportExistsTitle'),
+      detail: mt('ruleExportExistsDetail', { files: plan.existing.join(', ') })
+    });
+    if (answer.response === 2) return { ok: false, canceled: true };
+    mode = answer.response === 0 ? 'overwrite' : 'skip';
   }
-  logger.info('[export] 已向项目目录导出规则: ' + targetDir + ' (' + written.join(', ') + ')');
-  return { ok: true, dir: targetDir, files: written };
+  const result = await ruleExport.write(plan, mode, (name, e) => {
+    logger.info('[export] 写入规则文件失败 ' + name + '：' + e.message);
+  });
+  logger.info('[export] 已向项目目录导出规则: ' + targetDir + ' (' + result.written.join(', ') + ')');
+  return { ok: true, dir: targetDir, files: result.written, skipped: result.skipped, failed: result.failed };
 });
 
 // 导出诊断信息。用户报障时把这个 JSON 贴出来，代替一来一回问"你的版本/系统/
@@ -1694,11 +1697,10 @@ ipcMain.handle('get-stages', () => ({ stages: STAGES, labels: STAGE_LABELS }));
 // 后一次基于不含前一个的快照，落盘只剩后一个——UI 上两个都显示加成功了，重启就没了。
 // 这里内联 loadConfig + saveConfig，不调 updateConfig：updateConfig 自己也走 config
 // 队列，在队列回调里再调它会等自己所在链条的 guard，直接死锁。
-function updateProjectTypes(mutate) {
+function updateProjectTypes(nextFor) {
   return queueConfigWrite(async () => {
     const cur = await loadConfig();
-    const list = Array.isArray(cur.projectTypes) ? [...cur.projectTypes] : [...DEFAULT_PROJECT_TYPES];
-    const next = mutate(list); // 抛错就是校验失败，链条的 guard 会兜住不影响后续写入
+    const next = nextFor(cur); // 抛错就是校验失败，链条的 guard 会兜住不影响后续写入
     const merged = next === null ? cur : { ...cur, projectTypes: next };
     const ok = await saveConfig(merged);
     if (!ok) throw appError('E_CONFIG_WRITE', CONFIG_PATH);
@@ -1707,24 +1709,11 @@ function updateProjectTypes(mutate) {
 }
 
 ipcMain.handle('add-project-type', async (e, type) => {
-  if (!type || typeof type !== 'string') throw appError('E_TYPE_INVALID');
-  const t = String(type).trim();
-  if (!t) throw appError('E_TYPE_EMPTY');
-  return await updateProjectTypes((list) => {
-    if (list.includes(t)) throw appError('E_TYPE_EXISTS', t);
-    list.push(t);
-    return list;
-  });
+  return await updateProjectTypes((cur) => projectTypes.add(cur, type, DEFAULT_PROJECT_TYPES, appError));
 });
 
 ipcMain.handle('remove-project-type', async (e, type) => {
-  return await updateProjectTypes((list) => {
-    if (list.length <= 1) throw appError('E_TYPE_MIN_ONE');
-    const idx = list.indexOf(type);
-    if (idx === -1) return null; // 不存在：原样写回，保持原先"静默成功"的返回语义
-    list.splice(idx, 1);
-    return list;
-  });
+  return await updateProjectTypes((cur) => projectTypes.remove(cur, type, DEFAULT_PROJECT_TYPES, appError));
 });
 
 // ---------- 启动 ----------
@@ -2226,6 +2215,12 @@ function attachSandboxProbe(targetWin) {
   // 渲染进程在确认之前就没了 —— 这正是缺运行库那类环境的症状。
   const fallback = (why) => {
     if (sandboxRuntime.confirmed || sandboxRuntime.rebuilding) return;
+    // 严格沙箱测试要证明默认安全路径本身可用，不能让降级逻辑把失败救成绿。
+    if (process.env.PFM_SANDBOX_REQUIRED === '1') {
+      logger.error('[sandbox] 严格沙箱模式下渲染进程起不来（' + why + '），拒绝降级');
+      app.exit(1);
+      return;
+    }
     sandboxRuntime.degradedThisRun = true;
     sandboxRuntime.rebuilding = true;
     const res = sandboxState.degrade(SANDBOX_STATE_DIR, cur, why);

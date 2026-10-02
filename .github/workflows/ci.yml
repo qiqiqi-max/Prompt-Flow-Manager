@@ -84,6 +84,18 @@ jobs:
       - name: 模板片段引入与嵌套解析
         run: npm run test:includes
 
+      - name: frontmatter 安全生成
+        run: npm run test:frontmatter
+
+      - name: 项目类型规则
+        run: npm run test:project-types
+
+      - name: 规则文件导出保护
+        run: npm run test:rule-export
+
+      - name: 装配器元数据
+        run: npm run test:composer-meta
+
       # 纯逻辑测试，不用起 Electron：从 renderer.js 里抠出 debounce 单独验语义。
       # 自带反向对照（旧版一行 debounce 必须失败），所以它不会变成永远绿的空壳。
       - name: debounce 语义
@@ -129,6 +141,10 @@ jobs:
       # "无条件关沙箱"的老实现。
       - name: 沙箱跨启动判定
         run: npm run test:sandbox
+
+      # 状态机测试证明会降级；这一步证明 CI 的标准 Windows 环境不需要降级。
+      - name: 严格沙箱启动
+        run: npm run test:sandbox-required
 
       # 升级检查：lib/update-check.js 是本项目唯一主动出网的模块，但这一层
       # **不出网**——transport 是注入的，所有网络失败都用桩模拟。真出网的话 CI
