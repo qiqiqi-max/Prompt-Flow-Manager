@@ -58,6 +58,8 @@ const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
 assert(pkg.main === 'electron-main.js', 'main 指向 electron-main.js');
 assert(!!(pkg.scripts && pkg.scripts.start && pkg.scripts.dist && pkg.scripts.test), '有 start/dist/test 脚本');
 assert(!!(pkg.build && pkg.build.appId), 'build 配置有 appId');
+assert(pkg.build && pkg.build.electronDist === 'node_modules/electron/dist', '打包复用 node_modules 里已校验版本的 Electron');
+assert(pkg.build && pkg.build.win && pkg.build.win.icon === 'prompt-flow-manager.ico', 'Windows 打包使用现成 ICO，不在构建时下载图标转换工具');
 // 防回归：渲染进程用 vendor 副本，但 lib/zip-import.js 在主进程里 require yauzl，
 // 打进 asar 后必须能解析，所以 yauzl 只能是 dependencies。
 assert(!!(pkg.dependencies && pkg.dependencies.yauzl), 'yauzl 在 dependencies（主进程运行时需要）');

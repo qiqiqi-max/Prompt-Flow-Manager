@@ -63,7 +63,7 @@
     "diff-match-patch": "1.0.5",
     "dompurify": "3.4.16",
     "electron": "43.7.2",
-    "electron-builder": "^24.9.1",
+    "electron-builder": "26.17.0",
     "eslint": "9.39.1",
     "marked": "11.2.0"
   },
@@ -74,6 +74,7 @@
   "build": {
     "appId": "com.promptflow.manager",
     "productName": "Prompt Flow Manager",
+    "electronDist": "node_modules/electron/dist",
     "files": [
       "electron-main.js",
       "preload.js",
@@ -86,7 +87,7 @@
     "win": {
       "target": "portable",
       "signAndEditExecutable": false,
-      "icon": "build/icon.png"
+      "icon": "prompt-flow-manager.ico"
     }
   }
 }

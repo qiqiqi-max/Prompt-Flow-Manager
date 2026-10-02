@@ -178,6 +178,13 @@ npm run test:packaged # 对打包产物跑自检（必须先 dist）
 改了打包相关的东西（`build.files`、路径解析、`ensureSeedData`），必须跑一次
 `npm run dist && npm run test:packaged`。
 
+`electron-builder` 26 的 Windows portable 构建会在第一次打包时下载 7-Zip 工具包。
+本机实测它可能卡在解压工具包这一步，而且不会自动退出。遇到这种情况时，先结束卡住的
+构建进程，再从 `electron-builder-binaries` 的 `7zip@1.0.0` 发布页下载
+`7zip-win-x64.tar.gz`。确认 SHA256 是
+`be071f15bd6da2f78fe81c6ddef2009b0c4d8a51f36b780cb806c7e6df95e1b3` 后解压，
+并把 `ELECTRON_BUILDER_7ZIP_PATH` 指到解压目录里 7zip 子目录下的 7za 可执行文件，再重跑 `npm run dist`。
+
 ### 换 Electron 版本：先确认二进制真的换了
 
 `npm i -D electron@<版本>` **不保证**二进制跟着换。二进制的下载解压是 electron 包
@@ -212,8 +219,9 @@ npm test   # 必须红在「装着的 electron 二进制与 package.json 一致�
 node -e "require('fs').writeFileSync('node_modules/electron/dist/version','43.7.2')"
 ```
 
-注意 `electron-builder` 打包时下的是**另一份**二进制，和 `node_modules` 里那份无关。
-所以"打包产物是新版本"和"跑测试用的是新版本"是两件独立的事，得分别确认。
+`build.electronDist` 指向 `node_modules/electron/dist`，所以打包和测试使用同一份
+Electron 二进制。换 Electron 后先确认上面的版本断言通过，再跑 `npm run dist`
+和 `npm run test:packaged`。
 
 ### 自检开关
 
