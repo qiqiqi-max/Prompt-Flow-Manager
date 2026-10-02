@@ -106,6 +106,7 @@ const FRONTMATTER = require('./src/frontmatter.js');
 const projectTypes = require('./lib/project-types');
 const ruleExport = require('./lib/rule-export');
 const { createVersionStore } = require('./lib/version-store');
+const { createTrashStore } = require('./lib/trash-store');
 // 滚动文件日志 + 诊断包。两个模块都刻意不 require('electron')：
 // 目录、版本号、两个根目录全部由这里传进去，DATA_ROOT / CODE_ROOT 的判断
 // 只允许存在下面那一份（见 123-133 行的说明）。
@@ -359,28 +360,6 @@ function safeJoinWritable(relPath) {
   return resolved;
 }
 
-// 回收站内部文件名的校验。
-// 为什么必须有：empty-trash 会对 path.join(TRASH_DIR, item.store) 调
-// fsp.rm(recursive: true, force: true)，而 item.store 来自 .trash/index.json——
-// 一个普通 JSON 文件。它被同步盘冲突、外部编辑器、或上次崩溃写坏之后，
-// store 变成 "../OUTSIDE" 就会静默递归删掉 .trash 之外的目录（实测能删到
-// DATA_ROOT 之外）。force:true 连"不存在"都不报错，所以出事没有任何痕迹。
-// store 名全部由本程序生成（trash handler 里的 `${id}${ext}` 和 `${id}-versions`），
-// 一定是单层名字，因此这里直接要求"不含分隔符且解析后仍在 .trash 内"。
-const TRASH_DIR_NORM = path.normalize(TRASH_DIR);
-function trashStorePath(storeName) {
-  const name = String(storeName == null ? '' : storeName);
-  if (!name) throw appError('E_TRASH_BAD_STORE', String(storeName));
-  if (name.includes('\0')) throw appError('E_TRASH_BAD_STORE', name);
-  // 单层名字：出现任何分隔符或 .. 都说明索引被改过
-  if (/[\\/]/.test(name) || name === '.' || name === '..') throw appError('E_TRASH_BAD_STORE', name);
-  const resolved = path.resolve(TRASH_DIR_NORM, name);
-  // 双保险：即使上面漏了某种形态，解析结果也必须落在 .trash 里面
-  const rel = path.relative(TRASH_DIR_NORM, resolved);
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw appError('E_TRASH_BAD_STORE', name);
-  return resolved;
-}
-
 // ---------- frontmatter 解析 ----------
 // 实现在 src/frontmatter.js，渲染进程用 <script> 加载同一份文件。
 // 原先两边各有一份逐字复制的实现，改动其中一份不会同步到另一份，
@@ -497,16 +476,17 @@ const {
   saveVersion
 } = versionStore;
 
-// ---------- 回收站 ----------
-async function readTrashIndex() {
-  const idx = await readIndexJson(path.join(TRASH_DIR, 'index.json'), { items: [] });
-  if (!Array.isArray(idx.items)) idx.items = [];
-  return idx;
-}
-async function writeTrashIndex(index) {
-  await ensureDir(TRASH_DIR);
-  await writeFileAtomic(path.join(TRASH_DIR, 'index.json'), JSON.stringify(index, null, 2));
-}
+const trashStore = createTrashStore({
+  trashDir: TRASH_DIR,
+  appError,
+  ensureDir,
+  writeFileAtomic,
+  readIndexJson
+});
+const TRASH_DIR_NORM = trashStore.trashDir;
+const trashStorePath = (storeName) => trashStore.storePath(storeName);
+const readTrashIndex = () => trashStore.readIndex();
+const writeTrashIndex = (index) => trashStore.writeIndex(index);
 
 // ---------- 配置 ----------
 async function loadConfig() {
@@ -1029,12 +1009,8 @@ ipcMain.handle('trash', async (e, rel) => queueWriteMulti(['ver:' + String(rel),
   await ensureDir(TRASH_DIR);
   const id = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const ext = path.extname(rel);
-  let storeName = id + ext;
-  // 回收站内极少可能重名（id 含随机数），但保险起见仍做检查
-  while (fs.existsSync(path.join(TRASH_DIR, storeName))) {
-    storeName = `${id}-${Math.floor(Math.random() * 1e6)}${ext}`;
-  }
-  const storePath = path.join(TRASH_DIR, storeName);
+  const storeName = trashStore.uniqueStoreName(id, ext);
+  const storePath = trashStorePath(storeName);
   await fsp.rename(full, storePath);
   dropFromCache(full);
   const index = await readTrashIndex();
@@ -1042,13 +1018,10 @@ ipcMain.handle('trash', async (e, rel) => queueWriteMulti(['ver:' + String(rel),
   let versionStore = null;
   const vDir = versionDirFor(rel);
   if (fs.existsSync(vDir)) {
-    const vStoreName = `${id}-versions`;
-    let vStorePath = path.join(TRASH_DIR, vStoreName);
-    while (fs.existsSync(vStorePath)) {
-      vStorePath = path.join(TRASH_DIR, `${id}-${Math.floor(Math.random() * 1e6)}-versions`);
-    }
+    const vStoreName = trashStore.uniqueVersionStoreName(id);
+    const vStorePath = trashStorePath(vStoreName);
     await fsp.rename(vDir, vStorePath);
-    versionStore = path.basename(vStorePath);
+    versionStore = vStoreName;
   }
   index.items.unshift({ id, originalRel: rel, name: path.basename(rel), trashedAt: new Date().toISOString(), store: storeName, versionStore });
   // 索引写失败必须把文件搬回原处。原先是直接把异常抛出去：正文已经躺在 .trash 里，
@@ -1243,48 +1216,7 @@ ipcMain.handle('restore', async (e, id) => queueWriteMulti(await restoreLockKeys
 }));
 
 ipcMain.handle('empty-trash', async () => queueWrite('trash', async () => {
-  const index = await readTrashIndex();
-  // 用 rm(recursive) 而不是 unlink：早期版本允许把目录搬进回收站，
-  // unlink 删目录会 EPERM 失败。
-  //
-  // 一条删不掉不能拖垮整轮清空（否则后面的 writeTrashIndex 执行不到，已经删掉的
-  // 条目还留在索引里，回收站里全是点不动的幽灵记录），但也不能像原先那样"记条日志
-  // 然后无条件清空索引"：文件还在 .trash 占着磁盘，索引里的条目却没了，UI 再也
-  // 看不到它、下一次清空也不会再碰它。所以删失败的条目原样留在索引里，
-  // 并把失败抛给渲染进程——用户至少知道回收站没清干净，还能重试。
-  const kept = [];
-  const failedNames = [];
-  for (const item of index.items) {
-    // store 名越界/损坏说明索引被写坏了，.trash 里并没有这个名字对应的文件。
-    // 留着条目会让回收站永远清不掉，所以摘掉它，只记日志。
-    let storePath;
-    try { storePath = trashStorePath(item.store); } catch (e) {
-      console.error('清空回收站跳过损坏条目:', item.store, e.message);
-      continue;
-    }
-    let ok = true;
-    try { await fsp.rm(storePath, { recursive: true, force: true }); } catch (e) {
-      ok = false;
-      console.error('清空回收站条目失败:', item.store, e.message);
-    }
-    if (item.versionStore) {
-      let vPath = null;
-      try { vPath = trashStorePath(item.versionStore); } catch (e) {
-        console.error('清空回收站跳过损坏的版本目录名:', item.versionStore, e.message);
-      }
-      if (vPath) {
-        try { await fsp.rm(vPath, { recursive: true, force: true }); } catch (e) {
-          ok = false;
-          console.error('清空回收站版本目录失败:', item.versionStore, e.message);
-        }
-      }
-    }
-    if (!ok) {
-      kept.push(item);
-      failedNames.push(item.name || item.originalRel || item.id);
-    }
-  }
-  await writeTrashIndex({ items: kept });
+  const { kept, failedNames } = await trashStore.empty();
   if (kept.length) throw appError('E_TRASH_EMPTY_PARTIAL', failedNames.join(', '));
   return true;
 }));
