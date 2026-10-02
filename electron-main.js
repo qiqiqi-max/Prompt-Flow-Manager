@@ -105,6 +105,7 @@ const I18N_TABLE = require('./src/i18n.js');
 const FRONTMATTER = require('./src/frontmatter.js');
 const projectTypes = require('./lib/project-types');
 const ruleExport = require('./lib/rule-export');
+const { createVersionStore } = require('./lib/version-store');
 // 滚动文件日志 + 诊断包。两个模块都刻意不 require('electron')：
 // 目录、版本号、两个根目录全部由这里传进去，DATA_ROOT / CODE_ROOT 的判断
 // 只允许存在下面那一份（见 123-133 行的说明）。
@@ -417,36 +418,7 @@ function bumpAutoFields(content, prevContent) {
 const stripFrontmatter = (content) => FRONTMATTER.strip(content);
 
 // ---------- 版本管理 ----------
-// 版本目录同样要做越权校验：relPath 来自渲染进程，不能直接拼进 path.join。
-function versionDirFor(relPath) {
-  const rel = String(relPath == null ? '' : relPath).replace(/\\/g, '/').replace(/^\/+/, '');
-  if (!rel) throw appError('E_PATH_EMPTY');
-  if (rel.includes('\0')) throw appError('E_PATH_BAD_CHAR');
-  const resolved = path.resolve(VERSIONS_DIR, rel);
-  // isAbsolute 的理由同 safeJoin：跨盘符时 path.relative 返回绝对路径，不是 ..
-  const relV = path.relative(VERSIONS_DIR, resolved);
-  if (relV.startsWith('..') || path.isAbsolute(relV)) throw appError('E_PATH_ESCAPE', relPath);
-  return resolved;
-}
-
-// 版本文件名由本程序生成，只允许 <时间戳>.md 或 restored-<数字>-<时间戳>.md 形态，
-// 防止 file 参数被拿来穿越目录。
-const VERSION_FILE_RE = /^(?:restored-\d+-)?\d{8}-\d{6}(?:-\d{3})?\.md$/;
-function versionFilePath(relPath, file) {
-  const name = String(file == null ? '' : file);
-  if (!VERSION_FILE_RE.test(name)) throw appError('E_BAD_VERSION_FILE', name);
-  return path.join(versionDirFor(relPath), name);
-}
-
-// 带毫秒：同一秒内连续保存不会覆盖同名快照。
-// 仍保持"字典序 == 时间序"，因为各字段都是定宽零填充的。
-// 接受一个 Date 是为了让 saveVersion 能在名字被占时往后挪一毫秒重算
-// （毫秒精度仍可能撞名，见那里的说明）。
-function timestampName(d = new Date()) {
-  const p = n => String(n).padStart(2, '0');
-  const ms = String(d.getMilliseconds()).padStart(3, '0');
-  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}-${ms}`;
-}
+// 版本路径、快照命名、星标索引和裁剪规则都在 lib/version-store.js。
 
 async function ensureDir(dir) {
   await fsp.mkdir(dir, { recursive: true });
@@ -510,83 +482,20 @@ async function writeFileExclusive(fullPath, data, relForError) {
   await fh.close();
 }
 
-// 快照名撞了就往后挪一毫秒重算，而不是覆盖或直接失败。
-//
-// 为什么需要：文件名精度只到毫秒，而快照名不能随便换格式——list-versions、
-// pruneVersions 的"字典序 == 时间序"、VERSION_FILE_RE 都依赖这个形态。
-// 同一毫秒内落两个快照时，两次 writeFileAtomic 会 rename 到同一个目标名：
-// 实测（并发保存探针）在 Windows 上其中一次直接抛裸 EPERM，整个保存失败，
-// 用户看到的是"保存失败"而正文其实已经写了一半。
-// 挪毫秒而不是加随机后缀，是为了让名字仍然能被 VERSION_FILE_RE 认出来。
-async function saveVersion(relPath, content) {
-  const dir = versionDirFor(relPath);
-  await ensureDir(dir);
-  let d = new Date();
-  let name = timestampName(d) + '.md';
-  // 上限防死循环：正常撞一两次就够，连撞 1000 次说明目录有别的问题
-  for (let i = 0; i < 1000 && fs.existsSync(path.join(dir, name)); i++) {
-    d = new Date(d.getTime() + 1);
-    name = timestampName(d) + '.md';
-  }
-  await writeFileAtomic(path.join(dir, name), content);
-  await pruneVersions(relPath);
-}
-
-// 读索引 JSON，区分"文件不存在"和"文件损坏"两种情况。
-// 之前两个索引都是 catch{ return 空 }，于是一次中断的写入（旧代码是原地
-// writeFile，open(w) 先截断）会让整份索引静默变空：回收站列表清空但文件还在
-// .trash 里、所有星标丢失，用户以为数据没了。现在写入是原子的，正常不该再出现
-// 损坏；万一真损坏（磁盘错误、外部编辑），把坏文件改名留档而不是当空处理，
-// 至少证据还在、可人工恢复。
-async function readIndexJson(idxPath, fallback) {
-  let raw;
-  try {
-    raw = await fsp.readFile(idxPath, 'utf8');
-  } catch {
-    return { ...fallback }; // 不存在：正常初始状态
-  }
-  try {
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
-    throw new Error('not an object');
-  } catch (e) {
-    const bak = idxPath + '.corrupt-' + timestampName();
-    try { await fsp.rename(idxPath, bak); } catch {}
-    console.error('[index] 索引损坏，已改名留档:', bak, e.message);
-    return { ...fallback };
-  }
-}
-
-async function readVersionIndex(relPath) {
-  const idxPath = path.join(versionDirFor(relPath), 'index.json');
-  return readIndexJson(idxPath, { pinned: {} });
-}
-
-async function writeVersionIndex(relPath, index) {
-  const dir = versionDirFor(relPath);
-  await ensureDir(dir);
-  await writeFileAtomic(path.join(dir, 'index.json'), JSON.stringify(index, null, 2));
-}
-
-async function pruneVersions(relPath) {
-  const dir = versionDirFor(relPath);
-  let files;
-  try {
-    files = (await fsp.readdir(dir)).filter(f => f.endsWith('.md'));
-  } catch {
-    return;
-  }
-  if (files.length <= MAX_UNPINNED_VERSIONS) return; // 未星标数必然也未超限，快速返回
-  const index = await readVersionIndex(relPath);
-  const pinned = index.pinned || {};
-  // 星标版本不计入上限、永不自动删除，所以配额只按未星标数量计算。
-  const unpinned = files.filter(f => !pinned[f]).sort(); // 时间戳字典序 = 时间序
-  const excess = unpinned.length - MAX_UNPINNED_VERSIONS;
-  if (excess <= 0) return;
-  for (const f of unpinned.slice(0, excess)) { // slice(0, n) = 最旧的 n 个
-    try { await fsp.unlink(path.join(dir, f)); } catch {}
-  }
-}
+const versionStore = createVersionStore({
+  versionsDir: VERSIONS_DIR,
+  maxUnpinned: MAX_UNPINNED_VERSIONS,
+  appError,
+  ensureDir,
+  writeFileAtomic
+});
+const {
+  versionDirFor,
+  versionFilePath,
+  timestampName,
+  readIndexJson,
+  saveVersion
+} = versionStore;
 
 // ---------- 回收站 ----------
 async function readTrashIndex() {
@@ -1380,34 +1289,16 @@ ipcMain.handle('empty-trash', async () => queueWrite('trash', async () => {
   return true;
 }));
 
-ipcMain.handle('list-versions', async (e, rel) => {
-  const dir = versionDirFor(rel);
-  let files;
-  try { files = (await fsp.readdir(dir)).filter(f => f.endsWith('.md')); } catch { return []; }
-  const index = await readVersionIndex(rel);
-  const list = files.map(f => {
-    const ts = f.replace(/\.md$/, '');
-    return { file: f, timestamp: ts, pinned: !!(index.pinned && index.pinned[f]) };
-  }).sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-  return list;
-});
+ipcMain.handle('list-versions', async (e, rel) => versionStore.listVersions(rel));
 
-ipcMain.handle('read-version', async (e, rel, file) => {
-  return fsp.readFile(versionFilePath(rel, file), 'utf8');
-});
+ipcMain.handle('read-version', async (e, rel, file) => versionStore.readVersion(rel, file));
 
 // 按文件排队（不同文件的星标互不影响，同一文件的连续点击必须串行）。
 // 读索引 → 改 pinned → 写回同样是 read-modify-write：并发时后写的会把
 // 前一次的星标整份覆盖掉。
-ipcMain.handle('pin-version', async (e, rel, file, pinned) => queueWrite('ver:' + String(rel), async () => {
-  // file 必须先过校验，否则非法名字会被写进索引长期留着
-  versionFilePath(rel, file);
-  const index = await readVersionIndex(rel);
-  index.pinned = index.pinned || {};
-  if (pinned) index.pinned[file] = true; else delete index.pinned[file];
-  await writeVersionIndex(rel, index);
-  return true;
-}));
+ipcMain.handle('pin-version', async (e, rel, file, pinned) => queueWrite('ver:' + String(rel), async () => (
+  versionStore.pinVersion(rel, file, pinned)
+)));
 
 // 和 save-file 同链同理由：读 prev → 存快照 → 按 prev 算 version → 写回。
 // 回滚和保存并发（点了回滚又按 Ctrl+S）时，不排队就会两边各写一次，

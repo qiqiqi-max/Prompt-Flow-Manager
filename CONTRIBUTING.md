@@ -159,6 +159,7 @@ npm run test:frontmatter # frontmatter 安全生成：用户输入不能改写�
 npm run test:project-types # 项目类型新增、删除和最少保留规则（裸 node）
 npm run test:rule-export # 规则文件导出时保护已有文件（裸 node）
 npm run test:composer-meta # 装配器根据技术栈生成项目类型和标签（裸 node）
+npm run test:version-store # 版本列表、星标、裁剪和路径校验（裸 node）
 npm run test:includes     # 模板包含引擎（裸 node，自带一组反向对照）
 npm run test:reverse  # 把第一节那套流程自动化：逐条改坏源码，验证目标断言真的变红
 npm run test:reverse-split # 同上，针对「自检模块拆分」那一节的注入契约
