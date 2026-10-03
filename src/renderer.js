@@ -2810,5 +2810,20 @@ window.__pfmFlushPending = async () => {
   return true;
 };
 
+// 关窗前先处理正在编辑的草稿。取消时主进程会保留窗口；保存失败也视为取消。
+window.__pfmPrepareClose = async () => {
+  if (!state.editMode || !isDirty()) return true;
+  const choice = await api.confirmUnsaved({
+    title: t('unsavedTitle'),
+    detail: t('unsavedCloseDetail'),
+    save: t('saveChanges'),
+    discard: t('discardChanges'),
+    cancel: t('cancel')
+  });
+  if (choice === 'save') return exitEditMode(true);
+  if (choice === 'discard') return exitEditMode(false, { skipConfirm: true });
+  return false;
+};
+
 // 启动
 window.addEventListener('DOMContentLoaded', init);

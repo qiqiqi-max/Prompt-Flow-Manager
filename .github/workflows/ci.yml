@@ -170,6 +170,9 @@ jobs:
       - name: 关窗落盘握手
         run: npm run test:close
 
+      - name: 关窗前保护未保存草稿
+        run: npm run test:close-unsaved
+
       # 启动自愈：故意构造一个坏数据目录（幽灵条目 / 孤立正文 / 越界 store /
       # 残留 .part），跑完从进程外读磁盘定论。自带反向对照——同一个坏目录再跑
       # 一个走不到自愈的进程，四类损坏必须原样还在。

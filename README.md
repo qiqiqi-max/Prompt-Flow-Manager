@@ -193,7 +193,7 @@ npm run test:ui         # 启动真实 Electron 窗口并验证渲染及关键�
 npm run test:fn         # 在临时目录执行端到端功能自检
 npm run test:tabs       # 验证重启后标签页及正文恢复
 npm run test:debounce   # 验证配置写入防抖与关窗前 flush
-npm run test:close      # 验证关窗落盘握手
+npm run test:close      # 验证关窗落盘握手`nnpm run test:close-unsaved # 验证关窗前保护未保存草稿
 npm run test:render     # 验证 markdown 渲染成本上限
 npm run test:heal       # 验证启动时的数据目录自愈
 npm run test:logger     # 验证滚动日志与诊断信息导出

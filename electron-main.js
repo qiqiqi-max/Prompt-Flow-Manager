@@ -2375,6 +2375,14 @@ async function createWindow() {
       '(typeof window.__pfmFlushPending === "function" ? window.__pfmFlushPending() : true)', true
     );
   };
+  const prepareRendererClose = async () => {
+    if (!win || win.isDestroyed()) return true;
+    const wc = win.webContents;
+    if (!wc || wc.isDestroyed() || wc.isCrashed()) return true;
+    return wc.executeJavaScript(
+      '(typeof window.__pfmPrepareClose === "function" ? window.__pfmPrepareClose() : true)', true
+    );
+  };
 
   // 关窗前把待写入的东西落盘，否则最后一次改动会丢。
   //
@@ -2391,6 +2399,7 @@ async function createWindow() {
   // 永远不 settle，没有超时窗口就再也关不掉，比丢一次防抖写入严重得多。
   const CLOSE_FLUSH_TIMEOUT_MS = 3000;
   let closing = false;
+  let closeInProgress = false;
   let boundsSavedAsync = false;
   win.on('close', (e) => {
     if (boundsTimer) { clearTimeout(boundsTimer); boundsTimer = null; }
@@ -2399,31 +2408,52 @@ async function createWindow() {
       if (!boundsSavedAsync) saveBoundsSync();
       return;
     }
-    closing = true;
     e.preventDefault();
+    if (closeInProgress) return;
+    closeInProgress = true;
     const finish = (async () => {
+      let allowClose = true;
       try {
-        await flushRendererPending();
+        allowClose = await prepareRendererClose();
       } catch (err) {
-        console.error('关窗催渲染进程落盘失败:', err && err.message ? err.message : err);
+        allowClose = false;
+        console.error('关窗前处理未保存草稿失败:', err && err.message ? err.message : err);
       }
-      try {
-        // 走 updateConfig 而不是同步写：它在配置写队列里，不会和渲染进程刚 flush
-        // 出来的那几次 set-config 互相覆盖字段。
-        if (win && !win.isDestroyed()) {
-          await updateConfig({ windowBounds: currentBounds() });
-          boundsSavedAsync = true;
+      if (!allowClose) return false;
+      const persist = (async () => {
+        try {
+          await flushRendererPending();
+        } catch (err) {
+          console.error('关窗催渲染进程落盘失败:', err && err.message ? err.message : err);
         }
-      } catch (err) {
-        console.error('关窗保存尺寸失败（退回同步写）:', err && err.message ? err.message : err);
-      }
+        try {
+          // 走 updateConfig 而不是同步写：它在配置写队列里，不会和渲染进程刚 flush
+          // 出来的那几次 set-config 互相覆盖字段。
+          if (win && !win.isDestroyed()) {
+            await updateConfig({ windowBounds: currentBounds() });
+            boundsSavedAsync = true;
+          }
+        } catch (err) {
+          console.error('关窗保存尺寸失败（退回同步写）:', err && err.message ? err.message : err);
+        }
+      })();
+      await Promise.race([persist, new Promise(r => setTimeout(r, CLOSE_FLUSH_TIMEOUT_MS))]);
+      return true;
     })();
-    const timeout = new Promise(r => setTimeout(r, CLOSE_FLUSH_TIMEOUT_MS));
-    Promise.race([finish, timeout]).then(() => {
+    finish.then((allowClose) => {
+      closeInProgress = false;
+      if (!allowClose) {
+        if (isQuitting) isQuitting = false;
+        return;
+      }
+      closing = true;
       // 退出流程里 preventDefault 已经把 quit 取消了，必须原路走回 app.quit()，
       // 否则 macOS 下按了 Cmd+Q 只关窗、应用不退。
       if (isQuitting) { app.quit(); return; }
       if (win && !win.isDestroyed()) win.close();
+    }).catch((err) => {
+      closeInProgress = false;
+      console.error('关窗流程失败:', err && err.message ? err.message : err);
     });
   });
 
