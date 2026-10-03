@@ -36,5 +36,12 @@ const pinEnd = pinStart >= 0 ? renderer.indexOf('// 版本文件名 → 可读�
 const pinBlock = pinStart >= 0 && pinEnd > pinStart ? renderer.slice(pinStart, pinEnd) : '';
 ok(/try \{/.test(pinBlock) && /toast\(tErr\('pinFailed', err\), 'error'\)/.test(pinBlock), '版本星标保存失败时显示错误');
 
+ok(/function reportBackgroundSaveError\(/.test(renderer)
+  && /backgroundSaveFailed/.test(renderer)
+  && /backgroundSaveToastAt/.test(renderer), '后台设置保存失败有统一提示且避免连续弹窗');
+for (const label of ['保存展开状态失败', '保存标签状态失败', '保存最近打开失败', '保存占位符填充记忆失败', '保存锁定状态失败', '保存侧边栏宽度失败']) {
+  ok(!renderer.includes("console.error('" + label + ":'"), label + '时不只写控制台');
+}
+
 if (failures) process.exit(1);
 console.log('[test:failure-feedback] 通过');

@@ -155,12 +155,20 @@ const debounce = (fn, ms) => {
   };
   return wrapped;
 };
+let backgroundSaveToastAt = 0;
+function reportBackgroundSaveError(e) {
+  console.error('后台设置保存失败:', e); // i18n-exempt: 开发日志
+  const now = Date.now();
+  if (now - backgroundSaveToastAt < 5000) return;
+  backgroundSaveToastAt = now;
+  toast(tErr('backgroundSaveFailed', e), 'error');
+}
 const escapeHtml = (s) => String(s).replace(/[&<>"'`]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '`': '&#96;' }[c]));
 // 保存展开状态（防抖）
 const saveExpandedPathsDebounced = debounce(async () => {
   try {
     await api.setConfig({ expandedPaths: Array.from(state.expandedPaths) });
-  } catch (e) { console.error('保存展开状态失败:', e); } // i18n-exempt: 开发日志
+  } catch (e) { reportBackgroundSaveError(e); }
 }, 600);
 
 // frontmatter 解析由 src/frontmatter.js 提供（FRONTMATTER 全局，index.html 里先加载）。
@@ -588,7 +596,7 @@ const saveTabsDebounced = debounce(async () => {
       tabs: state.tabs.map(t => t.rel),
       activeTab: state.activeTab
     });
-  } catch (e) { console.error('保存标签状态失败:', e); } // i18n-exempt: 开发日志
+  } catch (e) { reportBackgroundSaveError(e); }
 }, 500);
 function renderTabs() {
   const bar = $('tabs-bar');
@@ -693,7 +701,7 @@ function addRecent(rel) {
 }
 const saveRecentDebounced = debounce(async () => {
   try { await api.setConfig({ recent: state.recent }); }
-  catch (e) { console.error('保存最近打开失败:', e); } // i18n-exempt: 开发日志
+  catch (e) { reportBackgroundSaveError(e); }
 }, 500);
 function renderRecent() {
   const panel = $('recent-panel');
@@ -1292,7 +1300,7 @@ function rememberFillValues(values) {
 }
 const saveFillMemoryDebounced = debounce(async () => {
   try { await api.setConfig({ fillMemory: state.fillMemory }); }
-  catch (e) { console.error('保存占位符填充记忆失败:', e); } // i18n-exempt: 开发日志
+  catch (e) { reportBackgroundSaveError(e); }
 }, 500);
 
 // ===== 新建 =====
@@ -1827,7 +1835,7 @@ function migrateLock(oldRel, newRel) {
     state.lockedFiles.add(newRel);
     // 不 await：调用方（改名/移动）已经把文件动完了，锁列表是事后记账。
     // 真正需要保证落盘的是关窗那一下，由 __pfmFlushPending 兜。
-    saveLockedDebounced().catch(e => console.error('保存锁定状态失败:', e)); // i18n-exempt: 开发日志
+    saveLockedDebounced().catch(reportBackgroundSaveError);
   }
 }
 
@@ -2424,7 +2432,7 @@ async function renderUpdateStatus() {
 // ===== 分隔条拖拽 =====
 const saveSidebarWidthDebounced = debounce(async (w) => {
   try { await api.setConfig({ sidebarWidth: w }); }
-  catch (e) { console.error('保存侧边栏宽度失败:', e); } // i18n-exempt: 开发日志
+  catch (e) { reportBackgroundSaveError(e); }
 }, 400);
 function initResizer() {
   const resizer = $('resizer');
