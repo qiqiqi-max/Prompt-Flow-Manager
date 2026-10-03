@@ -208,6 +208,7 @@ npm run test:rule-export # 规则文件导出时保护已有文件
 npm run test:composer-meta # 装配器项目类型与标签推断
 npm run test:version-store # 版本历史存储、星标和裁剪规则
 npm run test:trash-store # 回收站索引、存放名校验和部分清空
+npm run test:file-move # 改名时正文和版本历史一起移动
 npm run test:includes   # 模板片段引入与嵌套解析
 npm run test:reverse    # 反向对照：版本检查的每个修复点撤掉都必须变红
 npm run test:reverse-split # 反向对照：自检模块拆分的每个修复点撤掉都必须变红

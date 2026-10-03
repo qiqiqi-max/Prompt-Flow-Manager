@@ -107,6 +107,7 @@ const projectTypes = require('./lib/project-types');
 const ruleExport = require('./lib/rule-export');
 const { createVersionStore } = require('./lib/version-store');
 const { createTrashStore } = require('./lib/trash-store');
+const { movePromptWithHistory } = require('./lib/file-move');
 // 滚动文件日志 + 诊断包。两个模块都刻意不 require('electron')：
 // 目录、版本号、两个根目录全部由这里传进去，DATA_ROOT / CODE_ROOT 的判断
 // 只允许存在下面那一份（见 123-133 行的说明）。
@@ -868,18 +869,16 @@ ipcMain.handle('rename', async (e, oldRel, newRel) => queueWriteMulti(
   // 任一侧落在 .versions/.trash/config.json 上都不行。
   const oldFull = safeJoinWritable(oldRel);
   const newFull = safeJoinWritable(newRel);
-  if (fs.existsSync(newFull)) throw appError('E_TARGET_EXISTS', newRel);
-  await ensureDir(path.dirname(newFull));
-  await fsp.rename(oldFull, newFull);
-  dropFromCache(oldFull);
-  dropFromCache(newFull);
-  // 版本目录跟随
-  const oldV = versionDirFor(oldRel);
-  const newV = versionDirFor(newRel);
-  if (fs.existsSync(oldV)) {
-    await ensureDir(path.dirname(newV));
-    await fsp.rename(oldV, newV);
-  }
+  await movePromptWithHistory({
+    oldRel,
+    newRel,
+    oldFull,
+    newFull,
+    oldVersionDir: versionDirFor(oldRel),
+    newVersionDir: versionDirFor(newRel),
+    appError,
+    onFileMoved: dropFromCache
+  });
   // 锁定标记跟随改名，避免"改名 → 删除"绕过锁。
   //
   // 读改写整个塞进 queueConfigWrite：原先是在队列外 loadConfig，再拿这份快照去

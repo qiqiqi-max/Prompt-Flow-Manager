@@ -504,10 +504,13 @@ assert(/async function readParsedCached\(/.test(mainSrc), '有按 mtime+size 失
 assert(/hit\.mtimeMs === st\.mtimeMs && hit\.size === st\.size/.test(mainSrc), '缓存同时校验 mtime 与 size');
 // 所有写入/移动/删除路径都必须清缓存，否则会读到旧内容
 const dropCount = (mainSrc.match(/dropFromCache\(/g) || []).length;
-const trashCacheHooks = (mainSrc.match(/onFileMoved: dropFromCache/g) || []).length;
+const movedCacheHooks = (mainSrc.match(/onFileMoved: dropFromCache/g) || []).length;
 const trashStoreSrc = fs.readFileSync(path.join(root, 'lib/trash-store.js'), 'utf8');
-assert(dropCount >= 6 && trashCacheHooks === 2 && (trashStoreSrc.match(/onFileMoved\(/g) || []).length >= 3,
-  '写入/改名/删除/回滚/恢复都清了缓存（主进程 ' + dropCount + ' 处，回收站回调 ' + trashCacheHooks + ' 处）');
+const fileMoveSrc = fs.readFileSync(path.join(root, 'lib/file-move.js'), 'utf8');
+assert(dropCount >= 5 && movedCacheHooks === 3
+  && (trashStoreSrc.match(/onFileMoved\(/g) || []).length >= 3
+  && (fileMoveSrc.match(/onFileMoved\(/g) || []).length >= 4,
+'写入/改名/删除/回滚/恢复都清了缓存（主进程 ' + dropCount + ' 处，移动回调 ' + movedCacheHooks + ' 处）');
 assert(fs.existsSync(path.join(root, 'tests/search-bench.js')), '存在搜索压测脚本 tests/search-bench.js');
 assert(!!pkg.scripts.bench, '有 npm run bench');
 // 多词搜索语义：单 token 时"标题命中"必须是最高优先级（rank 3，语义与原实现等价），

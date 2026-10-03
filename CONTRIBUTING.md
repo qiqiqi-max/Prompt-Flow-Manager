@@ -161,6 +161,7 @@ npm run test:rule-export # 规则文件导出时保护已有文件（裸 node）
 npm run test:composer-meta # 装配器根据技术栈生成项目类型和标签（裸 node）
 npm run test:version-store # 版本列表、星标、裁剪和路径校验（裸 node）
 npm run test:trash-store # 回收站索引、存放名校验和部分清空（裸 node）
+npm run test:file-move # 改名时正文和版本历史一起移动，失败时回滚（裸 node）
 npm run test:includes     # 模板包含引擎（裸 node，自带一组反向对照）
 npm run test:reverse  # 把第一节那套流程自动化：逐条改坏源码，验证目标断言真的变红
 npm run test:reverse-split # 同上，针对「自检模块拆分」那一节的注入契约
