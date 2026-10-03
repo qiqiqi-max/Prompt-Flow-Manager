@@ -108,6 +108,9 @@ jobs:
       - name: 工作流引用精确替换
         run: npm run test:workflow-refs
 
+      - name: 完整备份导入
+        run: npm run test:backup-import
+
       # 纯逻辑测试，不用起 Electron：从 renderer.js 里抠出 debounce 单独验语义。
       # 自带反向对照（旧版一行 debounce 必须失败），所以它不会变成永远绿的空壳。
       - name: debounce 语义

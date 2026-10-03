@@ -2241,7 +2241,16 @@ async function importZip() {
   try {
     const res = await api.importZip();
     if (res.ok) {
-      toast(t('importedZip'), 'success');
+      const failed = Array.isArray(res.failed) ? res.failed : [];
+      if (failed.length) {
+        toast(t('importedZipPartial', {
+          count: res.imported || 0,
+          failed: failed.length,
+          files: failed.slice(0, 5).map(f => f.name).join(', ')
+        }), 'error');
+      } else {
+        toast(t(res.mode === 'backup' ? 'importedBackup' : 'importedZipCount', { count: res.imported || 0 }), 'success');
+      }
       await refreshTree();
     }
   } catch (e) { toast(tErr('importFailed', e), 'error'); }

@@ -136,6 +136,9 @@ const I18N = {
     exportCanceled: '已取消导出',
     imported: '已导入',
     importedZip: '已导入备份包',
+    importedBackup: '已从备份恢复 {count} 个文件，并保留原目录',
+    importedZipCount: '已导入 {count} 个 Markdown 文件',
+    importedZipPartial: '已导入 {count} 个文件，{failed} 个失败：{files}',
     // 失败提示（都会拼上具体错误信息）
     openFailed: '打开失败',
     saveFailed: '保存失败',
@@ -467,6 +470,9 @@ const I18N = {
     exportCanceled: 'Export canceled',
     imported: 'Imported',
     importedZip: 'Backup imported',
+    importedBackup: 'Restored {count} file(s) from the backup with their original folders',
+    importedZipCount: 'Imported {count} Markdown file(s)',
+    importedZipPartial: 'Imported {count} file(s); {failed} failed: {files}',
     // 失败提示（都会拼上具体错误信息）
     openFailed: 'Open failed',
     saveFailed: 'Save failed',

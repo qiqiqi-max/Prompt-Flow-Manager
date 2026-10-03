@@ -97,7 +97,7 @@ for (const stream of [process.stdout, process.stderr]) {
 }
 
 const archiver = require('archiver'); // 仅用于压缩导出
-const { readZipMarkdownEntries, sanitizeTitle, uniqueRel } = require('./lib/zip-import');
+const { readZipMarkdownEntries, sanitizeTitle, uniqueRel, backupRelForEntry } = require('./lib/zip-import');
 // 原生菜单的文案也要跟随语言。i18n.js 结尾有 module.exports，可以直接在主进程 require，
 // 不必再维护第二份翻译表（之前菜单是硬编码中文，切到英文后整个菜单栏还是中文）。
 const I18N_TABLE = require('./src/i18n.js');
@@ -1360,6 +1360,10 @@ async function importMarkdown(fileName, content) {
   const title = sanitizeTitle(meta.title || path.basename(fileName, '.md'));
   const stage = (meta.stage && STAGES.includes(meta.stage)) ? meta.stage : 'project-init';
   const base = `prompts/${stage}/${title}.md`;
+  return importMarkdownAt(base, content);
+}
+
+async function importMarkdownAt(base, content) {
   // uniqueRel 只能按"此刻磁盘上有什么"挑名字，挑完到真正创建之间仍有窗口。
   // 而且这一段到 await 之前全是同步的：并发导入几个同名文件时，每一路都在
   // 别人落盘之前跑完 uniqueRel，于是全都挑中同一个名字。
@@ -1400,17 +1404,23 @@ ipcMain.handle('import-zip', async () => {
   if (res.canceled || !res.filePaths || !res.filePaths[0]) return { ok: false };
   const zipPath = res.filePaths[0];
   const { entries, skipped } = await readZipMarkdownEntries(zipPath);
+  // 本应用导出的 ZIP 以 prompts/workflows/templates 为顶层目录，
+  // 完整备份要保留工作流和模板位置；其他 ZIP 仍按 frontmatter 导入为提示词。
+  const isAppBackup = entries.length > 0 && entries.every(entry => backupRelForEntry(entry.path));
   const imported = [];
   const failedList = skipped.map(s => ({ name: s.name, error: s.reason }));
   for (const entry of entries) {
     try {
-      imported.push(await importMarkdown(entry.name, entry.content));
+      const backupRel = isAppBackup ? backupRelForEntry(entry.path) : null;
+      imported.push(backupRel
+        ? await importMarkdownAt(backupRel, entry.content)
+        : await importMarkdown(entry.name, entry.content));
     } catch (err) {
-      failedList.push({ name: entry.name, error: err.message });
+      failedList.push({ name: entry.path || entry.name, error: err.message });
     }
   }
   // 不静默成功：调用方能看到真实导入数量与失败明细
-  return { ok: true, imported: imported.length, rels: imported, failed: failedList };
+  return { ok: true, mode: isAppBackup ? 'backup' : 'markdown', imported: imported.length, rels: imported, failed: failedList };
 });
 
 ipcMain.handle('get-stages', () => ({ stages: STAGES, labels: STAGE_LABELS }));

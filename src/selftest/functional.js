@@ -147,6 +147,10 @@
       if (window.__pfmDialogStubs) {
         const single = await api.exportSingle(renamed);
         check('导出单个提示词返回成功', single.ok === true, JSON.stringify(single));
+        const backupWorkflow = 'workflows/自检备份工作流.md';
+        const backupTemplate = 'templates/自检备份模板.md';
+        await api.createFile(backupWorkflow, '---\ntitle: 自检备份工作流\nflow:\n  - id: a\n    prompt: ' + renamed + '\n---\n工作流正文');
+        await api.createFile(backupTemplate, '---\ntitle: 自检备份模板\n---\n模板正文');
         const zip = await api.exportZip();
         check('导出 ZIP 返回成功', zip.ok === true, JSON.stringify(zip));
 
@@ -161,6 +165,9 @@
           JSON.stringify({ ok: imp2.ok, imported: imp2.imported, failed: imp2.failed }));
         check('导入 ZIP 无失败条目', Array.isArray(imp2.failed) && imp2.failed.length === 0,
           JSON.stringify(imp2.failed));
+        check('导入完整备份时识别为备份模式', imp2.mode === 'backup', JSON.stringify(imp2));
+        check('完整备份恢复工作流目录', imp2.rels.some(r => /^workflows\/自检备份工作流-\d+\.md$/.test(r)), JSON.stringify(imp2.rels));
+        check('完整备份恢复模板目录', imp2.rels.some(r => /^templates\/自检备份模板-\d+\.md$/.test(r)), JSON.stringify(imp2.rels));
 
         const cancel = await api.exportZip();
         check('用户取消导出时返回 ok:false', cancel.ok === false, JSON.stringify(cancel));

@@ -163,6 +163,9 @@ child.on('exit', (code) => {
     // 环境变量没传时整段跳过，"没有 FAIL"照样是绿的。
     /\[selftest\] PASS lang\.js 的 __LANG__ 占位符全部替换成 en/,
     /\[selftest:fn\] PASS 导出 ZIP 返回成功/,
+    /\[selftest:fn\] PASS 导入完整备份时识别为备份模式/,
+    /\[selftest:fn\] PASS 完整备份恢复工作流目录/,
+    /\[selftest:fn\] PASS 完整备份恢复模板目录/,
     /\[selftest:fn\] PASS 工作流引用精确更新/,
     /\[selftest:fn\] PASS 工作流引用不误改相近路径和正文/,
     // 三选一对话框的三条分支各自都要落到磁盘断言上，见 functionalScript 第 13 节
