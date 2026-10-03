@@ -166,6 +166,7 @@ npm run test:workflow-refs # 只精确改写 flow 中的 prompt 引用（裸 nod
 npm run test:backup-import # 完整备份按 prompts/workflows/templates 原目录恢复（裸 node）
 npm run test:backup-config # 完整备份只迁移锁定、项目类型和填充记忆（裸 node）
 npm run test:backup-preview # ZIP 导入前统计文件、版本、设置和重名冲突（裸 node）
+npm run test:backup-manifest # 完整备份清单和 SHA-256 校验（裸 node）
 npm run test:includes     # 模板包含引擎（裸 node，自带一组反向对照）
 npm run test:reverse  # 把第一节那套流程自动化：逐条改坏源码，验证目标断言真的变红
 npm run test:reverse-split # 同上，针对「自检模块拆分」那一节的注入契约

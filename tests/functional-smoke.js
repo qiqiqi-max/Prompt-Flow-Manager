@@ -30,13 +30,35 @@ const outDir = path.join(dataDir, '__export');
 fs.mkdirSync(outDir, { recursive: true });
 const exportedMd = path.join(outDir, 'exported.md');
 const exportedZip = path.join(outDir, 'exported.zip');
+const corruptZip = path.join(outDir, 'corrupt-manifest.zip');
 const exportedDiag = path.join(outDir, 'diag.json');
+const archiver = require('archiver');
+
+async function writeCorruptBackup() {
+  await new Promise((resolve, reject) => {
+    const out = fs.createWriteStream(corruptZip);
+    const zip = archiver('zip');
+    out.on('close', resolve);
+    zip.on('error', reject);
+    zip.pipe(out);
+    zip.append('---\ntitle: 损坏备份\n---\n正文', { name: 'prompts/testing/损坏备份.md' });
+    zip.append(JSON.stringify({
+      schema: 1,
+      app: 'prompt-flow-manager',
+      appVersion: 'test',
+      createdAt: new Date().toISOString(),
+      files: [{ path: 'prompts/testing/损坏备份.md', size: 1, sha256: '0'.repeat(64) }]
+    }), { name: '.pfm/manifest.json' });
+    zip.finalize();
+  });
+}
 const dialogQueue = [
   { canceled: false, filePath: exportedMd },                 // exportSingle
   { canceled: false, filePath: exportedZip },                // exportZip
   { canceled: false, filePaths: [exportedMd] },              // importSingle
   { canceled: false, filePaths: [exportedZip] },             // importZip（先取消预览）
   { canceled: false, filePaths: [exportedZip] },             // importZip（确认导入）
+  { canceled: false, filePaths: [corruptZip] },              // importZip（损坏清单）
   { canceled: true },                                        // exportZip（验证取消分支）
   // 诊断信息导出（functional.js 第 14 节）。位置必须在这里：文件类对话框
   // 按先后顺序消费，第 14 节排在第 11 节之后、第 13 节不占文件类队列。
@@ -58,6 +80,8 @@ const dialogQueue = [
 const dialogQueuePath = path.join(dataDir, '__dialogs.json');
 fs.writeFileSync(dialogQueuePath, JSON.stringify(dialogQueue), 'utf8');
 
+(async () => {
+await writeCorruptBackup();
 const child = spawn(electronBin, [root], {
   cwd: root,
   env: {
@@ -167,6 +191,7 @@ child.on('exit', (code) => {
     /\[selftest\] PASS lang\.js 的 __LANG__ 占位符全部替换成 en/,
     /\[selftest:fn\] PASS 导出 ZIP 返回成功/,
     /\[selftest:fn\] PASS 取消导入预览时不写入文件/,
+    /\[selftest:fn\] PASS 清单损坏的备份会被拒绝且不写入/,
     /\[selftest:fn\] PASS 导入完整备份时识别为备份模式/,
     /\[selftest:fn\] PASS 完整备份恢复工作流目录/,
     /\[selftest:fn\] PASS 完整备份恢复模板目录/,
@@ -205,4 +230,8 @@ child.on('exit', (code) => {
     && artifactsOk;
   console.log('\n[test:fn] ' + (passed ? '通过' : '失败（exit=' + code + '）'));
   process.exit(passed ? 0 : 1);
+});
+})().catch((e) => {
+  console.error('[test:fn] 准备测试失败: ' + (e && e.stack ? e.stack : e));
+  process.exit(1);
 });

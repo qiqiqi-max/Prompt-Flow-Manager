@@ -210,6 +210,13 @@
           check('导入的回收站条目可恢复且带版本历史', false, '找不到导入的回收站条目');
         }
         await api.setConfig({ lockedFiles: [] });
+        const beforeCorrupt = await api.getMetaList();
+        let corruptError = '';
+        try { await api.importZip(); } catch (e) { corruptError = describeError(e); }
+        const afterCorrupt = await api.getMetaList();
+        check('清单损坏的备份会被拒绝且不写入',
+          /备份文件缺失或已损坏|missing or damaged files/.test(corruptError) && afterCorrupt.length === beforeCorrupt.length,
+          JSON.stringify({ corruptError, before: beforeCorrupt.length, after: afterCorrupt.length }));
 
         const cancel = await api.exportZip();
         check('用户取消导出时返回 ok:false', cancel.ok === false, JSON.stringify(cancel));

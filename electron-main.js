@@ -98,10 +98,12 @@ for (const stream of [process.stdout, process.stderr]) {
 
 const archiver = require('archiver'); // 仅用于压缩导出
 const {
-  readZipMarkdownEntries, sanitizeTitle, uniqueRel, backupRelForEntry, backupVersionForEntry, backupTrashForEntry, PORTABLE_CONFIG_ENTRY
+  readZipMarkdownEntries, sanitizeTitle, uniqueRel, backupRelForEntry, backupVersionForEntry, backupTrashForEntry,
+  PORTABLE_CONFIG_ENTRY, BACKUP_MANIFEST_ENTRY
 } = require('./lib/zip-import');
 const backupConfig = require('./lib/backup-config');
 const { summarizeBackupEntries } = require('./lib/backup-preview');
+const { sha256, buildManifest, verifyManifest } = require('./lib/backup-manifest');
 // 原生菜单的文案也要跟随语言。i18n.js 结尾有 module.exports，可以直接在主进程 require，
 // 不必再维护第二份翻译表（之前菜单是硬编码中文，切到英文后整个菜单栏还是中文）。
 const I18N_TABLE = require('./src/i18n.js');
@@ -1259,6 +1261,8 @@ ipcMain.handle('export-zip', async () => {
   });
   if (res.canceled || !res.filePath) return { ok: false };
   const portableConfig = backupConfig.exportPortable(await loadConfig());
+  const backupFiles = await collectBackupFiles(portableConfig);
+  const manifest = buildManifest(backupFiles, { appVersion: app.getVersion() });
   // 关键：必须监听输出流的 error。原先只挂了 archive 的 error，于是
   // 目标不可写（路径无权限/磁盘满/被占用）时 close 仍会触发 → resolve →
   // 返回 {ok:true}，用户被告知"备份成功"而磁盘上根本没有文件；
@@ -1273,12 +1277,8 @@ ipcMain.handle('export-zip', async () => {
     out.on('close', () => done(resolve));
     archive.on('error', (err) => done(reject, appError('E_EXPORT_ARCHIVE', err.message)));
     archive.pipe(out);
-    archive.directory(PROMPTS_DIR, 'prompts', {});
-    archive.directory(WORKFLOWS_DIR, 'workflows', {});
-    archive.directory(TEMPLATES_DIR, 'templates', {});
-    if (fs.existsSync(VERSIONS_DIR)) archive.directory(VERSIONS_DIR, '.versions', {});
-    if (fs.existsSync(TRASH_DIR)) archive.directory(TRASH_DIR, '.trash', {});
-    archive.append(JSON.stringify({ schema: 1, config: portableConfig }, null, 2), { name: PORTABLE_CONFIG_ENTRY });
+    for (const file of backupFiles) archive.append(file.data, { name: file.path });
+    archive.append(JSON.stringify(manifest, null, 2), { name: BACKUP_MANIFEST_ENTRY });
     archive.finalize().catch((err) => done(reject, appError('E_EXPORT_ARCHIVE', err.message)));
   }).catch(async (err) => {
     // 失败时别留下半截 zip 让用户误当成可用备份
@@ -1287,6 +1287,30 @@ ipcMain.handle('export-zip', async () => {
   });
   return { ok: true, path: res.filePath };
 });
+
+async function collectBackupFiles(portableConfig) {
+  const files = [];
+  async function walk(dir, prefix, accept) {
+    let entries;
+    try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.tmp-') || entry.name.endsWith('.part')) continue;
+      const full = path.join(dir, entry.name);
+      const rel = prefix + '/' + entry.name;
+      if (entry.isDirectory()) await walk(full, rel, accept);
+      else if (entry.isFile() && accept(rel)) {
+        const data = await fsp.readFile(full);
+        files.push({ path: rel, data, size: data.length, sha256: sha256(data) });
+      }
+    }
+  }
+  for (const [top, dir] of Object.entries(TOP_DIRS)) await walk(dir, top, rel => !!backupRelForEntry(rel));
+  await walk(VERSIONS_DIR, '.versions', rel => !!backupVersionForEntry(rel));
+  await walk(TRASH_DIR, '.trash', rel => !!backupTrashForEntry(rel));
+  const configData = Buffer.from(JSON.stringify({ schema: 1, config: portableConfig }, null, 2), 'utf8');
+  files.push({ path: PORTABLE_CONFIG_ENTRY, data: configData, size: configData.length, sha256: sha256(configData) });
+  return files.sort((a, b) => a.path.localeCompare(b.path));
+}
 
 ipcMain.handle('export-single', async (e, rel) => {
   const full = safeJoin(rel);
@@ -1414,9 +1438,23 @@ ipcMain.handle('import-zip', async () => {
   const { entries, skipped } = await readZipMarkdownEntries(zipPath, {
     includeVersionIndexes: true,
     includePortableConfig: true,
-    includeTrash: true
+    includeTrash: true,
+    includeManifest: true
   });
-  const summary = summarizeBackupEntries(entries, rel => fs.existsSync(safeJoin(rel)));
+  const manifestEntry = entries.find(entry => entry.path === BACKUP_MANIFEST_ENTRY);
+  let manifest = null;
+  if (manifestEntry) {
+    try { manifest = JSON.parse(manifestEntry.content); } catch { throw appError('E_BACKUP_MANIFEST_INVALID'); }
+  }
+  const backupEntries = entries.filter(entry => entry !== manifestEntry);
+  if (manifest && skipped.length) throw appError('E_BACKUP_MANIFEST_MISMATCH', skipped.map(s => s.name).slice(0, 5).join(', '));
+  const verification = verifyManifest(backupEntries, manifest);
+  if (!verification.ok) {
+    if (verification.invalid) throw appError('E_BACKUP_MANIFEST_INVALID');
+    const problems = [...verification.missing, ...verification.changed, ...verification.extra].slice(0, 5).join(', ');
+    throw appError('E_BACKUP_MANIFEST_MISMATCH', problems);
+  }
+  const summary = summarizeBackupEntries(backupEntries, rel => fs.existsSync(safeJoin(rel)));
   const detailKey = summary.mode === 'backup' ? 'importBackupPreviewDetail' : 'importZipPreviewDetail';
   const conflictText = summary.conflictCount
     ? '\n\n' + mt('importBackupConflicts', {
@@ -1439,10 +1477,10 @@ ipcMain.handle('import-zip', async () => {
     }) + conflictText
   });
   if (answer.response !== 1) return { ok: false, canceled: true, summary };
-  const configEntry = entries.find(entry => entry.path === PORTABLE_CONFIG_ENTRY);
-  const trashEntries = entries.filter(entry => backupTrashForEntry(entry.path));
-  const contentEntries = entries.filter(entry => entry !== configEntry && !backupVersionForEntry(entry.path) && !backupTrashForEntry(entry.path));
-  const versionEntries = entries.filter(entry => backupVersionForEntry(entry.path));
+  const configEntry = backupEntries.find(entry => entry.path === PORTABLE_CONFIG_ENTRY);
+  const trashEntries = backupEntries.filter(entry => backupTrashForEntry(entry.path));
+  const contentEntries = backupEntries.filter(entry => entry !== configEntry && !backupVersionForEntry(entry.path) && !backupTrashForEntry(entry.path));
+  const versionEntries = backupEntries.filter(entry => backupVersionForEntry(entry.path));
   // 本应用导出的 ZIP 以 prompts/workflows/templates 为顶层目录，
   // 完整备份要保留工作流和模板位置；其他 ZIP 仍按 frontmatter 导入为提示词。
   const isAppBackup = contentEntries.length > 0 && contentEntries.every(entry => backupRelForEntry(entry.path));
