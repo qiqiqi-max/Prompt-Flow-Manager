@@ -97,7 +97,10 @@ for (const stream of [process.stdout, process.stderr]) {
 }
 
 const archiver = require('archiver'); // 仅用于压缩导出
-const { readZipMarkdownEntries, sanitizeTitle, uniqueRel, backupRelForEntry, backupVersionForEntry } = require('./lib/zip-import');
+const {
+  readZipMarkdownEntries, sanitizeTitle, uniqueRel, backupRelForEntry, backupVersionForEntry, PORTABLE_CONFIG_ENTRY
+} = require('./lib/zip-import');
+const backupConfig = require('./lib/backup-config');
 // 原生菜单的文案也要跟随语言。i18n.js 结尾有 module.exports，可以直接在主进程 require，
 // 不必再维护第二份翻译表（之前菜单是硬编码中文，切到英文后整个菜单栏还是中文）。
 const I18N_TABLE = require('./src/i18n.js');
@@ -1254,6 +1257,7 @@ ipcMain.handle('export-zip', async () => {
     filters: [{ name: 'ZIP', extensions: ['zip'] }]
   });
   if (res.canceled || !res.filePath) return { ok: false };
+  const portableConfig = backupConfig.exportPortable(await loadConfig());
   // 关键：必须监听输出流的 error。原先只挂了 archive 的 error，于是
   // 目标不可写（路径无权限/磁盘满/被占用）时 close 仍会触发 → resolve →
   // 返回 {ok:true}，用户被告知"备份成功"而磁盘上根本没有文件；
@@ -1272,6 +1276,7 @@ ipcMain.handle('export-zip', async () => {
     archive.directory(WORKFLOWS_DIR, 'workflows', {});
     archive.directory(TEMPLATES_DIR, 'templates', {});
     if (fs.existsSync(VERSIONS_DIR)) archive.directory(VERSIONS_DIR, '.versions', {});
+    archive.append(JSON.stringify({ schema: 1, config: portableConfig }, null, 2), { name: PORTABLE_CONFIG_ENTRY });
     archive.finalize().catch((err) => done(reject, appError('E_EXPORT_ARCHIVE', err.message)));
   }).catch(async (err) => {
     // 失败时别留下半截 zip 让用户误当成可用备份
@@ -1404,8 +1409,9 @@ ipcMain.handle('import-zip', async () => {
   });
   if (res.canceled || !res.filePaths || !res.filePaths[0]) return { ok: false };
   const zipPath = res.filePaths[0];
-  const { entries, skipped } = await readZipMarkdownEntries(zipPath, { includeVersionIndexes: true });
-  const contentEntries = entries.filter(entry => !backupVersionForEntry(entry.path));
+  const { entries, skipped } = await readZipMarkdownEntries(zipPath, { includeVersionIndexes: true, includePortableConfig: true });
+  const configEntry = entries.find(entry => entry.path === PORTABLE_CONFIG_ENTRY);
+  const contentEntries = entries.filter(entry => entry !== configEntry && !backupVersionForEntry(entry.path));
   const versionEntries = entries.filter(entry => backupVersionForEntry(entry.path));
   // 本应用导出的 ZIP 以 prompts/workflows/templates 为顶层目录，
   // 完整备份要保留工作流和模板位置；其他 ZIP 仍按 frontmatter 导入为提示词。
@@ -1426,6 +1432,7 @@ ipcMain.handle('import-zip', async () => {
     }
   }
   let restoredVersions = 0;
+  let restoredSettings = false;
   if (isAppBackup) {
     for (const entry of versionEntries) {
       const info = backupVersionForEntry(entry.path);
@@ -1450,12 +1457,28 @@ ipcMain.handle('import-zip', async () => {
       }
     }
   }
+  if (isAppBackup && configEntry) {
+    try {
+      const parsed = JSON.parse(configEntry.content);
+      if (!parsed || parsed.schema !== 1 || !parsed.config) throw appError('E_BACKUP_CONFIG_INVALID');
+      await queueConfigWrite(async () => {
+        const cur = await loadConfig();
+        const next = backupConfig.mergePortable(cur, parsed.config, restoredRels);
+        const ok = await saveConfig(next);
+        if (!ok) throw appError('E_CONFIG_WRITE', CONFIG_PATH);
+      });
+      restoredSettings = true;
+    } catch (err) {
+      failedList.push({ name: PORTABLE_CONFIG_ENTRY, error: err.message });
+    }
+  }
   // 不静默成功：调用方能看到真实导入数量与失败明细
   return {
     ok: true,
     mode: isAppBackup ? 'backup' : 'markdown',
     imported: imported.length,
     restoredVersions,
+    restoredSettings,
     rels: imported,
     failed: failedList
   };

@@ -167,6 +167,7 @@ child.on('exit', (code) => {
     /\[selftest:fn\] PASS 完整备份恢复工作流目录/,
     /\[selftest:fn\] PASS 完整备份恢复模板目录/,
     /\[selftest:fn\] PASS 完整备份恢复版本历史到导入后的文件/,
+    /\[selftest:fn\] PASS 完整备份恢复可迁移设置/,
     /\[selftest:fn\] PASS 工作流引用精确更新/,
     /\[selftest:fn\] PASS 工作流引用不误改相近路径和正文/,
     // 三选一对话框的三条分支各自都要落到磁盘断言上，见 functionalScript 第 13 节

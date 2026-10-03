@@ -149,9 +149,14 @@
         check('导出单个提示词返回成功', single.ok === true, JSON.stringify(single));
         const backupWorkflow = 'workflows/自检备份工作流.md';
         const backupTemplate = 'templates/自检备份模板.md';
+        await api.setConfig({ lockedFiles: [renamed], projectTypes: [...(await api.getConfig()).projectTypes, '自检迁移类型'] });
         await api.createFile(backupWorkflow, '---\ntitle: 自检备份工作流\nflow:\n  - id: a\n    prompt: ' + renamed + '\n---\n工作流正文');
         await api.createFile(backupTemplate, '---\ntitle: 自检备份模板\n---\n模板正文');
         const zip = await api.exportZip();
+        await api.setConfig({
+          lockedFiles: [],
+          projectTypes: (await api.getConfig()).projectTypes.filter(t => t !== '自检迁移类型')
+        });
         check('导出 ZIP 返回成功', zip.ok === true, JSON.stringify(zip));
 
         const imp1 = await api.importSingle();
@@ -172,6 +177,12 @@
         const restoredVersions = restoredPrompt ? await api.listVersions(restoredPrompt) : [];
         check('完整备份恢复版本历史到导入后的文件', restoredVersions.length >= 2 && imp2.restoredVersions >= 2,
           JSON.stringify({ restoredPrompt, versions: restoredVersions.length, restored: imp2.restoredVersions }));
+        const restoredCfg = await api.getConfig();
+        check('完整备份恢复可迁移设置', imp2.restoredSettings === true
+          && restoredCfg.projectTypes.includes('自检迁移类型')
+          && restoredCfg.lockedFiles.includes(restoredPrompt),
+        JSON.stringify({ restored: imp2.restoredSettings, locks: restoredCfg.lockedFiles, types: restoredCfg.projectTypes }));
+        await api.setConfig({ lockedFiles: [] });
 
         const cancel = await api.exportZip();
         check('用户取消导出时返回 ok:false', cancel.ok === false, JSON.stringify(cancel));

@@ -2254,6 +2254,13 @@ async function importZip() {
           versions: res.restoredVersions || 0
         }), 'success');
       }
+      if (res.restoredSettings) {
+        state.config = await api.getConfig();
+        state.lockedFiles = new Set(Array.isArray(state.config.lockedFiles) ? state.config.lockedFiles : []);
+        state.fillMemory = state.config.fillMemory && typeof state.config.fillMemory === 'object' && !Array.isArray(state.config.fillMemory)
+          ? state.config.fillMemory : {};
+        populateFilters();
+      }
       await refreshTree();
     }
   } catch (e) { toast(tErr('importFailed', e), 'error'); }
