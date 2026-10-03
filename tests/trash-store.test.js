@@ -114,6 +114,69 @@ async function withStore(fn, rmImpl, writeImpl) {
     await fsp.writeFile(file, data, 'utf8');
   });
 
+  const restoreOptions = (root) => ({
+    resolveWritable: (rel) => {
+      if (rel === 'config.json') throw appError('E_WRITE_FORBIDDEN', rel);
+      return path.join(root, rel);
+    },
+    versionDirFor: (rel) => path.join(root, '.versions', rel)
+  });
+
+  await withStore(async (store, trashDir, root) => {
+    const full = path.join(root, 'prompts', 'r.md');
+    const versionDir = path.join(root, '.versions', 'prompts', 'r.md');
+    await fsp.mkdir(path.dirname(full), { recursive: true });
+    await fsp.mkdir(versionDir, { recursive: true });
+    await fsp.writeFile(full, 'body');
+    await fsp.writeFile(path.join(versionDir, 'v.md'), 'old');
+    const trashed = await store.moveToTrash({ rel: 'prompts/r.md', fullPath: full, versionDir });
+    const moved = [];
+    const res = await store.restoreFromTrash(trashed.id, { ...restoreOptions(root), onFileMoved: (p) => moved.push(p) });
+    ok(res.rel === 'prompts/r.md' && fs.readFileSync(full, 'utf8') === 'body', '恢复到原路径');
+    ok(fs.existsSync(path.join(versionDir, 'v.md')), '恢复版本目录');
+    ok((await store.readIndex()).items.length === 0, '恢复后移除回收站记录');
+    ok(moved.length === 1 && moved[0] === full, '恢复后通知调用方清缓存');
+  });
+
+  await withStore(async (store, trashDir, root) => {
+    const full = path.join(root, 'prompts', 'same.md');
+    const versionDir = path.join(root, '.versions', 'prompts', 'same.md');
+    await fsp.mkdir(path.dirname(full), { recursive: true });
+    await fsp.mkdir(versionDir, { recursive: true });
+    await fsp.writeFile(full, 'old body');
+    await fsp.writeFile(path.join(versionDir, 'v.md'), 'old version');
+    const trashed = await store.moveToTrash({ rel: 'prompts/same.md', fullPath: full, versionDir });
+    await fsp.writeFile(full, 'new body');
+    await fsp.mkdir(path.join(root, '.versions', 'prompts', 'same-restored1.md'), { recursive: true });
+    await fsp.writeFile(path.join(root, '.versions', 'prompts', 'same-restored1.md', 'v.md'), 'existing version');
+    const res = await store.restoreFromTrash(trashed.id, restoreOptions(root));
+    const restoredVersionDir = path.join(root, '.versions', 'prompts', 'same-restored1.md');
+    const versions = fs.readdirSync(restoredVersionDir).sort();
+    ok(res.rel === 'prompts/same-restored1.md', '原位置有文件时生成恢复副本', JSON.stringify(res));
+    ok(fs.readFileSync(full, 'utf8') === 'new body' && fs.readFileSync(path.join(root, res.rel), 'utf8') === 'old body', '恢复副本不覆盖现有文件');
+    ok(versions.length === 2 && versions.includes('v.md') && versions.some(f => f.startsWith('restored-')), '已有版本目录时合并且不覆盖', JSON.stringify(versions));
+  });
+
+  await withStore(async (store) => {
+    await store.writeIndex({ items: [{ id: 'gone', originalRel: 'prompts/gone.md', store: 'gone.md' }] });
+    const code = await codeOf(() => store.restoreFromTrash('gone', restoreOptions('/tmp')));
+    ok(code === 'E_TRASH_STORE_MISSING', '回收站文件丢失时返回明确错误');
+    ok((await store.readIndex()).items.length === 0, '回收站文件丢失时移除无效记录');
+  });
+
+  await withStore(async (store, trashDir, root) => {
+    await fsp.mkdir(trashDir, { recursive: true });
+    await fsp.writeFile(path.join(trashDir, 'cfg.md'), 'payload');
+    await store.writeIndex({ items: [{ id: 'cfg', originalRel: 'config.json', store: 'cfg.md' }] });
+    const code = await codeOf(() => store.restoreFromTrash('cfg', restoreOptions(root)));
+    ok(code === 'E_WRITE_FORBIDDEN', '拒绝恢复到写入白名单外');
+    ok(fs.existsSync(path.join(trashDir, 'cfg.md')) && (await store.readIndex()).items.length === 1, '拒绝恢复时保留回收站文件和记录');
+  });
+
+  await withStore(async (store) => {
+    ok(await codeOf(() => store.restoreFromTrash('missing', restoreOptions('/tmp'))) === 'E_TRASH_ITEM_MISSING', '恢复不存在的记录时返回明确错误');
+  });
+
   if (failures) process.exit(1);
   console.log('[test:trash-store] 通过');
 })().catch((e) => { console.error(e); process.exit(1); });

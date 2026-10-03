@@ -1108,77 +1108,11 @@ async function restoreLockKeys(id) {
 
 // 同样排进 trash 链：restore 也是 read-modify-write（读索引 → 移回文件 → 删条目）。
 ipcMain.handle('restore', async (e, id) => queueWriteMulti(await restoreLockKeys(id), async () => {
-  const index = await readTrashIndex();
-  const item = index.items.find(i => i.id === id);
-  if (!item) throw appError('E_TRASH_ITEM_MISSING');
-  // 抛错而不是自动摘条目：store 名越界说明索引被写坏了，
-  // 静默删条目会连带丢掉 .trash 里那份还能人工找回的文件。
-  const storePath = trashStorePath(item.store);
-  // store 文件不在了（被手动清理/外部删除）：直接把条目摘掉，否则 rename 会抛错，
-  // 后面删条目的代码永远执行不到，回收站里留下一条每次点都失败的幽灵记录。
-  if (!fs.existsSync(storePath)) {
-    index.items = index.items.filter(i => i.id !== id);
-    await writeTrashIndex(index);
-    throw appError('E_TRASH_STORE_MISSING', item.originalRel);
-  }
-  // 还原是往库里写文件，所以走 safeJoinWritable 而不是 safeJoin：后者只拦
-  // "跳出 DATA_ROOT"，库内的 .versions/.trash/config.json 照样允许写。
-  // originalRel 来自 .trash/index.json，索引写坏之后 "config.json" 或
-  // ".versions/x/1.md" 这种值会被原地覆盖，而删除入口（trash）一直是按
-  // safeJoinWritable 卡的，还原口比删除口宽本身就不对称。
-  // 老索引里若真有越界条目，这里会抛 E_WRITE_FORBIDDEN 并把条目留在回收站，
-  // 比静默覆盖掉配置文件好。
-  const targetFull = safeJoinWritable(item.originalRel);
-  await ensureDir(path.dirname(targetFull));
-  let finalRel = item.originalRel;
-  if (fs.existsSync(targetFull)) {
-    // 原位置已有同名，加后缀。
-    // 注意不能写 slice(0, -ext.length)：无扩展名时 ext 是 ''，-0 === 0，
-    // slice(0, 0) 得到空串，alt 就变成 "-restored1" 被还原到数据根目录下。
-    // .gitkeep（renderer 新建目录时会创建）和被删的目录都会走到这条路径。
-    const ext = path.extname(item.originalRel);
-    const base = ext ? item.originalRel.slice(0, -ext.length) : item.originalRel;
-    let n = 1;
-    let alt = item.originalRel;
-    while (fs.existsSync(safeJoinWritable(alt))) {
-      alt = `${base}-restored${n}${ext}`;
-      n++;
-    }
-    await fsp.rename(storePath, safeJoinWritable(alt));
-    dropFromCache(safeJoinWritable(alt));
-    finalRel = alt;
-  } else {
-    await fsp.rename(storePath, targetFull);
-    dropFromCache(targetFull);
-  }
-  // 还原版本目录（若存在）。若目标版本目录已存在（同名文件被删后又重建过），
-  // 不覆盖，而是并到新名字下保留两份历史。
-  if (item.versionStore) {
-    try {
-      const vStorePath = trashStorePath(item.versionStore);
-      if (fs.existsSync(vStorePath)) {
-        const targetV = versionDirFor(finalRel);
-        if (fs.existsSync(targetV)) {
-          // 已有版本目录：把回收站里的版本文件并进去（加 -restored 前缀避免覆盖）
-          const files = await fsp.readdir(vStorePath);
-          for (const f of files) {
-            const src = path.join(vStorePath, f);
-            let dstName = f;
-            while (fs.existsSync(path.join(targetV, dstName))) {
-              dstName = 'restored-' + Math.floor(Math.random() * 1e6) + '-' + f;
-            }
-            await fsp.rename(src, path.join(targetV, dstName));
-          }
-          try { await fsp.rmdir(vStorePath); } catch {}
-        } else {
-          await ensureDir(path.dirname(targetV));
-          await fsp.rename(vStorePath, targetV);
-        }
-      }
-    } catch (e) { console.error('还原版本目录失败:', e); }
-  }
-  index.items = index.items.filter(i => i.id !== id);
-  await writeTrashIndex(index);
+  await trashStore.restoreFromTrash(id, {
+    resolveWritable: safeJoinWritable,
+    versionDirFor,
+    onFileMoved: dropFromCache
+  });
   return true;
 }));
 
