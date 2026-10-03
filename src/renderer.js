@@ -2252,7 +2252,8 @@ async function importZip() {
       } else {
         toast(t(res.mode === 'backup' ? 'importedBackup' : 'importedZipCount', {
           count: res.imported || 0,
-          versions: res.restoredVersions || 0
+          versions: res.restoredVersions || 0,
+          trash: res.restoredTrash || 0
         }), 'success');
       }
       if (res.restoredSettings) {

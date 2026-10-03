@@ -98,7 +98,7 @@ for (const stream of [process.stdout, process.stderr]) {
 
 const archiver = require('archiver'); // 仅用于压缩导出
 const {
-  readZipMarkdownEntries, sanitizeTitle, uniqueRel, backupRelForEntry, backupVersionForEntry, PORTABLE_CONFIG_ENTRY
+  readZipMarkdownEntries, sanitizeTitle, uniqueRel, backupRelForEntry, backupVersionForEntry, backupTrashForEntry, PORTABLE_CONFIG_ENTRY
 } = require('./lib/zip-import');
 const backupConfig = require('./lib/backup-config');
 const { summarizeBackupEntries } = require('./lib/backup-preview');
@@ -1277,6 +1277,7 @@ ipcMain.handle('export-zip', async () => {
     archive.directory(WORKFLOWS_DIR, 'workflows', {});
     archive.directory(TEMPLATES_DIR, 'templates', {});
     if (fs.existsSync(VERSIONS_DIR)) archive.directory(VERSIONS_DIR, '.versions', {});
+    if (fs.existsSync(TRASH_DIR)) archive.directory(TRASH_DIR, '.trash', {});
     archive.append(JSON.stringify({ schema: 1, config: portableConfig }, null, 2), { name: PORTABLE_CONFIG_ENTRY });
     archive.finalize().catch((err) => done(reject, appError('E_EXPORT_ARCHIVE', err.message)));
   }).catch(async (err) => {
@@ -1410,7 +1411,11 @@ ipcMain.handle('import-zip', async () => {
   });
   if (res.canceled || !res.filePaths || !res.filePaths[0]) return { ok: false };
   const zipPath = res.filePaths[0];
-  const { entries, skipped } = await readZipMarkdownEntries(zipPath, { includeVersionIndexes: true, includePortableConfig: true });
+  const { entries, skipped } = await readZipMarkdownEntries(zipPath, {
+    includeVersionIndexes: true,
+    includePortableConfig: true,
+    includeTrash: true
+  });
   const summary = summarizeBackupEntries(entries, rel => fs.existsSync(safeJoin(rel)));
   const detailKey = summary.mode === 'backup' ? 'importBackupPreviewDetail' : 'importZipPreviewDetail';
   const conflictText = summary.conflictCount
@@ -1429,12 +1434,14 @@ ipcMain.handle('import-zip', async () => {
     detail: mt(detailKey, {
       files: summary.files,
       versions: summary.versions,
+      trash: summary.trash,
       settings: summary.settings ? mt('yes') : mt('no')
     }) + conflictText
   });
   if (answer.response !== 1) return { ok: false, canceled: true, summary };
   const configEntry = entries.find(entry => entry.path === PORTABLE_CONFIG_ENTRY);
-  const contentEntries = entries.filter(entry => entry !== configEntry && !backupVersionForEntry(entry.path));
+  const trashEntries = entries.filter(entry => backupTrashForEntry(entry.path));
+  const contentEntries = entries.filter(entry => entry !== configEntry && !backupVersionForEntry(entry.path) && !backupTrashForEntry(entry.path));
   const versionEntries = entries.filter(entry => backupVersionForEntry(entry.path));
   // 本应用导出的 ZIP 以 prompts/workflows/templates 为顶层目录，
   // 完整备份要保留工作流和模板位置；其他 ZIP 仍按 frontmatter 导入为提示词。
@@ -1456,6 +1463,7 @@ ipcMain.handle('import-zip', async () => {
   }
   let restoredVersions = 0;
   let restoredSettings = false;
+  let restoredTrash = 0;
   if (isAppBackup) {
     for (const entry of versionEntries) {
       const info = backupVersionForEntry(entry.path);
@@ -1495,6 +1503,50 @@ ipcMain.handle('import-zip', async () => {
       failedList.push({ name: PORTABLE_CONFIG_ENTRY, error: err.message });
     }
   }
+  if (isAppBackup && trashEntries.length) {
+    try {
+      const byPath = new Map(trashEntries.map(entry => [entry.path, entry]));
+      const indexEntry = byPath.get('.trash/index.json');
+      if (!indexEntry) throw appError('E_BACKUP_TRASH_INVALID');
+      const parsed = JSON.parse(indexEntry.content);
+      const rawItems = Array.isArray(parsed && parsed.items) ? parsed.items : [];
+      const items = rawItems.map((item) => {
+        const store = String(item && item.store || '');
+        const body = byPath.get('.trash/' + store);
+        const versionStore = item && item.versionStore ? String(item.versionStore) : '';
+        const versions = [];
+        let versionIndex = null;
+        if (versionStore) {
+          for (const entry of trashEntries) {
+            const info = backupTrashForEntry(entry.path);
+            if (!info || info.kind !== 'version' || info.store !== versionStore) continue;
+            if (info.file === 'index.json') {
+              try { versionIndex = JSON.parse(entry.content); } catch {}
+            } else {
+              versions.push({ file: info.file, content: entry.content });
+            }
+          }
+        }
+        return {
+          originalRel: item && item.originalRel,
+          name: item && item.name,
+          trashedAt: item && item.trashedAt,
+          content: body ? body.content : null,
+          versions,
+          versionIndex
+        };
+      });
+      const res = await queueWrite('trash', () => trashStore.importItems(items, {
+        isAllowedRel: (rel) => {
+          try { safeJoinWritable(rel); return true; } catch { return false; }
+        }
+      }));
+      restoredTrash = res.imported;
+      if (res.skipped) failedList.push({ name: '.trash', error: appError('E_BACKUP_TRASH_PARTIAL', String(res.skipped)).message });
+    } catch (err) {
+      failedList.push({ name: '.trash', error: err.message });
+    }
+  }
   // 不静默成功：调用方能看到真实导入数量与失败明细
   return {
     ok: true,
@@ -1502,6 +1554,7 @@ ipcMain.handle('import-zip', async () => {
     imported: imported.length,
     restoredVersions,
     restoredSettings,
+    restoredTrash,
     rels: imported,
     failed: failedList
   };

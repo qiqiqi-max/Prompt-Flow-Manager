@@ -149,9 +149,15 @@
         check('导出单个提示词返回成功', single.ok === true, JSON.stringify(single));
         const backupWorkflow = 'workflows/自检备份工作流.md';
         const backupTemplate = 'templates/自检备份模板.md';
+        const backupTrashPrompt = 'prompts/testing/自检备份回收站.md';
         await api.setConfig({ lockedFiles: [renamed], projectTypes: [...(await api.getConfig()).projectTypes, '自检迁移类型'] });
         await api.createFile(backupWorkflow, '---\ntitle: 自检备份工作流\nflow:\n  - id: a\n    prompt: ' + renamed + '\n---\n工作流正文');
         await api.createFile(backupTemplate, '---\ntitle: 自检备份模板\n---\n模板正文');
+        await api.createFile(backupTrashPrompt, '---\ntitle: 自检备份回收站\nstage: testing\n---\n回收站第一版');
+        const trashRead = await api.readFile(backupTrashPrompt);
+        await api.saveFile(backupTrashPrompt, trashRead.content.replace('回收站第一版', '回收站第二版'));
+        await api.trash(backupTrashPrompt);
+        const trashBeforeExport = (await api.listTrash()).items.length;
         const zip = await api.exportZip();
         await api.setConfig({
           lockedFiles: [],
@@ -189,6 +195,20 @@
           && restoredCfg.projectTypes.includes('自检迁移类型')
           && restoredCfg.lockedFiles.includes(restoredPrompt),
         JSON.stringify({ restored: imp2.restoredSettings, locks: restoredCfg.lockedFiles, types: restoredCfg.projectTypes }));
+        const trashAfterImport = await api.listTrash();
+        const importedTrash = trashAfterImport.items.find(i => i.originalRel === backupTrashPrompt && i.store);
+        check('完整备份恢复回收站条目', imp2.restoredTrash >= 1 && trashAfterImport.items.length >= trashBeforeExport + imp2.restoredTrash,
+          JSON.stringify({ restored: imp2.restoredTrash, before: trashBeforeExport, after: trashAfterImport.items.length }));
+        if (importedTrash) {
+          await api.restore(importedTrash.id);
+          const restoredTrashRel = (await api.getMetaList()).map(m => m.rel)
+            .find(rel => /^prompts\/testing\/自检备份回收站(?:-restored\d+)?\.md$/.test(rel));
+          const restoredTrashVersions = restoredTrashRel ? await api.listVersions(restoredTrashRel) : [];
+          check('导入的回收站条目可恢复且带版本历史', !!restoredTrashRel && restoredTrashVersions.length >= 1,
+            JSON.stringify({ restoredTrashRel, versions: restoredTrashVersions.length }));
+        } else {
+          check('导入的回收站条目可恢复且带版本历史', false, '找不到导入的回收站条目');
+        }
         await api.setConfig({ lockedFiles: [] });
 
         const cancel = await api.exportZip();

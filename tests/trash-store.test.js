@@ -177,6 +177,29 @@ async function withStore(fn, rmImpl, writeImpl) {
     ok(await codeOf(() => store.restoreFromTrash('missing', restoreOptions('/tmp'))) === 'E_TRASH_ITEM_MISSING', '恢复不存在的记录时返回明确错误');
   });
 
+  await withStore(async (store) => {
+    await store.writeIndex({ items: [{ id: 'current', originalRel: 'prompts/current.md', name: 'current.md', store: 'current.md' }] });
+    const imported = await store.importItems([{
+      originalRel: 'prompts/old.md',
+      name: 'old.md',
+      trashedAt: '2026-01-01T00:00:00.000Z',
+      content: 'old body',
+      versions: [{ file: '20260101-010203-004.md', content: 'old version' }],
+      versionIndex: { pinned: { '20260101-010203-004.md': true, '../bad.md': true } }
+    }, {
+      originalRel: 'config.json',
+      content: 'bad'
+    }], { isAllowedRel: rel => rel.startsWith('prompts/') });
+    const idx = await store.readIndex();
+    const added = idx.items[0];
+    ok(imported.imported === 1 && imported.skipped === 1, '导入回收站时报告成功和跳过数量', JSON.stringify(imported));
+    ok(idx.items.length === 2 && idx.items[1].id === 'current', '导入回收站时保留现有条目');
+    ok(added.id !== 'current' && added.originalRel === 'prompts/old.md' && fs.readFileSync(store.storePath(added.store), 'utf8') === 'old body', '导入的回收站正文使用新存放名');
+    const versionDir = store.storePath(added.versionStore);
+    ok(fs.readFileSync(path.join(versionDir, '20260101-010203-004.md'), 'utf8') === 'old version', '导入回收站时带上版本历史');
+    ok(JSON.stringify(JSON.parse(fs.readFileSync(path.join(versionDir, 'index.json'), 'utf8'))) === '{"pinned":{"20260101-010203-004.md":true}}', '导入回收站时过滤非法星标');
+  });
+
   if (failures) process.exit(1);
   console.log('[test:trash-store] 通过');
 })().catch((e) => { console.error(e); process.exit(1); });
