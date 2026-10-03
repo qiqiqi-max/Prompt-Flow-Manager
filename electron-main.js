@@ -106,6 +106,7 @@ const { summarizeBackupEntries } = require('./lib/backup-preview');
 const { sha256, buildManifest, verifyManifest } = require('./lib/backup-manifest');
 const { createImportTransaction } = require('./lib/import-transaction');
 const { createWriteGate } = require('./lib/write-gate');
+const { safeExportName, writeExportFile } = require('./lib/export-file');
 // 原生菜单的文案也要跟随语言。i18n.js 结尾有 module.exports，可以直接在主进程 require，
 // 不必再维护第二份翻译表（之前菜单是硬编码中文，切到英文后整个菜单栏还是中文）。
 const I18N_TABLE = require('./src/i18n.js');
@@ -1317,15 +1318,16 @@ async function collectBackupFiles(portableConfig) {
 
 ipcMain.handle('export-single', async (e, rel) => {
   const full = safeJoin(rel);
-  const meta = parseFrontmatter(await fsp.readFile(full, 'utf8')).meta;
-  const fileName = (meta.title || path.basename(rel, '.md')) + '.md';
+  const content = await fsp.readFile(full, 'utf8');
+  const meta = parseFrontmatter(content).meta;
+  const fileName = safeExportName(meta.title || path.basename(rel, '.md'));
   const res = await dialog.showSaveDialog(win, {
     title: mt('dlgExportSingle'),
     defaultPath: fileName,
     filters: [{ name: 'Markdown', extensions: ['md'] }]
   });
   if (res.canceled || !res.filePath) return { ok: false };
-  await fsp.writeFile(res.filePath, await fsp.readFile(full, 'utf8'), 'utf8');
+  await writeExportFile(res.filePath, content, { appError });
   return { ok: true, path: res.filePath };
 });
 

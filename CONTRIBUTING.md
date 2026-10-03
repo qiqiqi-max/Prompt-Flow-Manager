@@ -169,6 +169,7 @@ npm run test:backup-preview # ZIP 导入前统计文件、版本、设置和重�
 npm run test:backup-manifest # 完整备份清单和 SHA-256 校验（裸 node）
 npm run test:import-transaction # 导入回滚：删除新建文件并恢复原文件（裸 node）
 npm run test:write-gate # 完整备份导入独占写入，其他写入排在导入后（裸 node）
+npm run test:export-file # 单文件导出原子写入，失败时保留原文件（裸 node）
 npm run test:import-rollback # 真实 Electron 完整备份中途失败后整体撤回
 npm run test:includes     # 模板包含引擎（裸 node，自带一组反向对照）
 npm run test:reverse  # 把第一节那套流程自动化：逐条改坏源码，验证目标断言真的变红

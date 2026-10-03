@@ -2269,9 +2269,13 @@ async function importZip() {
 }
 async function exportSingle() {
   if (!state.currentRel) return;
-  const res = await api.exportSingle(state.currentRel);
-  if (res.ok) toast(t('exportedTo') + t('sep') + res.path, 'success');
-  else toast(t('exportCanceled'));
+  try {
+    const res = await api.exportSingle(state.currentRel);
+    if (res.ok) toast(t('exportedTo') + t('sep') + res.path, 'success');
+    else toast(t('exportCanceled'));
+  } catch (e) {
+    toast(tErr('exportFailed', e), 'error');
+  }
 }
 
 // ===== 主题 =====
