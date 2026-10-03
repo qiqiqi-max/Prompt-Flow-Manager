@@ -9,7 +9,7 @@ const api = {
   // 树 + 元数据一次拿回，省掉一次整库遍历与一次 IPC 往返（见主进程 listTreeAndMeta）
   listTreeAndMeta: () => ipcRenderer.invoke('list-tree-and-meta'),
   readFile: (rel) => ipcRenderer.invoke('read-file', rel),
-  saveFile: (rel, content) => ipcRenderer.invoke('save-file', rel, content),
+  saveFile: (rel, content, options) => ipcRenderer.invoke('save-file', rel, content, options),
   createFile: (rel, content) => ipcRenderer.invoke('create-file', rel, content),
   readDraft: (rel) => ipcRenderer.invoke('read-draft', rel),
   saveDraft: (rel, content, baseContent) => ipcRenderer.invoke('save-draft', rel, content, baseContent),

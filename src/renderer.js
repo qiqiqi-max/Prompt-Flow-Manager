@@ -1157,7 +1157,40 @@ async function saveCurrent() {
   if (!state.currentRel) return false;
   const content = $('editor').value;
   try {
-    const { content: saved, meta } = await api.saveFile(state.currentRel, content);
+    let result;
+    try {
+      result = await api.saveFile(state.currentRel, content, { expectedContent: state.currentContent });
+    } catch (e) {
+      if (!String(e && e.message || e).includes('E_SAVE_CONFLICT')) throw e;
+      const choice = await api.confirmUnsaved({
+        title: t('saveConflictTitle'),
+        detail: t('saveConflictDetail'),
+        save: t('overwriteFile'),
+        discard: t('reloadDiskVersion'),
+        cancel: t('cancel')
+      });
+      if (choice === 'discard') {
+        const latest = await api.readFile(state.currentRel);
+        state.currentContent = latest.content;
+        state.currentMeta = latest.meta;
+        const tab = state.tabs.find(t => t.rel === state.currentRel);
+        if (tab) { tab.content = latest.content; tab.meta = latest.meta; tab.loaded = true; }
+        await clearDraft(state.currentRel);
+        state.editMode = false;
+        state.editBaseline = '';
+        $('preview-wrap').classList.remove('hidden');
+        $('editor-wrap').classList.add('hidden');
+        $('btn-edit').textContent = t('edit');
+        renderBreadcrumb();
+        renderMetaBar();
+        renderContent();
+        renderTabs();
+        return true;
+      }
+      if (choice !== 'save') return false;
+      result = await api.saveFile(state.currentRel, content, { expectedContent: state.currentContent, overwrite: true });
+    }
+    const { content: saved, meta } = result;
     state.currentContent = saved;
     state.currentMeta = meta;
     // 存盘成功即视为不脏。基准用编辑器里的原文而不是 saved：

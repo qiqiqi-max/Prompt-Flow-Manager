@@ -852,10 +852,14 @@ async function readPrevContent(full) {
 // 用和 pin-version 相同的 key：saveVersion 里的 pruneVersions 要读版本索引判断
 // 星标，pin-version 要写这份索引，两者必须互斥，否则刚点的星标可能被裁掉。
 // 按 rel 分链，不同文件之间不互相阻塞。
-ipcMain.handle('save-file', async (e, rel, content) => queueWrite('ver:' + String(rel), async () => {
+ipcMain.handle('save-file', async (e, rel, content, options) => queueWrite('ver:' + String(rel), async () => {
   const full = safeJoinWritable(rel);
   if (typeof content !== 'string') throw appError('E_CONTENT_NOT_STRING', typeof content);
   const prev = await readPrevContent(full);
+  const opts = options && typeof options === 'object' ? options : {};
+  if (typeof opts.expectedContent === 'string' && prev !== opts.expectedContent && opts.overwrite !== true) {
+    throw appError('E_SAVE_CONFLICT', rel);
+  }
   if (prev != null && prev !== content) await saveVersion(rel, prev);
   const toWrite = bumpAutoFields(content, prev);
   await ensureDir(path.dirname(full));

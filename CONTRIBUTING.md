@@ -149,6 +149,7 @@ npm run test:debounce # 防抖/flush（自带反向对照）
 npm run test:close    # 关窗落盘握手
 npm run test:close-unsaved # 关窗前询问未保存草稿：取消留窗，保存落盘
 npm run test:draft-recovery # 未保存就退出后，再次打开时恢复草稿
+npm run test:save-conflict # 编辑期间文件被修改时，保存前必须确认
 npm run test:render   # markdown 渲染成本上限
 npm run test:heal     # 启动自愈修坏数据目录（自带反向对照）
 npm run test:logger   # 日志滚动/脱敏 + 诊断导出（裸 node，自带两组反向对照）
