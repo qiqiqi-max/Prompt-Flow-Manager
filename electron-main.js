@@ -1016,7 +1016,11 @@ ipcMain.handle('trash', async (e, rel) => queueWriteMulti(['ver:' + String(rel),
   // 索引，结果整棵树永久留在 .trash 里、UI 再也看不到。回收站的语义只覆盖单个
   // .md 文件，这里直接拒绝目录。
   let st;
-  try { st = await fsp.stat(full); } catch { return true; }
+  try { st = await fsp.stat(full); }
+  catch (err) {
+    if (err && err.code === 'ENOENT') return true;
+    throw appError('E_TRASH_STAT', rel);
+  }
   if (st.isDirectory()) throw appError('E_TRASH_DIR_UNSUPPORTED', rel);
   await trashStore.moveToTrash({
     rel,

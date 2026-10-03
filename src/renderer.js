@@ -1307,7 +1307,12 @@ async function pickProjectType() {
     await api.addProjectType(input);
     state.config.projectTypes = (await api.getConfig()).projectTypes;
     populateFilters();
-  } catch (e) { /* 已存在则忽略 */ }
+  } catch (e) {
+    if (!String(e && e.message || e).includes('E_TYPE_EXISTS')) {
+      toast(tErr('addTypeFailed', e), 'error');
+      return null;
+    }
+  }
   return input;
 }
 

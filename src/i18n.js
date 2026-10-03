@@ -154,6 +154,7 @@ const I18N = {
     duplicateFailed: '复制失败',
     deleteFailed: '删除失败',
     importFailed: '导入失败',
+    addTypeFailed: '新增工程类型失败',
     exportFailed: '导出失败',
     typeAddFailed: '添加类型失败',
     typeRemoveFailed: '删除类型失败',
@@ -251,6 +252,7 @@ const I18N = {
     err_E_ZIP_TOO_MANY_ENTRIES: '已达到条目数上限（{detail} 条），后续条目已跳过',
     err_E_TOO_MANY_DUPES: '同名文件太多，无法生成新名称：{detail}',
     err_E_TRASH_DIR_UNSUPPORTED: '回收站不支持目录，请逐个删除目录内的文件：{detail}',
+    err_E_TRASH_STAT: '无法读取文件状态，已取消删除：{detail}',
     // 键名必须逐字等于主进程 appError() 里的错误码，否则 describeError 查不到，
     // 界面上会直接露出 E_XXX。这三条曾因为码名改过、文案没跟着改而失配。
     err_E_TRASH_STORE_MISSING: '回收站里的文件已不存在（可能被手动删除）：{detail}',
@@ -501,6 +503,7 @@ const I18N = {
     duplicateFailed: 'Duplicate failed',
     deleteFailed: 'Delete failed',
     importFailed: 'Import failed',
+    addTypeFailed: 'Failed to add project type',
     exportFailed: 'Export failed',
     typeAddFailed: 'Failed to add type',
     typeRemoveFailed: 'Failed to remove type',
@@ -594,6 +597,7 @@ const I18N = {
     err_E_ZIP_TOO_MANY_ENTRIES: 'Entry count limit reached ({detail}), remaining entries skipped',
     err_E_TOO_MANY_DUPES: 'Too many duplicates, cannot generate a new name: {detail}',
     err_E_TRASH_DIR_UNSUPPORTED: 'Trash does not support folders; delete files inside individually: {detail}',
+    err_E_TRASH_STAT: 'Could not read the file status, so deletion was canceled: {detail}',
     err_E_TRASH_STORE_MISSING: 'The trashed file no longer exists (possibly deleted manually): {detail}',
     err_E_TRASH_EMPTY_PARTIAL: 'These items could not be deleted and are still in the trash: {detail}',
     err_E_TRASH_INDEX_WRITE: 'Failed to write the trash index; the file was moved back: {detail}',
