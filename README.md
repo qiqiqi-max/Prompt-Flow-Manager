@@ -198,7 +198,7 @@ npm run test:close      # 验证关窗落盘握手
 npm run test:close-unsaved # 验证关窗前保护未保存草稿
 npm run test:draft-recovery # 验证意外退出后恢复草稿
 npm run test:save-conflict # 验证保存冲突提示
-npm run test:layout-small # 验证最小窗口布局
+npm run test:layout-small # 验证中英文、浅深色最小窗口布局
 npm run test:render     # 验证 markdown 渲染成本上限
 npm run test:heal       # 验证启动时的数据目录自愈
 npm run test:logger     # 验证滚动日志与诊断信息导出
