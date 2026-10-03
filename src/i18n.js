@@ -9,9 +9,12 @@ const I18N = {
   zh: {
     // 工具栏
     btnNewPrompt: '＋ 提示词',
+    btnNewPromptLabel: '提示词',
     btnNewWorkflow: '＋ 工作流',
+    btnNewWorkflowLabel: '工作流',
     btnImport: '导入',
     btnNewFolder: '＋ 目录',
+    btnNewFolderLabel: '目录',
     btnExport: '导出',
     btnTrash: '回收站',
     btnSettings: '设置',
@@ -328,6 +331,7 @@ const I18N = {
     dlgExportDiagnostics: '导出诊断信息',
     // 项目装配器
     btnComposer: '＋ 项目装配',
+    btnComposerLabel: '项目装配',
     composerTitle: '项目脚手架装配器',
     composerSubtitle: '组合角色、技术栈与工程规约，一键生成项目启动提示词与 AI 规则文件',
     composerProjectName: '项目名称',
@@ -376,9 +380,12 @@ const I18N = {
   en: {
     // 工具栏
     btnNewPrompt: '+ Prompt',
+    btnNewPromptLabel: 'Prompt',
     btnNewWorkflow: '+ Workflow',
+    btnNewWorkflowLabel: 'Workflow',
     btnImport: 'Import',
     btnNewFolder: '+ Folder',
+    btnNewFolderLabel: 'Folder',
     btnExport: 'Export',
     btnTrash: 'Trash',
     btnSettings: 'Settings',
@@ -685,6 +692,7 @@ const I18N = {
     dlgExportDiagnostics: 'Export Diagnostics',
     // 项目装配器
     btnComposer: '+ Scaffold',
+    btnComposerLabel: 'Scaffold',
     composerTitle: 'Project Scaffolding Composer',
     composerSubtitle: 'Assemble roles, stacks & engineering rules into ready-to-use prompts and AI rules',
     composerProjectName: 'Project Name',

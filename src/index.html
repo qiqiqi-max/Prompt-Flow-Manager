@@ -11,20 +11,20 @@
     <!-- 顶部工具栏 -->
     <header class="toolbar">
       <div class="toolbar-left">
-        <button class="btn-icon" id="btn-new-prompt" data-i18n="btnNewPrompt">＋ 提示词</button>
-        <button class="btn-icon" id="btn-new-workflow" data-i18n="btnNewWorkflow">＋ 工作流</button>
-        <button class="btn-icon" id="btn-composer" data-i18n="btnComposer">＋ 项目装配</button>
+        <button class="btn-icon toolbar-compact" id="btn-new-prompt" data-i18n-title="btnNewPrompt" data-i18n-aria="btnNewPrompt"><span class="btn-symbol">＋</span><span class="btn-label" data-i18n="btnNewPromptLabel">提示词</span></button>
+        <button class="btn-icon toolbar-compact" id="btn-new-workflow" data-i18n-title="btnNewWorkflow" data-i18n-aria="btnNewWorkflow"><span class="btn-symbol">⇄</span><span class="btn-label" data-i18n="btnNewWorkflowLabel">工作流</span></button>
+        <button class="btn-icon toolbar-compact" id="btn-composer" data-i18n-title="btnComposer" data-i18n-aria="btnComposer"><span class="btn-symbol">◇</span><span class="btn-label" data-i18n="btnComposerLabel">项目装配</span></button>
         <button class="btn-icon" id="btn-import" data-i18n-title="btnImportTitle" title="导入 (Ctrl+I)">📥</button>
-        <button class="btn-icon" id="btn-new-folder" data-i18n="btnNewFolder">＋ 目录</button>
+        <button class="btn-icon toolbar-compact" id="btn-new-folder" data-i18n-title="btnNewFolder" data-i18n-aria="btnNewFolder"><span class="btn-symbol">▣</span><span class="btn-label" data-i18n="btnNewFolderLabel">目录</span></button>
       </div>
       <div class="toolbar-center">
         <input type="text" id="search-box" data-i18n-placeholder="searchPlaceholder" placeholder="搜索提示词（标题/标签/内容）… Ctrl+Shift+F" autocomplete="off">
-        <button class="btn-link" id="btn-filter-toggle"><span data-i18n="advancedFilter">高级筛选</span> ▾</button>
+        <button class="btn-link" id="btn-filter-toggle" data-i18n-title="advancedFilter" data-i18n-aria="advancedFilter"><span data-i18n="advancedFilter">高级筛选</span> ▾</button>
       </div>
       <div class="toolbar-right">
-        <button class="btn-icon" id="btn-export" data-i18n="btnExport">导出</button>
-        <button class="btn-icon" id="btn-trash" data-i18n="btnTrash">回收站</button>
-        <button class="btn-icon" id="btn-settings" data-i18n="btnSettings">⚙</button>
+        <button class="btn-icon toolbar-compact" id="btn-export" data-i18n-title="btnExport" data-i18n-aria="btnExport"><span class="btn-symbol">⇩</span><span class="btn-label" data-i18n="btnExport">导出</span></button>
+        <button class="btn-icon toolbar-compact" id="btn-trash" data-i18n-title="btnTrash" data-i18n-aria="btnTrash"><span class="btn-symbol">🗑</span><span class="btn-label" data-i18n="btnTrash">回收站</span></button>
+        <button class="btn-icon toolbar-compact" id="btn-settings" data-i18n-title="btnSettings" data-i18n-aria="btnSettings"><span class="btn-symbol">⚙</span><span class="btn-label" data-i18n="btnSettings">设置</span></button>
         <button class="btn-icon" id="btn-theme" data-i18n-title="btnTheme" title="切换主题 (Ctrl+Shift+L)">🌓</button>
       </div>
     </header>

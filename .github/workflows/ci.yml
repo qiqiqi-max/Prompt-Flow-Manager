@@ -182,6 +182,9 @@ jobs:
       - name: 保存冲突检测
         run: npm run test:save-conflict
 
+      - name: 最小窗口布局
+        run: npm run test:layout-small
+
       # 启动自愈：故意构造一个坏数据目录（幽灵条目 / 孤立正文 / 越界 store /
       # 残留 .part），跑完从进程外读磁盘定论。自带反向对照——同一个坏目录再跑
       # 一个走不到自愈的进程，四类损坏必须原样还在。

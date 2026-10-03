@@ -100,8 +100,11 @@ body {
 }
 .toolbar-left, .toolbar-right { display: flex; gap: 6px; align-items: center; }
 .toolbar-center { display: flex; align-items: center; gap: 8px; flex: 1; max-width: 600px; }
+.toolbar-center { min-width: 150px; }
+.toolbar-compact { display: inline-flex; align-items: center; gap: 4px; }
+.btn-symbol { line-height: 1; }
 #search-box {
-  flex: 1; height: 28px; padding: 0 10px;
+  flex: 1; min-width: 0; height: 28px; padding: 0 10px;
   border: 1px solid var(--border-strong); border-radius: 6px;
   background: var(--bg); color: var(--text);
   font-size: 13px; outline: none;
@@ -113,6 +116,7 @@ body {
   border-radius: 6px; transition: background .15s, border-color .15s;
   border: 1px solid transparent; padding: 5px 10px;
   background: transparent; color: var(--text);
+  white-space: nowrap; flex-shrink: 0;
 }
 .btn-icon { border-color: var(--border-strong); background: var(--bg); }
 .btn-icon:hover { background: var(--hover); }
@@ -662,4 +666,23 @@ mark {
     animation-duration: .01ms !important;
   }
   .flow-node:hover { transform: none; }
+}
+
+@media (max-width: 1100px) {
+  .toolbar { gap: 6px; padding-inline: 8px; }
+  .toolbar-left, .toolbar-right { gap: 4px; }
+  .toolbar-compact { min-width: 30px; justify-content: center; padding-inline: 8px; }
+  .toolbar-compact .btn-label { display: none; }
+  #btn-filter-toggle span { display: none; }
+  .content-actions { gap: 4px; }
+  .content-actions button { padding-inline: 8px; }
+}
+
+@media (max-height: 560px) {
+  .toolbar { padding-block: 4px; }
+  .tabs-bar { padding-top: 2px; }
+  .content-header { padding-block: 5px; }
+  .meta-bar { padding-block: 4px; }
+  .editor-wrap { padding: 8px 12px; }
+  .editor-actions { padding-top: 6px; }
 }
