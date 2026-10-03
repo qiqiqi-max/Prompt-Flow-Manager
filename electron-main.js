@@ -104,6 +104,7 @@ const {
 const backupConfig = require('./lib/backup-config');
 const { summarizeBackupEntries } = require('./lib/backup-preview');
 const { sha256, buildManifest, verifyManifest } = require('./lib/backup-manifest');
+const { createImportTransaction } = require('./lib/import-transaction');
 // 原生菜单的文案也要跟随语言。i18n.js 结尾有 module.exports，可以直接在主进程 require，
 // 不必再维护第二份翻译表（之前菜单是硬编码中文，切到英文后整个菜单栏还是中文）。
 const I18N_TABLE = require('./src/i18n.js');
@@ -1395,7 +1396,7 @@ async function importMarkdown(fileName, content) {
   return importMarkdownAt(base, content);
 }
 
-async function importMarkdownAt(base, content) {
+async function importMarkdownAt(base, content, onCreated = () => {}) {
   // uniqueRel 只能按"此刻磁盘上有什么"挑名字，挑完到真正创建之间仍有窗口。
   // 而且这一段到 await 之前全是同步的：并发导入几个同名文件时，每一路都在
   // 别人落盘之前跑完 uniqueRel，于是全都挑中同一个名字。
@@ -1405,6 +1406,7 @@ async function importMarkdownAt(base, content) {
     const rel = uniqueRel(base, (r) => fs.existsSync(safeJoin(r)));
     try {
       await createFileAt(rel, content);
+      onCreated(rel);
       return rel;
     } catch (e) {
       if (e && typeof e.message === 'string' && e.message.split('|')[0] === 'E_FILE_EXISTS') continue;
@@ -1484,19 +1486,39 @@ ipcMain.handle('import-zip', async () => {
   // 本应用导出的 ZIP 以 prompts/workflows/templates 为顶层目录，
   // 完整备份要保留工作流和模板位置；其他 ZIP 仍按 frontmatter 导入为提示词。
   const isAppBackup = contentEntries.length > 0 && contentEntries.every(entry => backupRelForEntry(entry.path));
+  const transaction = isAppBackup ? createImportTransaction() : null;
+  const atomicBackup = isAppBackup && !!manifest;
+  if (transaction) {
+    await transaction.snapshot(CONFIG_PATH);
+    await transaction.snapshot(path.join(TRASH_DIR, 'index.json'));
+  }
   const imported = [];
   const restoredRels = new Map();
   const failedList = skipped.map(s => ({ name: s.name, error: s.reason }));
+  const failImport = async (name, err) => {
+    failedList.push({ name, error: err.message });
+    if (!atomicBackup) return;
+    const rollback = await transaction.rollback();
+    for (const rel of imported) dropFromCache(safeJoin(rel));
+    if (!rollback.ok) {
+      logger.error('[import] 完整备份回滚不完整: ' + rollback.errors.join('; '));
+      throw appError('E_IMPORT_ROLLBACK_PARTIAL', rollback.errors.slice(0, 3).join('; '));
+    }
+    throw appError('E_IMPORT_ROLLED_BACK', name + ': ' + err.message);
+  };
   for (const entry of contentEntries) {
     try {
       const backupRel = isAppBackup ? backupRelForEntry(entry.path) : null;
       const rel = backupRel
-        ? await importMarkdownAt(backupRel, entry.content)
+        ? await importMarkdownAt(backupRel, entry.content, (createdRel) => {
+          const full = safeJoin(createdRel);
+          if (transaction) transaction.trackFile(full);
+        })
         : await importMarkdown(entry.name, entry.content);
       imported.push(rel);
       if (backupRel) restoredRels.set(backupRel, rel);
     } catch (err) {
-      failedList.push({ name: entry.path || entry.name, error: err.message });
+      await failImport(entry.path || entry.name, err);
     }
   }
   let restoredVersions = 0;
@@ -1509,20 +1531,28 @@ ipcMain.handle('import-zip', async () => {
       if (!targetRel) continue;
       try {
         const dir = versionDirFor(targetRel);
+        await transaction.trackDir(dir);
         await ensureDir(dir);
+        if (process.env.PFM_SELFTEST === '1' && process.env.PFM_SELFTEST_IMPORT_FAIL_AFTER_FILES === '1') {
+          throw new Error('selftest import failure');
+        }
         if (info.file === 'index.json') {
           const parsed = JSON.parse(entry.content);
           const pinned = {};
           for (const [file, value] of Object.entries(parsed && parsed.pinned || {})) {
             if (value === true && backupVersionForEntry('.versions/' + info.rel + '/' + file)) pinned[file] = true;
           }
-          await writeFileAtomic(path.join(dir, 'index.json'), JSON.stringify({ pinned }, null, 2));
+          const indexPath = path.join(dir, 'index.json');
+          await transaction.snapshot(indexPath);
+          await writeFileAtomic(indexPath, JSON.stringify({ pinned }, null, 2));
         } else {
-          await writeFileExclusive(path.join(dir, info.file), entry.content, targetRel);
+          const versionPath = path.join(dir, info.file);
+          await writeFileExclusive(versionPath, entry.content, targetRel);
+          transaction.trackFile(versionPath);
           restoredVersions++;
         }
       } catch (err) {
-        failedList.push({ name: entry.path, error: err.message });
+        await failImport(entry.path, err);
       }
     }
   }
@@ -1538,7 +1568,7 @@ ipcMain.handle('import-zip', async () => {
       });
       restoredSettings = true;
     } catch (err) {
-      failedList.push({ name: PORTABLE_CONFIG_ENTRY, error: err.message });
+      await failImport(PORTABLE_CONFIG_ENTRY, err);
     }
   }
   if (isAppBackup && trashEntries.length) {
@@ -1577,12 +1607,21 @@ ipcMain.handle('import-zip', async () => {
       const res = await queueWrite('trash', () => trashStore.importItems(items, {
         isAllowedRel: (rel) => {
           try { safeJoinWritable(rel); return true; } catch { return false; }
+        },
+        onCreatedPath: (file, kind) => {
+          if (kind === 'dir') transaction.trackDir(file);
+          else transaction.trackFile(file);
         }
       }));
       restoredTrash = res.imported;
-      if (res.skipped) failedList.push({ name: '.trash', error: appError('E_BACKUP_TRASH_PARTIAL', String(res.skipped)).message });
+      if (res.skipped) {
+        const err = appError('E_BACKUP_TRASH_PARTIAL', String(res.skipped));
+        if (atomicBackup) await failImport('.trash', err);
+        else failedList.push({ name: '.trash', error: err.message });
+      }
     } catch (err) {
-      failedList.push({ name: '.trash', error: err.message });
+      if (String(err && err.message).startsWith('E_IMPORT_')) throw err;
+      await failImport('.trash', err);
     }
   }
   // 不静默成功：调用方能看到真实导入数量与失败明细
