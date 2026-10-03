@@ -303,6 +303,7 @@ body {
 .breadcrumb { font-size: 13px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .breadcrumb .bc-current { color: var(--text); font-weight: 500; }
 .content-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.content-more { display: none; }
 
 .meta-bar {
   display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 14px;
@@ -676,6 +677,26 @@ mark {
   #btn-filter-toggle span { display: none; }
   .content-actions { gap: 4px; }
   .content-actions button { padding-inline: 8px; }
+}
+
+@media (max-width: 680px) {
+  .sidebar { width: 180px !important; min-width: 150px; }
+  .content-header { gap: 6px; padding-inline: 8px; }
+  .breadcrumb { display: none; }
+  .content-actions {
+    width: 100%; flex-shrink: 1; min-width: 0;
+    justify-content: flex-end;
+  }
+  .content-actions button { padding: 4px 7px; }
+  #btn-history, #btn-rename, #btn-move, #btn-delete { display: none; }
+  .content-more { display: inline-block; }
+  .meta-bar { display: none; }
+}
+
+@media (max-width: 560px) {
+  .sidebar { width: 120px !important; min-width: 110px; }
+  .content { min-width: 0; overflow: hidden; }
+  .content-area, .content-header { min-width: 0; max-width: 100%; }
 }
 
 @media (max-height: 560px) {

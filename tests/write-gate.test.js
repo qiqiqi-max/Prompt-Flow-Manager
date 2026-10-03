@@ -54,6 +54,23 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
   });
   ok(nested, '导入内部的写入不会被自己的独占锁卡住');
 
+  const gate3b = createWriteGate();
+  let chain = gate3b.shared(() => delay(50));
+  const queue = (fn) => {
+    const prev = chain;
+    const run = prev.then(() => gate3b.shared(fn), () => gate3b.shared(fn));
+    chain = run.then(() => {}, () => {});
+    return run;
+  };
+  let queuedInsideImport = false;
+  await Promise.race([
+    gate3b.exclusive(async () => {
+      await queue(async () => { queuedInsideImport = true; });
+    }),
+    delay(200).then(() => { throw new Error('queued nested write timed out'); })
+  ]);
+  ok(queuedInsideImport, '导入内部经过写队列的写入也不会被独占锁卡住');
+
   const gate4 = createWriteGate();
   await gate4.exclusive(async () => { throw new Error('boom'); }).catch(() => {});
   let afterError = false;

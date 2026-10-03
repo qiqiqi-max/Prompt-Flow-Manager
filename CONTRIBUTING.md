@@ -150,7 +150,7 @@ npm run test:close    # 关窗落盘握手
 npm run test:close-unsaved # 关窗前询问未保存草稿：取消留窗，保存落盘
 npm run test:draft-recovery # 未保存就退出后，再次打开时恢复草稿
 npm run test:save-conflict # 编辑期间文件被修改时，保存前必须确认
-npm run test:layout-small # 中英文、浅深色在 800x500 最小窗口下主要按钮可见且不换行
+npm run test:layout-small # 800x500 最小窗口下覆盖中英文、浅深色和 125%/150% 缩放
 npm run test:render   # markdown 渲染成本上限
 npm run test:heal     # 启动自愈修坏数据目录（自带反向对照）
 npm run test:logger   # 日志滚动/脱敏 + 诊断导出（裸 node，自带两组反向对照）
@@ -255,6 +255,7 @@ Electron 二进制。换 Electron 后先确认上面的版本断言通过，再�
 | `PFM_SELFTEST_EVAL=<脚本>` | 页面加载后执行一段自检脚本 | 必须配 `PFM_DATA_DIR` |
 | `PFM_SELFTEST_IMPORT_FAIL_AFTER_FILES=1` | 完整备份写入正文后注入失败 | 只在 `PFM_SELFTEST=1` 时生效 |
 | `PFM_SELFTEST_CONFIG_WRITE_FAIL=1` | 让配置写入失败 | 只在 `PFM_SELFTEST=1` 时生效 |
+| `PFM_SELFTEST_ZOOM=<倍数>` | 自检前设置页面缩放，范围 0.5 到 3 | 只给布局测试使用 |
 | `PFM_SELFTEST_CLOSE_UNSAVED=1` | 自定义脚本执行后触发关窗，验证未保存草稿保护 | 必须配 `PFM_DATA_DIR` |
 | `PFM_SELFTEST_CLOSE=<模式>` | 关窗落盘握手 | 必须配 `PFM_DATA_DIR` |
 | `PFM_SELFTEST_READONLY=1` | 只读体检：每个文件能否读取/解析/渲染 | 只读，不写 |

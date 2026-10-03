@@ -2727,6 +2727,37 @@ async function init() {
   $('btn-rename').onclick = renameCurrent;
   $('btn-move').onclick = moveCurrent;
   $('btn-delete').onclick = deleteCurrent;
+  $('btn-content-more').onclick = (e) => {
+    e.stopPropagation();
+    const btn = e.currentTarget;
+    const rect = btn.getBoundingClientRect();
+    const menu = $('ctx-menu');
+    menu.innerHTML = '';
+    menu.setAttribute('role', 'menu');
+    const actions = [
+      ['history', openHistory],
+      ['rename', renameCurrent],
+      ['move', moveCurrent],
+      ['delete', deleteCurrent]
+    ];
+    for (const [key, action] of actions) {
+      const item = document.createElement('div');
+      item.className = 'ctx-item' + (key === 'delete' ? ' danger' : '');
+      item.setAttribute('role', 'menuitem');
+      item.tabIndex = 0;
+      item.textContent = t(key);
+      const run = async () => { hideCtxMenu(); btn.setAttribute('aria-expanded', 'false'); await action(); };
+      item.onclick = run;
+      item.onkeydown = (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); run(); } };
+      menu.appendChild(item);
+    }
+    menu.classList.remove('hidden', 'ctx-centered');
+    menu.style.left = Math.max(8, Math.min(rect.right - 150, innerWidth - 158)) + 'px';
+    menu.style.top = Math.min(rect.bottom + 4, innerHeight - 160) + 'px';
+    btn.setAttribute('aria-expanded', 'true');
+    const first = menu.querySelector('[role="menuitem"]');
+    if (first) first.focus();
+  };
 
   // 抽屉关闭
   $('btn-history-close').onclick = () => $('history-drawer').classList.add('hidden');
