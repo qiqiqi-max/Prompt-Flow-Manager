@@ -168,6 +168,10 @@
         check('导入完整备份时识别为备份模式', imp2.mode === 'backup', JSON.stringify(imp2));
         check('完整备份恢复工作流目录', imp2.rels.some(r => /^workflows\/自检备份工作流-\d+\.md$/.test(r)), JSON.stringify(imp2.rels));
         check('完整备份恢复模板目录', imp2.rels.some(r => /^templates\/自检备份模板-\d+\.md$/.test(r)), JSON.stringify(imp2.rels));
+        const restoredPrompt = imp2.rels.find(r => /^prompts\/testing\/自检改名-\d+\.md$/.test(r));
+        const restoredVersions = restoredPrompt ? await api.listVersions(restoredPrompt) : [];
+        check('完整备份恢复版本历史到导入后的文件', restoredVersions.length >= 2 && imp2.restoredVersions >= 2,
+          JSON.stringify({ restoredPrompt, versions: restoredVersions.length, restored: imp2.restoredVersions }));
 
         const cancel = await api.exportZip();
         check('用户取消导出时返回 ok:false', cancel.ok === false, JSON.stringify(cancel));

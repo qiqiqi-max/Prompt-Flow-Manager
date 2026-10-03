@@ -2249,7 +2249,10 @@ async function importZip() {
           files: failed.slice(0, 5).map(f => f.name).join(', ')
         }), 'error');
       } else {
-        toast(t(res.mode === 'backup' ? 'importedBackup' : 'importedZipCount', { count: res.imported || 0 }), 'success');
+        toast(t(res.mode === 'backup' ? 'importedBackup' : 'importedZipCount', {
+          count: res.imported || 0,
+          versions: res.restoredVersions || 0
+        }), 'success');
       }
       await refreshTree();
     }

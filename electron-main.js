@@ -97,7 +97,7 @@ for (const stream of [process.stdout, process.stderr]) {
 }
 
 const archiver = require('archiver'); // 仅用于压缩导出
-const { readZipMarkdownEntries, sanitizeTitle, uniqueRel, backupRelForEntry } = require('./lib/zip-import');
+const { readZipMarkdownEntries, sanitizeTitle, uniqueRel, backupRelForEntry, backupVersionForEntry } = require('./lib/zip-import');
 // 原生菜单的文案也要跟随语言。i18n.js 结尾有 module.exports，可以直接在主进程 require，
 // 不必再维护第二份翻译表（之前菜单是硬编码中文，切到英文后整个菜单栏还是中文）。
 const I18N_TABLE = require('./src/i18n.js');
@@ -1271,6 +1271,7 @@ ipcMain.handle('export-zip', async () => {
     archive.directory(PROMPTS_DIR, 'prompts', {});
     archive.directory(WORKFLOWS_DIR, 'workflows', {});
     archive.directory(TEMPLATES_DIR, 'templates', {});
+    if (fs.existsSync(VERSIONS_DIR)) archive.directory(VERSIONS_DIR, '.versions', {});
     archive.finalize().catch((err) => done(reject, appError('E_EXPORT_ARCHIVE', err.message)));
   }).catch(async (err) => {
     // 失败时别留下半截 zip 让用户误当成可用备份
@@ -1403,24 +1404,61 @@ ipcMain.handle('import-zip', async () => {
   });
   if (res.canceled || !res.filePaths || !res.filePaths[0]) return { ok: false };
   const zipPath = res.filePaths[0];
-  const { entries, skipped } = await readZipMarkdownEntries(zipPath);
+  const { entries, skipped } = await readZipMarkdownEntries(zipPath, { includeVersionIndexes: true });
+  const contentEntries = entries.filter(entry => !backupVersionForEntry(entry.path));
+  const versionEntries = entries.filter(entry => backupVersionForEntry(entry.path));
   // 本应用导出的 ZIP 以 prompts/workflows/templates 为顶层目录，
   // 完整备份要保留工作流和模板位置；其他 ZIP 仍按 frontmatter 导入为提示词。
-  const isAppBackup = entries.length > 0 && entries.every(entry => backupRelForEntry(entry.path));
+  const isAppBackup = contentEntries.length > 0 && contentEntries.every(entry => backupRelForEntry(entry.path));
   const imported = [];
+  const restoredRels = new Map();
   const failedList = skipped.map(s => ({ name: s.name, error: s.reason }));
-  for (const entry of entries) {
+  for (const entry of contentEntries) {
     try {
       const backupRel = isAppBackup ? backupRelForEntry(entry.path) : null;
-      imported.push(backupRel
+      const rel = backupRel
         ? await importMarkdownAt(backupRel, entry.content)
-        : await importMarkdown(entry.name, entry.content));
+        : await importMarkdown(entry.name, entry.content);
+      imported.push(rel);
+      if (backupRel) restoredRels.set(backupRel, rel);
     } catch (err) {
       failedList.push({ name: entry.path || entry.name, error: err.message });
     }
   }
+  let restoredVersions = 0;
+  if (isAppBackup) {
+    for (const entry of versionEntries) {
+      const info = backupVersionForEntry(entry.path);
+      const targetRel = restoredRels.get(info.rel);
+      if (!targetRel) continue;
+      try {
+        const dir = versionDirFor(targetRel);
+        await ensureDir(dir);
+        if (info.file === 'index.json') {
+          const parsed = JSON.parse(entry.content);
+          const pinned = {};
+          for (const [file, value] of Object.entries(parsed && parsed.pinned || {})) {
+            if (value === true && backupVersionForEntry('.versions/' + info.rel + '/' + file)) pinned[file] = true;
+          }
+          await writeFileAtomic(path.join(dir, 'index.json'), JSON.stringify({ pinned }, null, 2));
+        } else {
+          await writeFileExclusive(path.join(dir, info.file), entry.content, targetRel);
+          restoredVersions++;
+        }
+      } catch (err) {
+        failedList.push({ name: entry.path, error: err.message });
+      }
+    }
+  }
   // 不静默成功：调用方能看到真实导入数量与失败明细
-  return { ok: true, mode: isAppBackup ? 'backup' : 'markdown', imported: imported.length, rels: imported, failed: failedList };
+  return {
+    ok: true,
+    mode: isAppBackup ? 'backup' : 'markdown',
+    imported: imported.length,
+    restoredVersions,
+    rels: imported,
+    failed: failedList
+  };
 });
 
 ipcMain.handle('get-stages', () => ({ stages: STAGES, labels: STAGE_LABELS }));
