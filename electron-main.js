@@ -105,6 +105,7 @@ const backupConfig = require('./lib/backup-config');
 const { summarizeBackupEntries } = require('./lib/backup-preview');
 const { sha256, buildManifest, verifyManifest } = require('./lib/backup-manifest');
 const { createImportTransaction } = require('./lib/import-transaction');
+const { createWriteGate } = require('./lib/write-gate');
 // 原生菜单的文案也要跟随语言。i18n.js 结尾有 module.exports，可以直接在主进程 require，
 // 不必再维护第二份翻译表（之前菜单是硬编码中文，切到英文后整个菜单栏还是中文）。
 const I18N_TABLE = require('./src/i18n.js');
@@ -544,9 +545,10 @@ async function saveConfig(cfg) {
 //               而文件已经躺在 .trash 里成了孤儿（磁盘占着，UI 看不到，也删不掉）。
 //   version:<rel> 快速连点星标会丢 pin 状态。按 rel 分链，不同文件互不阻塞。
 const writeChains = new Map();
+const writeGate = createWriteGate();
 function queueWrite(key, fn) {
   const prev = writeChains.get(key) || Promise.resolve();
-  const run = prev.then(fn, fn);
+  const run = prev.then(() => writeGate.shared(fn), () => writeGate.shared(fn));
   // 链条本身不能因为某次失败而断掉，否则后续写入全被拒绝
   const guard = run.then(() => {}, () => {});
   writeChains.set(key, guard);
@@ -1429,7 +1431,7 @@ ipcMain.handle('import-single', async () => {
   return { ok: true, rel };
 });
 
-ipcMain.handle('import-zip', async () => {
+ipcMain.handle('import-zip', async () => writeGate.exclusive(async () => {
   const res = await dialog.showOpenDialog(win, {
     title: mt('dlgImportZip'),
     filters: [{ name: 'ZIP', extensions: ['zip'] }],
@@ -1635,7 +1637,7 @@ ipcMain.handle('import-zip', async () => {
     rels: imported,
     failed: failedList
   };
-});
+}));
 
 ipcMain.handle('get-stages', () => ({ stages: STAGES, labels: STAGE_LABELS }));
 
@@ -2340,6 +2342,7 @@ async function createWindow() {
   // debounce 写入。只在下面的异步路径没走通时用。
   const saveBoundsSync = () => {
     if (!win || win.isDestroyed()) return;
+    if (writeGate.isExclusive()) return;
     try {
       const bounds = currentBounds();
       const cur = fs.existsSync(CONFIG_PATH) ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) : {};

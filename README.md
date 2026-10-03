@@ -158,7 +158,7 @@ flow:
 - `logs/`：滚动日志（`app.log` 及归档，单个 2 MB、最多 5 个，超出自动轮转）
 - `config.json`：主题、语言、窗口状态、标签页和锁定列表等设置
 
-工具栏的“导出”会把 `prompts/`、`workflows/`、`templates/`、版本历史 `.versions/` 和可迁移设置打包为 ZIP。完整备份包含带 SHA-256 校验值的内容清单；文件缺失、被修改或混入额外文件时会停止导入；校验通过后如果写入中途失败，会撤回本次导入的文件、版本、设置和回收站条目。导入 ZIP 前会先显示文件数、历史版本数、回收站条目数、是否包含设置以及重名文件，确认后才写入。导入这种完整备份时，文件会回到原来的目录，版本历史和星标会跟随恢复；遇到同名文件时会另存为新文件，不会覆盖现有内容。可迁移设置包括锁定状态、自定义工程类型和占位符填充记忆，会与当前设置合并；主题、语言、窗口位置、标签页和升级检查状态保留当前设备的值。完整备份也包含回收站；导入时这些条目会追加到当前回收站，并生成新的内部编号，不会替换现有回收站内容。
+工具栏的“导出”会把 `prompts/`、`workflows/`、`templates/`、版本历史 `.versions/` 和可迁移设置打包为 ZIP。完整备份包含带 SHA-256 校验值的内容清单；文件缺失、被修改或混入额外文件时会停止导入；校验通过后如果写入中途失败，会撤回本次导入的文件、版本、设置和回收站条目；导入期间发起的保存、删除、改名和设置写入会等导入结束后再执行。导入 ZIP 前会先显示文件数、历史版本数、回收站条目数、是否包含设置以及重名文件，确认后才写入。导入这种完整备份时，文件会回到原来的目录，版本历史和星标会跟随恢复；遇到同名文件时会另存为新文件，不会覆盖现有内容。可迁移设置包括锁定状态、自定义工程类型和占位符填充记忆，会与当前设置合并；主题、语言、窗口位置、标签页和升级检查状态保留当前设备的值。完整备份也包含回收站；导入时这些条目会追加到当前回收站，并生成新的内部编号，不会替换现有回收站内容。
 
 ## 架构与安全
 
@@ -212,7 +212,7 @@ npm run test:file-move # 改名时正文和版本历史一起移动
 npm run test:workflow-refs # 工作流引用精确替换
 npm run test:backup-import # 完整备份按原目录恢复
 npm run test:backup-config # 备份设置迁移
-npm run test:backup-preview # 导入预览摘要`nnpm run test:backup-manifest # 备份清单校验`nnpm run test:import-transaction # 导入回滚工具`nnpm run test:import-rollback # 完整备份中途失败后整体撤回
+npm run test:backup-preview # 导入预览摘要`nnpm run test:backup-manifest # 备份清单校验`nnpm run test:import-transaction # 导入回滚工具`nnpm run test:write-gate # 导入期间写入暂停`nnpm run test:import-rollback # 完整备份中途失败后整体撤回
 npm run test:includes   # 模板片段引入与嵌套解析
 npm run test:reverse    # 反向对照：版本检查的每个修复点撤掉都必须变红
 npm run test:reverse-split # 反向对照：自检模块拆分的每个修复点撤掉都必须变红

@@ -49,7 +49,11 @@ async function makeBackup() {
       const api = window.promptFlowApi;
       const before = await api.getMetaList();
       let message = '';
-      try { await api.importZip(); } catch (e) { message = String(e.message || e); }
+      const importing = api.importZip().catch((e) => { message = String(e.message || e); });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const concurrentSave = api.setConfig({ sidebarWidth: 321 });
+      await importing;
+      await concurrentSave;
       const after = await api.getMetaList();
       const cfg = await api.getConfig();
       const trash = await api.listTrash();
@@ -58,6 +62,7 @@ async function makeBackup() {
         && !after.some(m => m.rel.includes('回滚导入'))
         && !(cfg.projectTypes || []).includes('回滚类型')
         && !(cfg.lockedFiles || []).some(r => r.includes('回滚导入'))
+        && cfg.sidebarWidth === 321
         && trash.items.length === 0;
       console.log(ok ? '[import-rollback] PASS 中途失败后整次导入被撤回' : '[import-rollback] FAIL ' + JSON.stringify({ message, before: before.length, after: after.length, cfg, trash }));
     })()`;

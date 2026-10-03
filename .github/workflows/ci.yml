@@ -123,6 +123,9 @@ jobs:
       - name: 导入事务回滚工具
         run: npm run test:import-transaction
 
+      - name: 导入期间写入暂停
+        run: npm run test:write-gate
+
       # 纯逻辑测试，不用起 Electron：从 renderer.js 里抠出 debounce 单独验语义。
       # 自带反向对照（旧版一行 debounce 必须失败），所以它不会变成永远绿的空壳。
       - name: debounce 语义
