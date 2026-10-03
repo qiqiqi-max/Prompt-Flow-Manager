@@ -12,7 +12,7 @@ const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pfm-save-conflict-'));
 fs.mkdirSync(path.join(dataDir, 'prompts', 'testing'), { recursive: true });
 fs.writeFileSync(path.join(dataDir, REL), '---\ntitle: Save Conflict\n---\noriginal', 'utf8');
 const queue = path.join(dataDir, '__dialogs.json');
-fs.writeFileSync(queue, JSON.stringify([{ kind: 'message', response: 2 }, { kind: 'message', response: 0 }]));
+fs.writeFileSync(queue, JSON.stringify([]));
 
 const script = `
   (async () => {
@@ -22,15 +22,30 @@ const script = `
     $('editor').dispatchEvent(new Event('input'));
     const disk = await api.readFile(${JSON.stringify(REL)});
     await api.saveFile(${JSON.stringify(REL)}, disk.content.replace('original', 'theirs'));
-    const canceled = await saveCurrent();
+    const waitConflict = async () => {
+      for (let i = 0; i < 50; i++) {
+        if (!$('conflict-modal').classList.contains('hidden')) return;
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      throw new Error('conflict modal did not open');
+    };
+    const canceledPromise = saveCurrent();
+    await waitConflict();
+    const diffText = $('conflict-diff').textContent;
+    const hasDiff = diffText.includes('theirs') && diffText.includes('mine');
+    $('btn-conflict-cancel').click();
+    const canceled = await canceledPromise;
     const afterCancel = await api.readFile(${JSON.stringify(REL)});
-    const forced = await saveCurrent();
+    const forcedPromise = saveCurrent();
+    await waitConflict();
+    $('btn-conflict-overwrite').click();
+    const forced = await forcedPromise;
     const afterForce = await api.readFile(${JSON.stringify(REL)});
     const versions = await api.listVersions(${JSON.stringify(REL)});
-    const ok = canceled === false && state.editMode && afterCancel.content.includes('theirs')
+    const ok = hasDiff && canceled === false && state.editMode && afterCancel.content.includes('theirs')
       && forced === true && afterForce.content.includes('mine') && versions.length >= 2;
     console.log(ok ? '[save-conflict] PASS 编辑冲突时取消不覆盖，确认后覆盖并保留历史'
-      : '[save-conflict] FAIL ' + JSON.stringify({ canceled, forced, afterCancel: afterCancel.content, afterForce: afterForce.content, versions: versions.length }));
+      : '[save-conflict] FAIL ' + JSON.stringify({ hasDiff, diffText, canceled, forced, afterCancel: afterCancel.content, afterForce: afterForce.content, versions: versions.length }));
   })()`;
 
 const child = spawn(electronBin, [root], {

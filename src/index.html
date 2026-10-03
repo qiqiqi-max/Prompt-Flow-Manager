@@ -253,6 +253,27 @@
   <!-- 上下文菜单 -->
   <div id="ctx-menu" class="ctx-menu hidden"></div>
 
+  <div id="conflict-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="conflict-title">
+    <div class="conflict-dialog">
+      <div class="conflict-header">
+        <div>
+          <h2 id="conflict-title" data-i18n="saveConflictTitle">文件已在其他地方被修改</h2>
+          <p id="conflict-detail" class="conflict-detail" data-i18n="saveConflictDetail"></p>
+        </div>
+      </div>
+      <div class="conflict-legend">
+        <span class="conflict-legend-del" data-i18n="conflictLatestLabel">最新文件内容</span>
+        <span class="conflict-legend-add" data-i18n="conflictMineLabel">你的编辑</span>
+      </div>
+      <div id="conflict-diff" class="version-diff conflict-diff"></div>
+      <div class="conflict-footer">
+        <button class="btn-secondary" id="btn-conflict-cancel" data-i18n="cancel">取消</button>
+        <button class="btn-secondary" id="btn-conflict-reload" data-i18n="reloadDiskVersion">放弃并载入最新内容</button>
+        <button class="btn-primary" id="btn-conflict-overwrite" data-i18n="overwriteFile">覆盖</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 提示通知 -->
   <div id="toast" class="toast hidden"></div>
 

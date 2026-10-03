@@ -607,6 +607,28 @@ mark {
   background: var(--bg);
 }
 
+.conflict-dialog {
+  width: min(900px, 94vw); height: min(680px, 88vh);
+  background: var(--bg); border: 1px solid var(--border-strong);
+  border-radius: 8px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+  display: flex; flex-direction: column; overflow: hidden; color: var(--text);
+}
+.conflict-header { padding: 14px 18px 10px; border-bottom: 1px solid var(--border); }
+.conflict-header h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.conflict-detail { margin: 5px 0 0; color: var(--text-muted); font-size: 12.5px; line-height: 1.5; }
+.conflict-legend {
+  display: flex; gap: 10px; padding: 9px 18px; border-bottom: 1px solid var(--border);
+  font-size: 12px; background: var(--bg-alt);
+}
+.conflict-legend span { padding: 2px 8px; border-radius: 4px; }
+.conflict-legend-del { background: var(--diff-del-bg); color: var(--diff-del-text); }
+.conflict-legend-add { background: var(--diff-add-bg); color: var(--diff-add-text); }
+.conflict-diff { min-height: 0; }
+.conflict-footer {
+  display: flex; justify-content: flex-end; gap: 8px; padding: 10px 18px;
+  border-top: 1px solid var(--border); background: var(--bg);
+}
+
 /* ===== 升级提示条 ===== */
 /* 刻意不做成 toast：toast 1.8 秒就消失，而"有新版本"是用户可能想稍后处理的信息，
    一闪而过等于没提示。也刻意不做成模态框：用户打开这个应用是来写提示词的，

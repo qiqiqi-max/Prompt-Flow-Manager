@@ -1162,13 +1162,8 @@ async function saveCurrent() {
       result = await api.saveFile(state.currentRel, content, { expectedContent: state.currentContent });
     } catch (e) {
       if (!String(e && e.message || e).includes('E_SAVE_CONFLICT')) throw e;
-      const choice = await api.confirmUnsaved({
-        title: t('saveConflictTitle'),
-        detail: t('saveConflictDetail'),
-        save: t('overwriteFile'),
-        discard: t('reloadDiskVersion'),
-        cancel: t('cancel')
-      });
+      const latestForDiff = await api.readFile(state.currentRel);
+      const choice = await chooseSaveConflict(latestForDiff.content, content);
       if (choice === 'discard') {
         const latest = await api.readFile(state.currentRel);
         state.currentContent = latest.content;
@@ -2230,6 +2225,32 @@ function renderDiff(el, oldText, newText) {
   el.innerHTML = html;
 }
 
+function chooseSaveConflict(latestContent, mineContent) {
+  return new Promise((resolve) => {
+    const modal = $('conflict-modal');
+    const finish = (choice) => {
+      modal.classList.add('hidden');
+      $('btn-conflict-cancel').onclick = null;
+      $('btn-conflict-reload').onclick = null;
+      $('btn-conflict-overwrite').onclick = null;
+      document.removeEventListener('keydown', onKey, true);
+      resolve(choice);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        finish('cancel');
+      }
+    };
+    renderDiff($('conflict-diff'), parseFrontmatter(latestContent).body, parseFrontmatter(mineContent).body);
+    $('btn-conflict-cancel').onclick = () => finish('cancel');
+    $('btn-conflict-reload').onclick = () => finish('discard');
+    $('btn-conflict-overwrite').onclick = () => finish('save');
+    document.addEventListener('keydown', onKey, true);
+    modal.classList.remove('hidden');
+    $('btn-conflict-cancel').focus();
+  });
+}
 // ===== 回收站 =====
 async function openTrash() {
   const index = await api.listTrash();
