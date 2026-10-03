@@ -1788,12 +1788,12 @@ async function duplicateCurrent() {
 
 // ===== 锁定（防误删） =====
 async function toggleLockFile(rel) {
-  if (state.lockedFiles.has(rel)) {
+  const previousLocked = new Set(state.lockedFiles);
+  const unlocking = state.lockedFiles.has(rel);
+  if (unlocking) {
     state.lockedFiles.delete(rel);
-    toast(t('unlocked'), 'success');
   } else {
     state.lockedFiles.add(rel);
-    toast(t('locked'), 'success');
   }
   // 先更新树上的锁定标记，再落盘。顺序反过来会让点一下锁要等 400ms 防抖 +
   // 一次 IPC 才看到图标变化（debounce 现在返回真 promise 了，await 是真的在等）。
@@ -1804,11 +1804,21 @@ async function toggleLockFile(rel) {
   // 事实：主进程的 trash 会读 config 判锁，而它看不见渲染进程这边还在计时的防抖。
   // "点锁定 → 立刻按删除"这个连招下，等 400ms 的话主进程读到的仍是没有该文件的
   // 旧快照，锁形同虚设。防抖留给 migrateLock 那种事后记账的路径。
-  await saveLockedDebounced.flush();
+  try {
+    const saving = saveLockedDebounced();
+    await saveLockedDebounced.flush();
+    await saving;
+    toast(t(unlocking ? 'unlocked' : 'locked'), 'success');
+  } catch (e) {
+    state.lockedFiles = previousLocked;
+    document.querySelectorAll('.tree-row.file').forEach(r => {
+      r.classList.toggle('locked', state.lockedFiles.has(r.__rel));
+    });
+    toast(tErr('lockSaveFailed', e), 'error');
+  }
 }
 const saveLockedDebounced = debounce(async () => {
-  try { await api.setConfig({ lockedFiles: Array.from(state.lockedFiles) }); }
-  catch (e) { console.error('保存锁定状态失败:', e); } // i18n-exempt: 开发日志
+  await api.setConfig({ lockedFiles: Array.from(state.lockedFiles) });
 }, 400);
 // 重命名/移动时把锁定路径迁移到新路径
 function migrateLock(oldRel, newRel) {
@@ -1817,7 +1827,7 @@ function migrateLock(oldRel, newRel) {
     state.lockedFiles.add(newRel);
     // 不 await：调用方（改名/移动）已经把文件动完了，锁列表是事后记账。
     // 真正需要保证落盘的是关窗那一下，由 __pfmFlushPending 兜。
-    saveLockedDebounced();
+    saveLockedDebounced().catch(e => console.error('保存锁定状态失败:', e)); // i18n-exempt: 开发日志
   }
 }
 
@@ -2072,8 +2082,12 @@ async function openHistory() {
     item.querySelector('[data-pin]').onclick = async (e) => {
       e.stopPropagation();
       const pinned = !e.target.classList.contains('pinned');
-      await api.pinVersion(state.historyRel, file, pinned);
-      openHistory();
+      try {
+        await api.pinVersion(state.historyRel, file, pinned);
+        openHistory();
+      } catch (err) {
+        toast(tErr('pinFailed', err), 'error');
+      }
     };
   });
 }
