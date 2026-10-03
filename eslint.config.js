@@ -172,7 +172,7 @@ module.exports = [
   {
     // 双用模块：浏览器里当 <script>，主进程里被 require。
     // 两套 global 都要给，否则结尾那句 typeof module !== 'undefined' 会报 no-undef。
-    files: ['src/i18n.js', 'src/frontmatter.js', 'src/placeholders.js', 'src/includes.js', 'src/composer-meta.js'],
+    files: ['src/i18n.js', 'src/frontmatter.js', 'src/placeholders.js', 'src/includes.js', 'src/composer-meta.js', 'src/workflow-refs.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',

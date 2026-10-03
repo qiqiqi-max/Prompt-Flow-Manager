@@ -49,6 +49,30 @@
       const renamedVersions = await api.listVersions(renamed);
       check('改名后版本历史跟随', renamedVersions.length === 2, '共 ' + renamedVersions.length + ' 条');
 
+      // 6b. 工作流引用只改 flow[].prompt，正文和相近路径不受影响。
+      const refWorkflow = 'workflows/自检引用.md';
+      const refTarget = 'prompts/testing/自检引用 新.md';
+      await api.createFile(refWorkflow, [
+        '---',
+        'title: 自检引用',
+        'flow:',
+        '  - id: a',
+        '    prompt: ' + renamed,
+        '  - id: b',
+        '    prompt: ' + renamed + '.bak',
+        '---',
+        '正文保留 ' + renamed
+      ].join('\n'));
+      const refs = await api.findWorkflowRefs(renamed);
+      check('能找到 flow 里的工作流引用', refs.includes(refWorkflow), JSON.stringify(refs));
+      const refResult = await api.updateWorkflowRefs(refs, renamed, refTarget);
+      const refContent = (await api.readFile(refWorkflow)).content;
+      check('工作流引用更新返回成功清单', refResult.updated.includes(refWorkflow) && refResult.failed.length === 0, JSON.stringify(refResult));
+      check('工作流引用精确更新', refContent.includes('    prompt: "' + refTarget + '"'), refContent);
+      check('工作流引用不误改相近路径和正文', refContent.includes(renamed + '.bak') && refContent.includes('正文保留 ' + renamed), refContent);
+      await api.setConfig({ lockedFiles: [] });
+      await api.trash(refWorkflow);
+
       // 7. 解锁 → 删除 → 回收站 → 恢复
       await api.setConfig({ lockedFiles: [] });
       await api.trash(renamed);

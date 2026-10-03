@@ -103,6 +103,7 @@ const { readZipMarkdownEntries, sanitizeTitle, uniqueRel } = require('./lib/zip-
 const I18N_TABLE = require('./src/i18n.js');
 // frontmatter 解析同样两边共用（src/frontmatter.js 结尾也有 module.exports）。
 const FRONTMATTER = require('./src/frontmatter.js');
+const WORKFLOW_REFS = require('./src/workflow-refs.js');
 const projectTypes = require('./lib/project-types');
 const ruleExport = require('./lib/rule-export');
 const { createVersionStore } = require('./lib/version-store');
@@ -929,8 +930,7 @@ ipcMain.handle('find-workflow-refs', async (e, rel) => {
       const entry = await readParsedCached(full);
       content = entry.content;
     } catch { continue; }
-    // 结构字段不在 meta 里，必须从原文找引用
-    if (content.includes(wanted)) refs.push(wRel);
+    if (WORKFLOW_REFS.hasPromptRef(content, wanted)) refs.push(wRel);
   }
   return refs;
 });
@@ -943,31 +943,34 @@ ipcMain.handle('update-workflow-refs', async (e, targets, oldRel, newRel) => {
   if (!Array.isArray(targets)) throw appError('E_INVALID_PAYLOAD');
   const fromRel = String(oldRel == null ? '' : oldRel).replace(/\\/g, '/');
   const toRel = String(newRel == null ? '' : newRel).replace(/\\/g, '/');
-  if (!fromRel || !toRel || fromRel === toRel) return 0;
+  if (!fromRel || !toRel || fromRel === toRel) return { updated: [], failed: [] };
   // 两侧都要是 prompts/ 下的合法写路径（防止把 workflow 改成指向 config 之类）
   safeJoinWritable(fromRel);
   safeJoinWritable(toRel);
-  const fromLiteral = fromRel.replace(/[/\\]/g, '/').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const replaced = new RegExp(fromLiteral, 'g');
-  let updated = 0;
+  const updated = [];
+  const failed = [];
   for (const wRel of targets) {
     if (typeof wRel !== 'string' || !wRel.startsWith('workflows/')) continue;
-    await queueWrite('ver:' + wRel, async () => {
-      const full = safeJoinWritable(wRel);
-      const prev = await readPrevContent(full); // ENOENT → null
-      if (prev == null) return;
-      if (!prev.includes(fromRel)) return;      // 没有这个引用，跳过
-      const next = prev.replace(replaced, toRel);
-      if (next === prev) return;
-      // 与 save-file 同款：旧正文留档 + bump 自动字段 + 原子写 + 清缓存
-      await saveVersion(wRel, prev);
-      const toWrite = bumpAutoFields(next, prev);
-      await writeFileAtomic(full, toWrite);
-      dropFromCache(full);
-      updated++;
-    });
+    try {
+      await queueWrite('ver:' + wRel, async () => {
+        const full = safeJoinWritable(wRel);
+        const prev = await readPrevContent(full); // ENOENT → null
+        if (prev == null) return;
+        const next = WORKFLOW_REFS.replacePromptRefs(prev, fromRel, toRel);
+        if (!next.count) return;
+        // 与 save-file 同款：旧正文留档 + bump 自动字段 + 原子写 + 清缓存
+        await saveVersion(wRel, prev);
+        const toWrite = bumpAutoFields(next.content, prev);
+        await writeFileAtomic(full, toWrite);
+        dropFromCache(full);
+        updated.push(wRel);
+      });
+    } catch (err) {
+      failed.push({ rel: wRel, code: String(err && err.message || err).split('|')[0] });
+      logger.error('[workflow-refs] 更新工作流引用失败 ' + wRel + '：' + (err && err.message ? err.message : err));
+    }
   }
-  return updated;
+  return { updated, failed };
 });
 
 // 锁状态必须在 config 队列内读。原先是队列外裸 loadConfig()：渲染进程的

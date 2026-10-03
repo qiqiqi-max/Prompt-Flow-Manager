@@ -1617,12 +1617,22 @@ async function syncWorkflowRefs(oldRel, newRel) {
   }));
   if (!ok) return false;
   try {
-    const n = await api.updateWorkflowRefs(refs, oldRel, newRel);
-    toast(t('renameRefsUpdated', { count: n || 0 }), 'success');
+    const res = await api.updateWorkflowRefs(refs, oldRel, newRel);
+    const updated = Array.isArray(res && res.updated) ? res.updated : [];
+    const failed = Array.isArray(res && res.failed) ? res.failed : [];
+    if (failed.length) {
+      toast(t('renameRefsPartial', {
+        updated: updated.length,
+        failed: failed.length,
+        files: failed.map(f => f.rel).join(', ')
+      }), 'error');
+    } else {
+      toast(t('renameRefsUpdated', { count: updated.length }), 'success');
+    }
     // 同步后正在标签页里打开的工作流正文是旧的，逐个重新读一遍
     // （刷新树只更新元数据，改的是 frontmatter 里的 flow，不重读就仍显示坏节点）
-    await reloadOpenRefTabs(refs);
-    return true;
+    if (updated.length) await reloadOpenRefTabs(updated);
+    return failed.length === 0;
   } catch (e) {
     toast(tErr('renameRefsFailed', e), 'error');
     return false;

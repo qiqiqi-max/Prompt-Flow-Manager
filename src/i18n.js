@@ -126,6 +126,7 @@ const I18N = {
     // 所以改完要主动问一句，并把顺带改了几个文件报出来。
     renameRefsConfirm: '有 {count} 个工作流引用了这个文件。要同时更新它们的引用吗？\n\n{files}',
     renameRefsUpdated: '已同步更新 {count} 个工作流的引用',
+    renameRefsPartial: '已更新 {updated} 个工作流，{failed} 个更新失败：{files}',
     renameRefsFailed: '同步工作流引用失败：{detail}',
     moved: '已移动',
     duplicated: '已创建副本',
@@ -456,6 +457,7 @@ const I18N = {
     renamed: 'Renamed',
     renameRefsConfirm: '{count} workflow(s) reference this file. Update their references too?\n\n{files}',
     renameRefsUpdated: 'Updated references in {count} workflow(s)',
+    renameRefsPartial: 'Updated {updated} workflow(s); {failed} failed: {files}',
     renameRefsFailed: 'Failed to update workflow references: {detail}',
     moved: 'Moved',
     duplicated: 'Copy created',
