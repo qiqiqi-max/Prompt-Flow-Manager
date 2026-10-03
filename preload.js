@@ -11,6 +11,9 @@ const api = {
   readFile: (rel) => ipcRenderer.invoke('read-file', rel),
   saveFile: (rel, content) => ipcRenderer.invoke('save-file', rel, content),
   createFile: (rel, content) => ipcRenderer.invoke('create-file', rel, content),
+  readDraft: (rel) => ipcRenderer.invoke('read-draft', rel),
+  saveDraft: (rel, content, baseContent) => ipcRenderer.invoke('save-draft', rel, content, baseContent),
+  clearDraft: (rel) => ipcRenderer.invoke('clear-draft', rel),
   rename: (oldRel, newRel) => ipcRenderer.invoke('rename', oldRel, newRel),
   // 工作流引用同步：改名/移动提示词后，把 workflows 里指向旧路径的引用批量迁走
   findWorkflowRefs: (rel) => ipcRenderer.invoke('find-workflow-refs', rel),

@@ -582,6 +582,7 @@ async function openFile(rel) {
     addRecent(rel);
     // 更新状态栏信息
     updateStatusInfo((state.currentMeta.title || rel) + ' · ' + t('loaded'));
+    await offerDraftRecovery(rel);
   } catch (e) {
     state.currentRel = null;
     toast(tErr('openFailed', e), 'error');
@@ -1017,6 +1018,7 @@ function isDirty() {
 
 function markDirtyIndicator() {
   const dirty = isDirty();
+  if (dirty) saveDraftDebounced(state.currentRel, $('editor').value, state.editBaseline);
   const btn = $('btn-edit');
   if (btn) btn.textContent = dirty ? t('editing') + ' *' : t('editing');
   if (state.activeTab) {
@@ -1034,6 +1036,41 @@ function markDirtyIndicator() {
   }
 }
 
+const saveDraftDebounced = debounce(async (rel, content, baseContent) => {
+  if (!rel) return;
+  try { await api.saveDraft(rel, content, baseContent); }
+  catch (e) { reportBackgroundSaveError(e); }
+}, 800);
+
+async function clearDraft(rel) {
+  if (!rel) return;
+  try {
+    await saveDraftDebounced.flush();
+    await api.clearDraft(rel);
+  } catch (e) {
+    reportBackgroundSaveError(e);
+  }
+}
+
+async function offerDraftRecovery(rel) {
+  let draft = null;
+  try { draft = await api.readDraft(rel); }
+  catch (e) { reportBackgroundSaveError(e); return; }
+  if (!draft || draft.content === state.currentContent) {
+    if (draft) await clearDraft(rel);
+    return;
+  }
+  const restore = await confirmDialog(t('draftRecoverPrompt'));
+  if (!restore) {
+    await clearDraft(rel);
+    return;
+  }
+  await enterEditMode();
+  $('editor').value = draft.content;
+  state.editBaseline = draft.baseContent;
+  markDirtyIndicator();
+  toast(t(draft.baseContent === state.currentContent ? 'draftRecovered' : 'draftRecoveredChanged'), 'success');
+}
 async function enterEditMode() {
   if (!state.currentRel) return;
   state.editMode = true;
@@ -1059,12 +1096,14 @@ async function exitEditMode(save, opts) {
     if (!ok) return false;
   } else {
     if (!skipConfirm && isDirty() && !(await confirmDialog(t('discardConfirm')))) return false;
+    const discardedRel = state.currentRel;
     state.editMode = false;
     state.editBaseline = '';
     $('preview-wrap').classList.remove('hidden');
     $('editor-wrap').classList.add('hidden');
     $('btn-edit').textContent = t('edit');
     renderContent();
+    await clearDraft(discardedRel);
     return true;
   }
   state.editMode = false;
@@ -1125,6 +1164,7 @@ async function saveCurrent() {
     // 主进程会回写 version/updatedAt，saved 和输入框内容天生不同，
     // 拿 saved 当基准会让保存后立刻又显示未保存。
     state.editBaseline = content;
+    await clearDraft(state.currentRel);
     // 同步到标签
     const tab = state.tabs.find(t => t.rel === state.currentRel);
     if (tab) { tab.content = saved; tab.meta = meta; tab.loaded = true; }

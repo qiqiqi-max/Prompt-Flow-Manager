@@ -132,6 +132,9 @@ jobs:
       - name: 失败提示回归
         run: npm run test:failure-feedback
 
+      - name: 草稿存储
+        run: npm run test:draft-store
+
       # 纯逻辑测试，不用起 Electron：从 renderer.js 里抠出 debounce 单独验语义。
       # 自带反向对照（旧版一行 debounce 必须失败），所以它不会变成永远绿的空壳。
       - name: debounce 语义
@@ -172,6 +175,9 @@ jobs:
 
       - name: 关窗前保护未保存草稿
         run: npm run test:close-unsaved
+
+      - name: 意外退出后恢复草稿
+        run: npm run test:draft-recovery
 
       # 启动自愈：故意构造一个坏数据目录（幽灵条目 / 孤立正文 / 越界 store /
       # 残留 .part），跑完从进程外读磁盘定论。自带反向对照——同一个坏目录再跑

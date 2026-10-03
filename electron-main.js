@@ -107,6 +107,7 @@ const { sha256, buildManifest, verifyManifest } = require('./lib/backup-manifest
 const { createImportTransaction } = require('./lib/import-transaction');
 const { createWriteGate } = require('./lib/write-gate');
 const { safeExportName, writeExportFile } = require('./lib/export-file');
+const { createDraftStore } = require('./lib/draft-store');
 // 原生菜单的文案也要跟随语言。i18n.js 结尾有 module.exports，可以直接在主进程 require，
 // 不必再维护第二份翻译表（之前菜单是硬编码中文，切到英文后整个菜单栏还是中文）。
 const I18N_TABLE = require('./src/i18n.js');
@@ -227,6 +228,7 @@ const LOGS_DIR = path.join(DATA_ROOT, 'logs');
 // 配置默认放 userData（不污染提示词目录）；设了 PFM_DATA_DIR 时跟着走，
 // 否则测试改语言/主题会写进用户真实配置。
 const CONFIG_PATH = path.join(process.env.PFM_DATA_DIR ? DATA_ROOT : app.getPath('userData'), 'config.json');
+const DRAFTS_DIR = path.join(path.dirname(CONFIG_PATH), 'drafts');
 
 // 打包后首次运行：从 asar 内拷出种子资源到 Data 目录。
 //
@@ -493,6 +495,14 @@ const trashStore = createTrashStore({
   ensureDir,
   writeFileAtomic,
   readIndexJson
+});
+const draftStore = createDraftStore({
+  draftsDir: DRAFTS_DIR,
+  appError,
+  writeFileAtomic,
+  isAllowedRel: (rel) => {
+    try { safeJoinWritable(rel); return String(rel).toLowerCase().endsWith('.md'); } catch { return false; }
+  }
 });
 const TRASH_DIR_NORM = trashStore.trashDir;
 const trashStorePath = (storeName) => trashStore.storePath(storeName);
@@ -866,6 +876,11 @@ async function createFileAt(rel, content) {
 }
 
 ipcMain.handle('create-file', (e, rel, content) => createFileAt(rel, content));
+ipcMain.handle('read-draft', async (e, rel) => draftStore.read(rel));
+ipcMain.handle('save-draft', async (e, rel, content, baseContent) => queueWrite('draft:' + String(rel), () => (
+  draftStore.save(rel, content, baseContent)
+)));
+ipcMain.handle('clear-draft', async (e, rel) => queueWrite('draft:' + String(rel), () => draftStore.clear(rel)));
 
 // 整个 handler 排进两侧文件各自的写链。原先完全没排队，而它由四步磁盘操作组成
 // （判重 → 移正文 → 移版本目录 → 改锁列表），任意一步和并发的 save-file 交叉都会

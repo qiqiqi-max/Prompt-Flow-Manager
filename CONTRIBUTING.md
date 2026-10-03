@@ -148,6 +148,7 @@ npm run test:tabs     # 重启后标签页与正文恢复
 npm run test:debounce # 防抖/flush（自带反向对照）
 npm run test:close    # 关窗落盘握手
 npm run test:close-unsaved # 关窗前询问未保存草稿：取消留窗，保存落盘
+npm run test:draft-recovery # 未保存就退出后，再次打开时恢复草稿
 npm run test:render   # markdown 渲染成本上限
 npm run test:heal     # 启动自愈修坏数据目录（自带反向对照）
 npm run test:logger   # 日志滚动/脱敏 + 诊断导出（裸 node，自带两组反向对照）
@@ -172,6 +173,7 @@ npm run test:import-transaction # 导入回滚：删除新建文件并恢复原�
 npm run test:write-gate # 完整备份导入独占写入，其他写入排在导入后（裸 node）
 npm run test:export-file # 单文件导出原子写入，失败时保留原文件（裸 node）
 npm run test:failure-feedback # 删除和新增工程类型的失败不会被当成成功（裸 node）
+npm run test:draft-store # 草稿按文件独立保存、清除和处理损坏文件（裸 node）
 npm run test:import-rollback # 真实 Electron 完整备份中途失败后整体撤回
 npm run test:ui-failure # 真实 Electron 配置写入失败时显示提示并恢复界面状态
 npm run test:includes     # 模板包含引擎（裸 node，自带一组反向对照）
