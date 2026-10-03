@@ -269,7 +269,7 @@ body {
 .recent-item .ri-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 .recent-item .ri-stage { font-size: 11px; color: var(--text-muted); }
 
-.content-area { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.content-area { flex: 1; display: flex; flex-direction: column; min-height: 0; padding-bottom: 28px; }
 .tabs-bar {
   display: flex; align-items: stretch; gap: 2px; padding: 4px 6px 0;
   border-bottom: 1px solid var(--border); flex-shrink: 0; overflow-x: auto;

@@ -31,8 +31,23 @@ const script = `
     };
     const canceledPromise = saveCurrent();
     await waitConflict();
+    const contentRect = $('content-area').getBoundingClientRect();
+    const statusRect = $('status-bar').getBoundingClientRect();
+    const saveRect = $('btn-save').getBoundingClientRect();
+    const editorActionsVisible = saveRect.bottom <= statusRect.top && saveRect.top >= contentRect.top;
     const diffText = $('conflict-diff').textContent;
     const hasDiff = diffText.includes('theirs') && diffText.includes('mine');
+    const modalRect = $('conflict-modal').querySelector('.conflict-dialog').getBoundingClientRect();
+    const fitsViewport = modalRect.left >= 0 && modalRect.top >= 0
+      && modalRect.right <= innerWidth && modalRect.bottom <= innerHeight;
+    const firstFocus = document.activeElement && document.activeElement.id;
+    document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }));
+    const shiftTabFocus = document.activeElement && document.activeElement.id;
+    $('btn-conflict-overwrite').dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+    const wrapFocus = document.activeElement && document.activeElement.id;
+    const focusTrapped = firstFocus === 'btn-conflict-cancel'
+      && shiftTabFocus === 'btn-conflict-overwrite'
+      && wrapFocus === 'btn-conflict-cancel';
     $('btn-conflict-cancel').click();
     const canceled = await canceledPromise;
     const afterCancel = await api.readFile(${JSON.stringify(REL)});
@@ -42,10 +57,10 @@ const script = `
     const forced = await forcedPromise;
     const afterForce = await api.readFile(${JSON.stringify(REL)});
     const versions = await api.listVersions(${JSON.stringify(REL)});
-    const ok = hasDiff && canceled === false && state.editMode && afterCancel.content.includes('theirs')
+    const ok = hasDiff && fitsViewport && focusTrapped && editorActionsVisible && canceled === false && state.editMode && afterCancel.content.includes('theirs')
       && forced === true && afterForce.content.includes('mine') && versions.length >= 2;
     console.log(ok ? '[save-conflict] PASS 编辑冲突时取消不覆盖，确认后覆盖并保留历史'
-      : '[save-conflict] FAIL ' + JSON.stringify({ hasDiff, diffText, canceled, forced, afterCancel: afterCancel.content, afterForce: afterForce.content, versions: versions.length }));
+      : '[save-conflict] FAIL ' + JSON.stringify({ hasDiff, fitsViewport, focusTrapped, editorActionsVisible, firstFocus, shiftTabFocus, wrapFocus, diffText, canceled, forced, afterCancel: afterCancel.content, afterForce: afterForce.content, versions: versions.length }));
   })()`;
 
 const child = spawn(electronBin, [root], {

@@ -2240,6 +2240,16 @@ function chooseSaveConflict(latestContent, mineContent) {
       if (e.key === 'Escape') {
         e.preventDefault();
         finish('cancel');
+        return;
+      }
+      if (e.key === 'Tab') {
+        const buttons = [$('btn-conflict-cancel'), $('btn-conflict-reload'), $('btn-conflict-overwrite')];
+        const current = buttons.indexOf(document.activeElement);
+        const next = e.shiftKey
+          ? (current <= 0 ? buttons.length - 1 : current - 1)
+          : (current < 0 || current === buttons.length - 1 ? 0 : current + 1);
+        e.preventDefault();
+        buttons[next].focus();
       }
     };
     renderDiff($('conflict-diff'), parseFrontmatter(latestContent).body, parseFrontmatter(mineContent).body);
