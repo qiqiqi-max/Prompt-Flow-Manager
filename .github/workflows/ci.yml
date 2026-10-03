@@ -151,6 +151,9 @@ jobs:
       - name: 完整备份导入失败回滚
         run: npm run test:import-rollback
 
+      - name: 界面保存失败提示
+        run: npm run test:ui-failure
+
       - name: UI 点击自检 + 只读体检
         run: npm run test:ui
 

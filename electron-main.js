@@ -526,6 +526,9 @@ async function loadConfig() {
 // 于是 set-config 照样 resolve、渲染进程以为存上了，实际磁盘没变。
 async function saveConfig(cfg) {
   try {
+    if (process.env.PFM_SELFTEST === '1' && process.env.PFM_SELFTEST_CONFIG_WRITE_FAIL === '1') {
+      throw new Error('selftest config write failure');
+    }
     await writeFileAtomic(CONFIG_PATH, JSON.stringify(cfg, null, 2));
     return true;
   } catch (e) {

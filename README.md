@@ -212,7 +212,7 @@ npm run test:file-move # 改名时正文和版本历史一起移动
 npm run test:workflow-refs # 工作流引用精确替换
 npm run test:backup-import # 完整备份按原目录恢复
 npm run test:backup-config # 备份设置迁移
-npm run test:backup-preview # 导入预览摘要`nnpm run test:backup-manifest # 备份清单校验`nnpm run test:import-transaction # 导入回滚工具`nnpm run test:write-gate # 导入期间写入暂停`nnpm run test:export-file # 单文件安全导出`nnpm run test:failure-feedback # 失败提示回归`nnpm run test:import-rollback # 完整备份中途失败后整体撤回
+npm run test:backup-preview # 导入预览摘要`nnpm run test:backup-manifest # 备份清单校验`nnpm run test:import-transaction # 导入回滚工具`nnpm run test:write-gate # 导入期间写入暂停`nnpm run test:export-file # 单文件安全导出`nnpm run test:failure-feedback # 失败提示回归`nnpm run test:import-rollback # 完整备份中途失败后整体撤回`nnpm run test:ui-failure # 界面保存失败提示
 npm run test:includes   # 模板片段引入与嵌套解析
 npm run test:reverse    # 反向对照：版本检查的每个修复点撤掉都必须变红
 npm run test:reverse-split # 反向对照：自检模块拆分的每个修复点撤掉都必须变红

@@ -172,6 +172,7 @@ npm run test:write-gate # 完整备份导入独占写入，其他写入排在导
 npm run test:export-file # 单文件导出原子写入，失败时保留原文件（裸 node）
 npm run test:failure-feedback # 删除和新增工程类型的失败不会被当成成功（裸 node）
 npm run test:import-rollback # 真实 Electron 完整备份中途失败后整体撤回
+npm run test:ui-failure # 真实 Electron 配置写入失败时显示提示并恢复界面状态
 npm run test:includes     # 模板包含引擎（裸 node，自带一组反向对照）
 npm run test:reverse  # 把第一节那套流程自动化：逐条改坏源码，验证目标断言真的变红
 npm run test:reverse-split # 同上，针对「自检模块拆分」那一节的注入契约
@@ -248,6 +249,7 @@ Electron 二进制。换 Electron 后先确认上面的版本断言通过，再�
 | `PFM_SANDBOX_REQUIRED=1` | 沙箱启动失败时直接退出，不降级 | 只给 `test:sandbox-required` 使用 |
 | `PFM_SELFTEST_EVAL=<脚本>` | 页面加载后执行一段自检脚本 | 必须配 `PFM_DATA_DIR` |
 | `PFM_SELFTEST_IMPORT_FAIL_AFTER_FILES=1` | 完整备份写入正文后注入失败 | 只在 `PFM_SELFTEST=1` 时生效 |
+| `PFM_SELFTEST_CONFIG_WRITE_FAIL=1` | 让配置写入失败 | 只在 `PFM_SELFTEST=1` 时生效 |
 | `PFM_SELFTEST_CLOSE=<模式>` | 关窗落盘握手 | 必须配 `PFM_DATA_DIR` |
 | `PFM_SELFTEST_READONLY=1` | 只读体检：每个文件能否读取/解析/渲染 | 只读，不写 |
 | `PFM_SELFTEST_DIALOGS=<json>` | 用队列文件替换系统对话框 | 顺序必须与调用顺序一致 |
