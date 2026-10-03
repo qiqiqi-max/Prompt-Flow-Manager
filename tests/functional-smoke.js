@@ -35,7 +35,8 @@ const dialogQueue = [
   { canceled: false, filePath: exportedMd },                 // exportSingle
   { canceled: false, filePath: exportedZip },                // exportZip
   { canceled: false, filePaths: [exportedMd] },              // importSingle
-  { canceled: false, filePaths: [exportedZip] },             // importZip
+  { canceled: false, filePaths: [exportedZip] },             // importZip（先取消预览）
+  { canceled: false, filePaths: [exportedZip] },             // importZip（确认导入）
   { canceled: true },                                        // exportZip（验证取消分支）
   // 诊断信息导出（functional.js 第 14 节）。位置必须在这里：文件类对话框
   // 按先后顺序消费，第 14 节排在第 11 节之后、第 13 节不占文件类队列。
@@ -43,6 +44,8 @@ const dialogQueue = [
   // 未保存改动的三选一（confirm-unsaved）：buttons 是 [保存, 不保存, 取消]，
   // 所以 response 0/1/2 分别对应三条分支。顺序 = functionalScript 第 13 节
   // 13a 取消 → 13b 不保存 → 13c 保存。
+  { kind: 'message', response: 0 },                          // importZip 预览取消
+  { kind: 'message', response: 1 },                          // importZip 预览确认
   { kind: 'message', response: 2 },                          // 13a 取消
   { kind: 'message', response: 1 },                          // 13b 不保存
   { kind: 'message', response: 0 },                          // 13c 保存
@@ -163,6 +166,7 @@ child.on('exit', (code) => {
     // 环境变量没传时整段跳过，"没有 FAIL"照样是绿的。
     /\[selftest\] PASS lang\.js 的 __LANG__ 占位符全部替换成 en/,
     /\[selftest:fn\] PASS 导出 ZIP 返回成功/,
+    /\[selftest:fn\] PASS 取消导入预览时不写入文件/,
     /\[selftest:fn\] PASS 导入完整备份时识别为备份模式/,
     /\[selftest:fn\] PASS 完整备份恢复工作流目录/,
     /\[selftest:fn\] PASS 完整备份恢复模板目录/,

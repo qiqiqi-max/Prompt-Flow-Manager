@@ -139,6 +139,11 @@ const I18N = {
     importedBackup: '已从备份恢复 {count} 个文件和 {versions} 个历史版本，并保留原目录',
     importedZipCount: '已导入 {count} 个 Markdown 文件',
     importedZipPartial: '已导入 {count} 个文件，{failed} 个失败：{files}',
+    importPreviewTitle: '确认导入内容',
+    importBackupPreviewDetail: '这个完整备份包含 {files} 个文件、{versions} 个历史版本。可迁移设置：{settings}。',
+    importZipPreviewDetail: '这个 ZIP 包含 {files} 个 Markdown 文件，将按提示词导入。',
+    importBackupConflicts: '{count} 个文件与现有文件同名，导入时会另存为新文件：\n{files}',
+    importStart: '开始导入',
     // 失败提示（都会拼上具体错误信息）
     openFailed: '打开失败',
     saveFailed: '保存失败',
@@ -474,6 +479,11 @@ const I18N = {
     importedBackup: 'Restored {count} file(s) and {versions} version(s) with their original folders',
     importedZipCount: 'Imported {count} Markdown file(s)',
     importedZipPartial: 'Imported {count} file(s); {failed} failed: {files}',
+    importPreviewTitle: 'Review import',
+    importBackupPreviewDetail: 'This full backup contains {files} file(s) and {versions} version(s). Portable settings: {settings}.',
+    importZipPreviewDetail: 'This ZIP contains {files} Markdown file(s), which will be imported as prompts.',
+    importBackupConflicts: '{count} file(s) have the same name as existing files and will be saved as new copies:\n{files}',
+    importStart: 'Import',
     // 失败提示（都会拼上具体错误信息）
     openFailed: 'Open failed',
     saveFailed: 'Save failed',

@@ -2240,6 +2240,7 @@ async function importSingle() {
 async function importZip() {
   try {
     const res = await api.importZip();
+    if (res.canceled) return;
     if (res.ok) {
       const failed = Array.isArray(res.failed) ? res.failed : [];
       if (failed.length) {

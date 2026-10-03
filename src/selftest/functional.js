@@ -165,6 +165,13 @@
         check('导入的内容可读且正确', impRead.content.includes('第一版正文'));
         check('导入重名时自动改名而非覆盖', imp1.rel !== renamed, imp1.rel);
 
+        const beforePreview = await api.getMetaList();
+        const canceledImport = await api.importZip();
+        const afterPreview = await api.getMetaList();
+        check('取消导入预览时不写入文件', canceledImport.canceled === true
+          && canceledImport.summary && canceledImport.summary.mode === 'backup'
+          && afterPreview.length === beforePreview.length,
+        JSON.stringify({ result: canceledImport, before: beforePreview.length, after: afterPreview.length }));
         const imp2 = await api.importZip();
         check('导入 ZIP 报告了真实导入数量', imp2.ok === true && imp2.imported > 0,
           JSON.stringify({ ok: imp2.ok, imported: imp2.imported, failed: imp2.failed }));

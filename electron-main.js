@@ -101,6 +101,7 @@ const {
   readZipMarkdownEntries, sanitizeTitle, uniqueRel, backupRelForEntry, backupVersionForEntry, PORTABLE_CONFIG_ENTRY
 } = require('./lib/zip-import');
 const backupConfig = require('./lib/backup-config');
+const { summarizeBackupEntries } = require('./lib/backup-preview');
 // 原生菜单的文案也要跟随语言。i18n.js 结尾有 module.exports，可以直接在主进程 require，
 // 不必再维护第二份翻译表（之前菜单是硬编码中文，切到英文后整个菜单栏还是中文）。
 const I18N_TABLE = require('./src/i18n.js');
@@ -1410,6 +1411,28 @@ ipcMain.handle('import-zip', async () => {
   if (res.canceled || !res.filePaths || !res.filePaths[0]) return { ok: false };
   const zipPath = res.filePaths[0];
   const { entries, skipped } = await readZipMarkdownEntries(zipPath, { includeVersionIndexes: true, includePortableConfig: true });
+  const summary = summarizeBackupEntries(entries, rel => fs.existsSync(safeJoin(rel)));
+  const detailKey = summary.mode === 'backup' ? 'importBackupPreviewDetail' : 'importZipPreviewDetail';
+  const conflictText = summary.conflictCount
+    ? '\n\n' + mt('importBackupConflicts', {
+      count: summary.conflictCount,
+      files: summary.conflicts.join('\n') + (summary.conflictCount > summary.conflicts.length ? '\n...' : '')
+    })
+    : '';
+  const answer = await dialog.showMessageBox(win, {
+    type: summary.conflictCount ? 'warning' : 'question',
+    buttons: [mt('cancel_'), mt('importStart')],
+    defaultId: 1,
+    cancelId: 0,
+    noLink: true,
+    message: mt('importPreviewTitle'),
+    detail: mt(detailKey, {
+      files: summary.files,
+      versions: summary.versions,
+      settings: summary.settings ? mt('yes') : mt('no')
+    }) + conflictText
+  });
+  if (answer.response !== 1) return { ok: false, canceled: true, summary };
   const configEntry = entries.find(entry => entry.path === PORTABLE_CONFIG_ENTRY);
   const contentEntries = entries.filter(entry => entry !== configEntry && !backupVersionForEntry(entry.path));
   const versionEntries = entries.filter(entry => backupVersionForEntry(entry.path));
