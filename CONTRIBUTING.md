@@ -242,6 +242,17 @@ node -e "require('fs').writeFileSync('node_modules/electron/dist/version','43.7.
 Electron 二进制。换 Electron 后先确认上面的版本断言通过，再跑 `npm run dist`
 和 `npm run test:packaged`。
 
+这个指向有个代价：那个目录**不是 `npm install` 建的**。Electron 43 的 npm 包没有
+postinstall，二进制改成惰性下载，所以干净环境里 `npm ci` 之后 `dist` 根本不存在，
+直接 `npm run dist` 会报 `The specified electronDist does not exist` 并退出 1。
+本机通常不会遇到——测试那一串会 `require('electron')`，顺手把二进制带下来了；
+所以这个坑只在 CI 和新克隆里现形（CI 实测红过一次）。
+
+因此 `predist` / `prebuild` 的第一步是 `install-electron`，即 electron 包自带的
+那个 bin。用它而不是自己写脚本：它自己会校验 `dist/version` 与包版本一致、
+`path.txt` 对得上、可执行文件在，三者齐全就直接退 0（本机约 4 秒），
+缺任何一项才去下那 108MB。改这两个钩子时别把它删掉，`npm test` 会拦。
+
 ### 自检开关
 
 | 环境变量 | 作用 | 要求 |

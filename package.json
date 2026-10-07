@@ -52,9 +52,9 @@
     "test:all": "npm run test:quick && npm run test:ui && npm run test:fn && npm run test:import-rollback && npm run test:ui-failure && npm run test:tabs && npm run test:close && npm run test:close-unsaved && npm run test:draft-recovery && npm run test:save-conflict && npm run test:layout-small && npm run test:render && npm run test:heal && npm run test:reverse && npm run test:reverse-split",
     "bench": "node tests/search-bench.js",
     "sync-vendor": "node scripts/sync-vendor.js",
-    "prebuild": "node scripts/sync-vendor.js",
+    "prebuild": "install-electron && node scripts/sync-vendor.js",
     "build": "electron-builder --win",
-    "predist": "node scripts/sync-vendor.js",
+    "predist": "install-electron && node scripts/sync-vendor.js",
     "dist": "electron-builder --win portable"
   },
   "keywords": [

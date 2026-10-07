@@ -59,6 +59,20 @@ assert(pkg.main === 'electron-main.js', 'main 指向 electron-main.js');
 assert(!!(pkg.scripts && pkg.scripts.start && pkg.scripts.dist && pkg.scripts.test), '有 start/dist/test 脚本');
 assert(!!(pkg.build && pkg.build.appId), 'build 配置有 appId');
 assert(pkg.build && pkg.build.electronDist === 'node_modules/electron/dist', '打包复用 node_modules 里已校验版本的 Electron');
+// electronDist 指向 node_modules 的代价：那个目录不是 npm install 建的。
+// Electron 43 的包没有 postinstall，二进制改成惰性下载，所以干净环境里 npm ci 之后
+// node_modules/electron/dist 根本不存在，直接 npm run dist 会报
+// "The specified electronDist does not exist" 并退出 1。
+// 测试那一串顺带 require('electron') 把二进制带下来了，所以只有打包这条路会踩到；
+// 本机一般先跑过测试、dist 已经在了，这个坑只在 CI 和新克隆里现形（CI 实测红过一次）。
+// install-electron 是 electron 包自带的 bin（即 install.js），它自己会先校验
+// dist/version 与包版本一致、path.txt 对得上、可执行文件在，已装好就直接退 0。
+for (const hook of ['predist', 'prebuild']) {
+  assert(/install-electron/.test(pkg.scripts[hook] || ''),
+    hook + ' 先装好 Electron 二进制（electronDist 指向 node_modules，没有它打不了包）');
+  assert(/sync-vendor/.test(pkg.scripts[hook] || ''),
+    hook + ' 仍然同步 vendor 副本');
+}
 assert(pkg.build && pkg.build.win && pkg.build.win.icon === 'prompt-flow-manager.ico', 'Windows 打包使用现成 ICO，不在构建时下载图标转换工具');
 // 防回归：渲染进程用 vendor 副本，但 lib/zip-import.js 在主进程里 require yauzl，
 // 打进 asar 后必须能解析，所以 yauzl 只能是 dependencies。
