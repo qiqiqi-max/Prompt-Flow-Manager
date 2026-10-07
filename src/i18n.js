@@ -319,6 +319,9 @@ const I18N = {
     // 补充
     btnImportTitle: '导入 (Ctrl+I)',
     settingsLang: '语言 / Language',
+    settingsFontScale: '界面字号',
+    fontScaleDesc: '只改界面文字大小，不改窗口缩放。改完立即生效。',
+    fontScaleHint: '默认 90%。100% 等于 1.6 版的大小；60%／70% 很小，适合高分屏。',
     editorPlaceholder: '在此编辑提示词内容…',
     importPickTitle: '选择导入方式',
     importSingleMd: '导入单个 .md',
@@ -681,6 +684,9 @@ const I18N = {
     // 补充
     btnImportTitle: 'Import (Ctrl+I)',
     settingsLang: 'Language / 语言',
+    settingsFontScale: 'Interface Font Size',
+    fontScaleDesc: 'Changes text size only, not window zoom. Applies immediately.',
+    fontScaleHint: 'Default is 90%. 100% matches the size used before 1.6; 60%/70% are very small, best on high-DPI screens.',
     editorPlaceholder: 'Edit prompt content here…',
     importPickTitle: 'Choose import method',
     importSingleMd: 'Import a single .md',

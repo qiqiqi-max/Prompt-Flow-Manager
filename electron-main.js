@@ -513,6 +513,10 @@ const writeTrashIndex = (index) => trashStore.writeIndex(index);
 async function loadConfig() {
   const defaults = {
     theme: 'light',
+    // 界面字号倍数。默认 0.9——14px 正文在 1200px 宽窗口里偏大，
+    // 工具栏和流程图节点尤其明显。渲染进程只认 FONT_SCALES 里的档位，
+    // 这里存的是倍数本身而不是档位名，省得将来加档位要迁移旧配置。
+    fontScale: 0.9,
     windowBounds: { width: 1200, height: 780 },
     projectTypes: DEFAULT_PROJECT_TYPES,
     lockedFiles: [],

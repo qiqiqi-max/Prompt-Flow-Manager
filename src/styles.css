@@ -2,7 +2,14 @@
 :root {
   --font: -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
   --mono: "Cascadia Code", "Consolas", "Courier New", monospace;
+  /* 界面字号的唯一缩放入口。所有 font-size 一律写 rem（基准 16px），
+     新样式不要再写 px，否则那一处不会跟着用户设置缩放。
+     只缩字号、不缩间距和控件高度：用户要的是「字小一点」，
+     把 padding 一起缩等于整体缩放，窄窗口断点会跟着错位。 */
+  --font-scale: 1;
 }
+/* rem 的基准。字号缩放全靠这一行，JS 只改 --font-scale。 */
+html { font-size: calc(16px * var(--font-scale)); }
 /* 颜色分「文字用」和「填充用」两套，不共用一个值。
    起因：--primary 同时是 .btn-primary 的底色（白字压在上面）、.btn-link 的文字色、
    .meta-chip.stage 的边框、焦点环。白字压 #3b82f6 在暗色下只有 3.68:1，要把底色压暗；
@@ -81,7 +88,7 @@
 html, body { height: 100%; overflow: hidden; }
 body {
   font-family: var(--font);
-  font-size: 14px;
+  font-size: 0.875rem;
   color: var(--text);
   background: var(--bg);
   -webkit-user-select: none;
@@ -107,12 +114,12 @@ body {
   flex: 1; min-width: 0; height: 28px; padding: 0 10px;
   border: 1px solid var(--border-strong); border-radius: 6px;
   background: var(--bg); color: var(--text);
-  font-size: 13px; outline: none;
+  font-size: 0.8125rem; outline: none;
 }
 #search-box:focus { border-color: var(--focus-ring); box-shadow: 0 0 0 2px var(--focus-ring); }
 
 .btn-icon, .btn-primary, .btn-secondary, .btn-danger, .btn-link {
-  font-family: var(--font); font-size: 13px; cursor: pointer;
+  font-family: var(--font); font-size: 0.8125rem; cursor: pointer;
   border-radius: 6px; transition: background .15s, border-color .15s;
   border: 1px solid transparent; padding: 5px 10px;
   background: transparent; color: var(--text);
@@ -150,10 +157,10 @@ body {
   box-shadow: 0 4px 12px rgba(0,0,0,.12);
 }
 .filter-row { display: flex; align-items: center; gap: 6px; }
-.filter-row label { color: var(--text-muted); font-size: 12px; }
+.filter-row label { color: var(--text-muted); font-size: 0.75rem; }
 .filter-row select, .filter-row input {
   height: 26px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 4px;
-  background: var(--bg); color: var(--text); font-size: 12px; outline: none;
+  background: var(--bg); color: var(--text); font-size: 0.75rem; outline: none;
 }
 /* 这两类控件设了 outline: none 却没有任何配套的 :focus 规则，
    是全站唯一"聚焦后零反馈"的输入控件。 */
@@ -172,7 +179,7 @@ body {
   display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0;
 }
 .sidebar-header {
-  padding: 8px 12px; font-size: 11px; text-transform: uppercase;
+  padding: 8px 12px; font-size: 0.6875rem; text-transform: uppercase;
   letter-spacing: .5px; color: var(--text-muted); border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
@@ -181,7 +188,7 @@ body {
 .tree-row {
   display: flex; align-items: center; gap: 4px;
   padding: 3px 8px; cursor: pointer; white-space: nowrap;
-  font-size: 13px; border-radius: 4px;
+  font-size: 0.8125rem; border-radius: 4px;
 }
 .tree-row:hover { background: var(--hover); }
 .tree-row.active { background: var(--selection); color: var(--text); }
@@ -199,7 +206,7 @@ body {
 .tree-row.file[draggable="true"] { cursor: grab; }
 /* 锁定标记和星标是状态指示，不是装饰，淡化后会掉到 3:1 以下。 */
 .lock-mark { margin-left: auto; opacity: .85; }
-.tree-row .caret { width: 14px; text-align: center; color: var(--text-muted); font-size: 10px; flex-shrink: 0; }
+.tree-row .caret { width: 14px; text-align: center; color: var(--text-muted); font-size: 0.625rem; flex-shrink: 0; }
 .tree-row .icon { width: 16px; text-align: center; flex-shrink: 0; }
 .tree-row .name { overflow: hidden; text-overflow: ellipsis; }
 .tree-children { padding-left: 14px; }
@@ -211,10 +218,10 @@ body {
   padding: 6px 8px; border-radius: 4px; cursor: pointer; margin-bottom: 2px;
 }
 .search-item:hover { background: var(--hover); }
-.search-item .si-title { font-size: 13px; color: var(--text); }
-.search-item .si-meta { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
-.search-item .si-snippet { font-size: 12px; color: var(--text-muted); margin-top: 3px; white-space: pre-wrap; max-height: 3em; overflow: hidden; }
-.search-empty { padding: 20px; text-align: center; color: var(--text-muted); font-size: 13px; }
+.search-item .si-title { font-size: 0.8125rem; color: var(--text); }
+.search-item .si-meta { font-size: 0.6875rem; color: var(--text-muted); margin-top: 2px; }
+.search-item .si-snippet { font-size: 0.75rem; color: var(--text-muted); margin-top: 3px; white-space: pre-wrap; max-height: 3em; overflow: hidden; }
+.search-empty { padding: 20px; text-align: center; color: var(--text-muted); font-size: 0.8125rem; }
 
 /* ===== 分隔条 ===== */
 .resizer {
@@ -224,7 +231,7 @@ body {
 .resizer:hover, .resizer.dragging { background: var(--primary); }
 .resizer::after {
   content: "双击重置"; position: absolute; top: 50%; left: 12px; transform: translateY(-50%);
-  font-size: 10px; color: var(--text-muted); white-space: nowrap;
+  font-size: 0.625rem; color: var(--text-muted); white-space: nowrap;
   opacity: 0; transition: opacity .15s; pointer-events: none;
 }
 .resizer:hover::after { opacity: .8; }
@@ -234,7 +241,7 @@ body {
 .status-bar {
   position: absolute; bottom: 0; left: 0; right: 0;
   display: flex; align-items: center; justify-content: space-between;
-  padding: 4px 14px; font-size: 11px; color: var(--text-muted);
+  padding: 4px 14px; font-size: 0.6875rem; color: var(--text-muted);
   background: var(--bg-alt); border-top: 1px solid var(--border);
   z-index: 10; flex-shrink: 0;
 }
@@ -243,9 +250,9 @@ body {
   flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
   color: var(--text-muted); gap: 10px;
 }
-.empty-icon { font-size: 48px; opacity: .5; }
+.empty-icon { font-size: 3rem; opacity: .5; }
 .empty-state h2 { font-weight: 500; color: var(--text); }
-.empty-desc { font-size: 14px; }
+.empty-desc { font-size: 0.875rem; }
 .empty-actions { display: flex; gap: 10px; margin-top: 4px; }
 .stats-panel {
   margin-top: 20px; display: flex; flex-wrap: wrap; gap: 10px; justify-content: center;
@@ -256,22 +263,22 @@ body {
   padding: 10px 16px; border-radius: 8px; min-width: 80px;
   background: var(--bg-alt); border: 1px solid var(--border);
 }
-.stat-card .stat-num { font-size: 22px; font-weight: 600; color: var(--primary); }
-.stat-card .stat-label { font-size: 11px; color: var(--text-muted); }
+.stat-card .stat-num { font-size: 1.375rem; font-weight: 600; color: var(--primary); }
+.stat-card .stat-label { font-size: 0.6875rem; color: var(--text-muted); }
 
 /* ===== 最近打开 ===== */
 .recent-panel { margin-top: 28px; max-width: 560px; width: 100%; text-align: left; }
-.recent-title { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: .5px; }
+.recent-title { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: .5px; }
 .recent-list { display: flex; flex-direction: column; gap: 4px; }
 .recent-item {
   display: flex; align-items: center; gap: 8px; padding: 8px 12px;
   border-radius: 6px; cursor: pointer; background: var(--bg-alt); border: 1px solid var(--border);
-  font-size: 13px; transition: background .12s;
+  font-size: 0.8125rem; transition: background .12s;
 }
 .recent-item:hover { background: var(--hover); }
-.recent-item .ri-icon { font-size: 16px; }
+.recent-item .ri-icon { font-size: 1rem; }
 .recent-item .ri-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
-.recent-item .ri-stage { font-size: 11px; color: var(--text-muted); }
+.recent-item .ri-stage { font-size: 0.6875rem; color: var(--text-muted); }
 
 .content-area { flex: 1; display: flex; flex-direction: column; min-height: 0; padding-bottom: 28px; }
 .tabs-bar {
@@ -282,7 +289,7 @@ body {
 .tabs-bar.hidden { display: none; }
 .tab {
   display: flex; align-items: center; gap: 6px; padding: 6px 10px; min-width: 80px; max-width: 180px;
-  border-radius: 6px 6px 0 0; cursor: pointer; font-size: 12px; color: var(--text-muted);
+  border-radius: 6px 6px 0 0; cursor: pointer; font-size: 0.75rem; color: var(--text-muted);
   border: 1px solid transparent; border-bottom: none; user-select: none; position: relative;
 }
 .tab:hover { background: var(--hover); color: var(--text); }
@@ -293,14 +300,14 @@ body {
 .tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .tab-close {
   border: none; background: transparent; color: var(--text-muted); cursor: pointer;
-  font-size: 11px; padding: 0 2px; border-radius: 3px; line-height: 1; flex-shrink: 0;
+  font-size: 0.6875rem; padding: 0 2px; border-radius: 3px; line-height: 1; flex-shrink: 0;
 }
 .tab-close:hover { background: var(--danger-solid); color: var(--on-solid); }
 .content-header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0; gap: 10px;
 }
-.breadcrumb { font-size: 13px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.breadcrumb { font-size: 0.8125rem; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .breadcrumb .bc-current { color: var(--text); font-weight: 500; }
 .content-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .content-more { display: none; }
@@ -310,7 +317,7 @@ body {
   background: var(--bg-alt); border-bottom: 1px solid var(--border); flex-shrink: 0;
 }
 .meta-chip {
-  font-size: 11px; padding: 2px 8px; border-radius: 10px;
+  font-size: 0.6875rem; padding: 2px 8px; border-radius: 10px;
   background: var(--bg); border: 1px solid var(--border); color: var(--text-muted);
 }
 .meta-chip.stage { color: var(--primary); border-color: var(--primary); }
@@ -323,7 +330,7 @@ body {
 .editor-wrap { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 12px 14px; }
 .editor {
   flex: 1; width: 100%; resize: none; border: 1px solid var(--border); border-radius: 6px;
-  padding: 12px; font-family: var(--mono); font-size: 13px; line-height: 1.6;
+  padding: 12px; font-family: var(--mono); font-size: 0.8125rem; line-height: 1.6;
   background: var(--bg); color: var(--text); outline: none;
   user-select: text; -webkit-user-select: text;
 }
@@ -352,7 +359,7 @@ body {
 .markdown-body pre code { background: none; padding: 0; font-size: .85em; }
 .code-copy-btn {
   position: absolute; top: 6px; right: 6px;
-  padding: 2px 10px; font-size: 11px; cursor: pointer;
+  padding: 2px 10px; font-size: 0.6875rem; cursor: pointer;
   border: 1px solid var(--border); border-radius: 4px;
   background: var(--bg); color: var(--text-muted);
   opacity: 0; transition: opacity .15s;
@@ -387,10 +394,10 @@ mark {
 .render-degraded {
   padding: 8px 12px; margin-bottom: 12px; border-radius: 6px;
   background: var(--diff-del-bg); color: var(--diff-del-text);
-  border: 1px solid var(--danger); font-size: 12px;
+  border: 1px solid var(--danger); font-size: 0.75rem;
 }
 .render-plain {
-  font-family: var(--mono); font-size: 12px; line-height: 1.6;
+  font-family: var(--mono); font-size: 0.75rem; line-height: 1.6;
   white-space: pre-wrap; word-break: break-word;
   background: var(--code-bg); padding: 12px; border-radius: 6px;
   user-select: text; -webkit-user-select: text;
@@ -410,35 +417,43 @@ mark {
   /* 连线承载流程结构，不是装饰。opacity: .5 下混出来只有 2.03:1。 */
   fill: none; stroke: var(--flow-edge); stroke-width: 2;
 }
+/* 层间距同样跟着字号缩：节点缩小了而层距不变，图会散成一条稀疏的竖线。
+   连线由 drawFlowEdges 在布局后按实际坐标重算，不用额外改。 */
 .flow-layer {
-  display: flex; align-items: center; justify-content: center; gap: 18px;
-  padding: 18px 0; position: relative; z-index: 1;
+  display: flex; align-items: center; justify-content: center; gap: 1.125rem;
+  padding: 1.125rem 0; position: relative; z-index: 1;
 }
+/* 这里的 padding 和宽度是故意写 rem 的，和全局「只缩字号、不缩间距」的规矩相反。
+   原因是节点的内边距（14/22px）相对字号本来就大：到 60% 档文字只剩 8.4px，
+   而固定的 28px 竖向内边距会让节点变成「小字困在大盒子里」——
+   正是用户最初抱怨流程图「不协调」的那个毛病，只是方向反了。
+   节点是画布里的独立方块、不参与窄窗口断点计算，整体跟着字号缩是安全的。
+   1 倍档下算出来和原来的 px 完全相等，所以 90%/100% 的观感不变。 */
 .flow-node {
   display: inline-flex; align-items: center; justify-content: center;
-  padding: 14px 22px; border-radius: 10px; cursor: pointer;
+  padding: 0.875rem 1.375rem; border-radius: 10px; cursor: pointer;
   background: var(--bg); border: 2px solid var(--primary); color: var(--text);
-  font-size: 14px; font-weight: 500; min-width: 120px; max-width: 220px;
+  font-size: 0.875rem; font-weight: 500; min-width: 7.5rem; max-width: 13.75rem;
   text-align: center; transition: transform .12s, box-shadow .12s, background .12s;
   box-shadow: 0 1px 3px rgba(0,0,0,.08); user-select: none; position: relative; z-index: 1;
 }
 .flow-node:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(37,99,235,.25); background: var(--selection); }
-.flow-arrow { color: var(--text-muted); font-size: 20px; padding: 0 8px; user-select: none; }
+.flow-arrow { color: var(--text-muted); font-size: 1.25rem; padding: 0 8px; user-select: none; }
 .flow-title {
-  font-size: 16px; font-weight: 600; margin: 8px 0; text-align: center; color: var(--text);
+  font-size: 1rem; font-weight: 600; margin: 8px 0; text-align: center; color: var(--text);
 }
 /* 引用失效的节点。虚线边框 + ⚠ 两个通道都给：只靠颜色区分，对色觉障碍用户等于没标。
    在此之前坏引用的节点和正常节点长得一模一样——workflow 里的 prompt 路径指向一个
    已经被改名或删掉的文件，图照常画出来，只有点下去才发现打不开，
    而那个报错还和真正的读盘失败共用一句"打开失败"（见 renderer.js 的 flowIssueText）。 */
 .flow-node.broken { border-style: dashed; border-color: var(--danger); }
-.flow-node-warn { margin-left: 6px; color: var(--danger-text); font-size: 13px; }
+.flow-node-warn { margin-left: 6px; color: var(--danger-text); font-size: 0.8125rem; }
 /* 单个节点的 ⚠ 要凑近看才注意到，而"这个工作流有坏引用"该一眼可见，所以另给一条汇总。
    配色复用 .render-degraded 那一对 token，tests/contrast.test.js 里已经量过。 */
 .flow-warn {
   display: inline-block; margin: 0 0 10px; padding: 6px 12px; border-radius: 6px;
   background: var(--diff-del-bg); color: var(--diff-del-text);
-  border: 1px solid var(--danger); font-size: 12px;
+  border: 1px solid var(--danger); font-size: 0.75rem;
 }
 
 /* ===== 抽屉 ===== */
@@ -459,19 +474,19 @@ mark {
   border-radius: 6px; cursor: pointer; border: 1px solid transparent;
 }
 .version-item:hover { background: var(--hover); }
-.version-item .vi-time { flex: 1; font-size: 13px; }
-.version-item .vi-time small { display: block; color: var(--text-muted); font-size: 11px; margin-top: 2px; }
+.version-item .vi-time { flex: 1; font-size: 0.8125rem; }
+.version-item .vi-time small { display: block; color: var(--text-muted); font-size: 0.6875rem; margin-top: 2px; }
 .version-item .vi-actions { display: flex; gap: 4px; }
 /* 回滚是破坏性操作，要红色警示。同样不能用内联 style（见 .ctx-prompt-actions.stacked）。 */
 .btn-link.danger { color: var(--danger-text); }
-.pin-btn { cursor: pointer; font-size: 16px; opacity: .85; border: none; background: none; }
+.pin-btn { cursor: pointer; font-size: 1rem; opacity: .85; border: none; background: none; }
 .pin-btn.pinned { opacity: 1; color: var(--accent-text); }
 .version-detail { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .version-detail-header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 10px 14px; border-bottom: 1px solid var(--border);
 }
-.version-diff { flex: 1; overflow-y: auto; padding: 14px; font-family: var(--mono); font-size: 12px; line-height: 1.6; user-select: text; }
+.version-diff { flex: 1; overflow-y: auto; padding: 14px; font-family: var(--mono); font-size: 0.75rem; line-height: 1.6; user-select: text; }
 .diff-line { padding: 1px 8px; white-space: pre-wrap; word-break: break-word; }
 .diff-add { background: var(--diff-add-bg); color: var(--diff-add-text); }
 .diff-del { background: var(--diff-del-bg); color: var(--diff-del-text); }
@@ -491,7 +506,7 @@ mark {
   left: 50%; top: 32%; transform: translate(-50%, -32%);
   min-width: 320px; max-width: min(420px, 90vw);
 }
-.ctx-item { padding: 7px 14px; cursor: pointer; border-radius: 4px; font-size: 13px; }
+.ctx-item { padding: 7px 14px; cursor: pointer; border-radius: 4px; font-size: 0.8125rem; }
 /* hover 底色不复用 --selection：那是给文本选区设计的浅色，
    压上危险操作的红字后只有 2.26:1（暗色）。 */
 .ctx-item:hover { background: var(--ctx-hover); }
@@ -500,36 +515,48 @@ mark {
 
 /* ===== 设置抽屉 ===== */
 .settings-body { flex: 1; overflow-y: auto; padding: 14px; }
-.settings-section h3 { font-size: 14px; font-weight: 500; margin: 8px 0 4px; }
+.settings-section h3 { font-size: 0.875rem; font-weight: 500; margin: 8px 0 4px; }
 .lang-toggle { display: flex; gap: 8px; }
 .lang-toggle button.btn-link.active { color: var(--primary); font-weight: 500; }
-.settings-desc { font-size: 12px; color: var(--text-muted); margin: 0 0 10px; }
+/* 字号选择是 7 个档位，只靠 lang-toggle 那样的变色分不清选中的是哪个，
+   所以选中项给足边框 + 底色。边框走 --border-strong（功能性边界要 3:1）。 */
+.font-scale-toggle { display: flex; gap: 6px; flex-wrap: wrap; }
+.font-scale-toggle button.btn-link {
+  border: 1px solid var(--border-strong); padding: 4px 10px;
+  /* 档位按钮自己不跟着缩放，否则选 60% 后按钮也变小、越调越难点。 */
+  font-size: 13px;
+}
+.font-scale-toggle button.btn-link.active {
+  background: var(--primary-solid); color: var(--on-solid);
+  border-color: var(--primary-solid); font-weight: 500;
+}
+.settings-desc { font-size: 0.75rem; color: var(--text-muted); margin: 0 0 10px; }
 /* 设置里的开关行。label 包住 checkbox，所以点文字也能切——键盘 Tab 到 checkbox 后
    空格同样生效，不需要额外的 keydown 处理。 */
 .settings-toggle {
-  display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;
+  display: flex; align-items: center; gap: 8px; font-size: 0.8125rem; cursor: pointer;
 }
 .settings-toggle input { cursor: pointer; }
-.settings-hint { font-size: 11px; color: var(--text-muted); margin: 8px 0 0; }
+.settings-hint { font-size: 0.6875rem; color: var(--text-muted); margin: 8px 0 0; }
 .types-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
 .type-tag {
   display: flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 10px;
-  background: var(--bg-alt); border: 1px solid var(--border); font-size: 12px;
+  background: var(--bg-alt); border: 1px solid var(--border); font-size: 0.75rem;
 }
-.type-tag .btn-link { padding: 0 4px; font-size: 11px; color: var(--danger-text); }
+.type-tag .btn-link { padding: 0 4px; font-size: 0.6875rem; color: var(--danger-text); }
 .types-actions { display: flex; gap: 6px; }
 .types-actions input {
   flex: 1; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px;
-  background: var(--bg); color: var(--text); font-size: 13px; outline: none;
+  background: var(--bg); color: var(--text); font-size: 0.8125rem; outline: none;
 }
 .types-actions input:focus { border-color: var(--focus-ring); box-shadow: 0 0 0 2px var(--focus-ring); }
 
 /* ===== 上下文菜单弹窗表单 ===== */
 .ctx-prompt-wrap { padding: 10px; }
-.ctx-prompt-title { margin-bottom: 6px; font-size: 13px; }
+.ctx-prompt-title { margin-bottom: 6px; font-size: 0.8125rem; }
 .ctx-prompt-input {
   width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 4px;
-  background: var(--bg); color: var(--text); font-size: 13px; outline: none;
+  background: var(--bg); color: var(--text); font-size: 0.8125rem; outline: none;
 }
 .ctx-prompt-input:focus { border-color: var(--focus-ring); box-shadow: 0 0 0 2px var(--focus-ring); }
 .ctx-prompt-actions {
@@ -545,7 +572,7 @@ mark {
 .toast {
   position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
   background: var(--text); color: var(--bg); padding: 10px 18px; border-radius: 8px;
-  font-size: 13px; z-index: 200; box-shadow: 0 4px 16px rgba(0,0,0,.2);
+  font-size: 0.8125rem; z-index: 200; box-shadow: 0 4px 16px rgba(0,0,0,.2);
   opacity: 1; transition: opacity .25s;
 }
 .toast.hidden { opacity: 0; pointer-events: none; }
@@ -568,8 +595,8 @@ mark {
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 18px; border-bottom: 1px solid var(--border); flex-shrink: 0;
 }
-.composer-header h2 { font-size: 15px; font-weight: 600; margin: 0; color: var(--text); }
-.composer-subtitle { font-size: 12px; color: var(--text-muted); margin: 2px 0 0; }
+.composer-header h2 { font-size: 0.9375rem; font-weight: 600; margin: 0; color: var(--text); }
+.composer-subtitle { font-size: 0.75rem; color: var(--text-muted); margin: 2px 0 0; }
 .composer-body {
   flex: 1; display: flex; overflow: hidden; min-height: 0;
 }
@@ -582,10 +609,10 @@ mark {
   background: var(--bg-alt);
 }
 .composer-field { display: flex; flex-direction: column; gap: 5px; }
-.composer-field > label { font-size: 12px; font-weight: 600; color: var(--text); }
+.composer-field > label { font-size: 0.75rem; font-weight: 600; color: var(--text); }
 .composer-field input[type="text"], .composer-field textarea {
   padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-strong);
-  background: var(--bg); color: var(--text); font-family: inherit; font-size: 12.5px;
+  background: var(--bg); color: var(--text); font-family: inherit; font-size: 0.78125rem;
 }
 .composer-field input[type="text"]:focus-visible, .composer-field textarea:focus-visible {
   outline: 2px solid var(--focus-ring); outline-offset: 1px;
@@ -594,17 +621,17 @@ mark {
   display: flex; flex-direction: column; gap: 5px;
 }
 .comp-choice {
-  display: flex; align-items: center; gap: 8px; font-size: 12.5px; cursor: pointer;
+  display: flex; align-items: center; gap: 8px; font-size: 0.78125rem; cursor: pointer;
   padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border);
   background: var(--bg); color: var(--text); transition: background .12s;
 }
 .comp-choice:hover { background: var(--hover); }
 .comp-choice input { cursor: pointer; }
 .composer-preview-header { margin-bottom: 6px; }
-.composer-preview-header label { font-size: 12px; font-weight: 600; color: var(--text); }
+.composer-preview-header label { font-size: 0.75rem; font-weight: 600; color: var(--text); }
 .composer-preview {
   flex: 1; overflow-y: auto; padding: 12px 14px; border-radius: 6px;
-  background: var(--bg); border: 1px solid var(--border); font-size: 12px; line-height: 1.6;
+  background: var(--bg); border: 1px solid var(--border); font-size: 0.75rem; line-height: 1.6;
 }
 .composer-footer {
   display: flex; align-items: center; justify-content: flex-end; gap: 8px;
@@ -619,11 +646,11 @@ mark {
   display: flex; flex-direction: column; overflow: hidden; color: var(--text);
 }
 .conflict-header { padding: 14px 18px 10px; border-bottom: 1px solid var(--border); }
-.conflict-header h2 { margin: 0; font-size: 15px; font-weight: 600; }
-.conflict-detail { margin: 5px 0 0; color: var(--text-muted); font-size: 12.5px; line-height: 1.5; }
+.conflict-header h2 { margin: 0; font-size: 0.9375rem; font-weight: 600; }
+.conflict-detail { margin: 5px 0 0; color: var(--text-muted); font-size: 0.78125rem; line-height: 1.5; }
 .conflict-legend {
   display: flex; gap: 10px; padding: 9px 18px; border-bottom: 1px solid var(--border);
-  font-size: 12px; background: var(--bg-alt);
+  font-size: 0.75rem; background: var(--bg-alt);
 }
 .conflict-legend span { padding: 2px 8px; border-radius: 4px; }
 .conflict-legend-del { background: var(--diff-del-bg); color: var(--diff-del-text); }
@@ -644,7 +671,7 @@ mark {
   padding: 12px 14px; border-radius: 8px; z-index: 150;
   background: var(--bg); border: 1px solid var(--primary);
   box-shadow: 0 4px 16px rgba(0,0,0,.18);
-  font-size: 13px; color: var(--text);
+  font-size: 0.8125rem; color: var(--text);
 }
 .update-banner-actions { display: flex; align-items: center; gap: 4px; justify-content: flex-end; }
 

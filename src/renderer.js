@@ -2425,6 +2425,51 @@ async function toggleTheme() {
   }
 }
 
+// ===== 界面字号 =====
+// 只动 --font-scale（styles.css 里 html 的 font-size 由它算出来），不碰 setZoomFactor：
+// 页面缩放会连 padding、控件高度和窄窗口断点一起缩，而用户要的只是「字小一点」。
+// 档位要和 index.html 里的按钮逐个对应，冒烟测试会比对两边（只改一边等于
+// 按钮点了归一化成别的档，或者档位选不到）。
+// 下探到 0.6 是按用户要求给的：那一档根字号 9.6px，状态栏和侧栏标题落到 6.6px，
+// 1080p 屏上中文已经很难认，但高分屏 + 系统缩放下是合理的，所以给选项、不设为默认。
+const FONT_SCALES = [0.6, 0.7, 0.8, 0.9, 1, 1.1, 1.25];
+const DEFAULT_FONT_SCALE = 0.9;
+// 配置可能被手改坏（装过旧版、或者直接编辑 config.json）。
+// 非法值一律回落到默认，不要把 NaN 塞进 CSS——那会让 calc() 整条失效，
+// 根字号掉回浏览器默认 16px，所有 rem 跟着错，表现是「字突然变大」。
+function normalizeFontScale(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return DEFAULT_FONT_SCALE;
+  // <= 让正中间的值取较大档（旧配置里的 0.85 落到 0.9 而不是 0.8）：
+  // 字号这事偏大比偏小安全，猜错了至少还看得见。
+  return FONT_SCALES.reduce((best, s) => Math.abs(s - n) <= Math.abs(best - n) ? s : best, FONT_SCALES[0]);
+}
+function applyFontScale(scale) {
+  document.documentElement.style.setProperty('--font-scale', String(scale));
+}
+function updateFontScaleButtons() {
+  const group = $('font-scale-toggle');
+  if (!group) return;
+  const cur = normalizeFontScale(state.config.fontScale);
+  group.querySelectorAll('button[data-scale]').forEach(btn => {
+    btn.classList.toggle('active', Number(btn.dataset.scale) === cur);
+    btn.setAttribute('aria-pressed', Number(btn.dataset.scale) === cur ? 'true' : 'false');
+  });
+}
+async function setFontScale(scale) {
+  const next = normalizeFontScale(scale);
+  if (normalizeFontScale(state.config.fontScale) === next) return;
+  state.config.fontScale = next;
+  applyFontScale(next);
+  updateFontScaleButtons();
+  // 和 toggleTheme 一致：视觉已经生效，不回滚，写盘失败就明确说"没存住"。
+  try {
+    await api.setConfig({ fontScale: next });
+  } catch (e) {
+    toast(describeError(e), 'error');
+  }
+}
+
 // ===== 语言切换 =====
 function updateLangButtons() {
   const z = $('btn-lang-zh'), e = $('btn-lang-en');
@@ -2612,6 +2657,9 @@ async function init() {
   if (!state.config.lang) state.config.lang = 'zh';
   document.documentElement.lang = state.config.lang === 'en' ? 'en' : 'zh-CN';
   updateLangButtons();
+  state.config.fontScale = normalizeFontScale(state.config.fontScale);
+  applyFontScale(state.config.fontScale);
+  updateFontScaleButtons();
 
   marked.setOptions({ breaks: true, gfm: true });
   applyI18n();
@@ -2677,6 +2725,13 @@ async function init() {
   // 语言切换
   if ($('btn-lang-zh')) $('btn-lang-zh').onclick = () => setLang('zh');
   if ($('btn-lang-en')) $('btn-lang-en').onclick = () => setLang('en');
+  // 字号档位。按钮是静态的，直接委托到容器上，省去逐个绑定。
+  if ($('font-scale-toggle')) {
+    $('font-scale-toggle').onclick = (e) => {
+      const btn = e.target.closest('button[data-scale]');
+      if (btn) setFontScale(btn.dataset.scale);
+    };
+  }
 
   // 搜索
   $('search-box').addEventListener('input', (e) => doSearch(e.target.value));

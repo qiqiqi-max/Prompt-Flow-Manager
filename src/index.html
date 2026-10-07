@@ -178,6 +178,20 @@
           </div>
         </div>
         <div class="settings-section">
+          <h3 data-i18n="settingsFontScale">界面字号</h3>
+          <p class="settings-desc" data-i18n="fontScaleDesc">只改界面文字大小，不改窗口缩放。改完立即生效。</p>
+          <div class="font-scale-toggle" id="font-scale-toggle" role="group" data-i18n-aria="settingsFontScale">
+            <button class="btn-link" data-scale="0.6">60%</button>
+            <button class="btn-link" data-scale="0.7">70%</button>
+            <button class="btn-link" data-scale="0.8">80%</button>
+            <button class="btn-link" data-scale="0.9">90%</button>
+            <button class="btn-link" data-scale="1">100%</button>
+            <button class="btn-link" data-scale="1.1">110%</button>
+            <button class="btn-link" data-scale="1.25">125%</button>
+          </div>
+          <p class="settings-hint" data-i18n="fontScaleHint">默认 90%。100% 等于 1.6 版的大小；60%／70% 很小，适合高分屏。</p>
+        </div>
+        <div class="settings-section">
           <h3 data-i18n="settingsUpdate">升级检查</h3>
           <!-- 这是本应用唯一主动出网的地方，说明文字必须把"查什么、不查什么"写清楚，
                并且开关就在旁边。不能只给一个勾选框让用户猜它到底会发什么出去。 -->

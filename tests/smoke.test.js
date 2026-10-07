@@ -597,6 +597,68 @@ assert(/function showCenteredMenu\(/.test(rendererSrc), '有统一的居中显�
   assert(/\.ctx-centered[\s\S]{0,120}left:\s*50%/.test(cssSrc), '.ctx-centered 显式设置了 left');
   assert(/\.ctx-centered[\s\S]{0,120}top:/.test(cssSrc), '.ctx-centered 显式设置了 top');
 }
+section('界面字号缩放');
+// 字号缩放全靠 html 的 font-size 乘 --font-scale，所有 font-size 必须写 rem。
+// 这条断言是这套机制唯一的门禁：随手写一个 font-size: 13px 不会报错、界面看着也正常，
+// 只是那一处从此不跟着用户的档位缩放——而且要等用户调了档位才会发现漏了哪里。
+{
+  const cssSrc = fs.readFileSync(path.join(root, 'src/styles.css'), 'utf8');
+  assert(/html\s*\{[^}]*font-size:\s*calc\(16px \* var\(--font-scale\)\)/.test(cssSrc),
+    'html 的 font-size 由 --font-scale 算出');
+  assert(/--font-scale:\s*1;/.test(cssSrc), ':root 里 --font-scale 默认 1');
+  // 档位按钮自己是故意写死 px 的：选 60% 后按钮不该跟着变小，否则越调越难点。
+  const pxFontSizes = [...cssSrc.matchAll(/font-size:\s*[\d.]+px/g)]
+    .filter(m => {
+      const before = cssSrc.slice(0, m.index);
+      const rule = before.slice(before.lastIndexOf('}') + 1);
+      return !/\.font-scale-toggle/.test(rule);
+    });
+  assert(pxFontSizes.length === 0,
+    'font-size 一律用 rem（发现 ' + pxFontSizes.length + ' 处 px：' + pxFontSizes.map(m => m[0]).join(', ') + '）');
+  assert(/\.font-scale-toggle button\.btn-link[\s\S]{0,200}font-size:\s*13px/.test(cssSrc),
+    '档位按钮本身不跟着缩放（故意的 px 例外还在）');
+  // 流程图节点反过来：它的内边距必须跟着字号缩。
+  // 写死 14px 的话，60% 档下文字只剩 8.4px 而竖向内边距还是 28px，
+  // 每个节点都变成"小字困在大盒子里"，正是用户最初抱怨的那种"不协调"。
+  const flowNodeRule = cssSrc.match(/\.flow-node \{[^}]*\}/);
+  assert(flowNodeRule, '找到 .flow-node 规则');
+  assert(/padding:\s*[\d.]+rem\s+[\d.]+rem/.test(flowNodeRule[0]),
+    '流程图节点内边距用 rem（跟着字号缩）');
+  assert(!/min-width:\s*[\d.]+px/.test(flowNodeRule[0]),
+    '流程图节点最小宽度不写死 px');
+}
+assert(/const FONT_SCALES = \[/.test(rendererSrc), '渲染进程有档位白名单 FONT_SCALES');
+// 档位清单有两份（renderer 的白名单 + index.html 的按钮），只改一边不会报错：
+// 多出来的按钮点下去会被归一化成邻近档（表现是"点 60% 跳到 70%"），
+// 少掉的按钮则是档位根本选不到。必须逐个对上。
+{
+  const htmlSrc2 = fs.readFileSync(path.join(root, 'src/index.html'), 'utf8');
+  const whitelist = rendererSrc.match(/const FONT_SCALES = \[([^\]]+)\]/)[1]
+    .split(',').map(s => Number(s.trim()));
+  const buttons = [...htmlSrc2.matchAll(/data-scale="([\d.]+)"/g)].map(m => Number(m[1]));
+  assert(whitelist.length >= 2, 'FONT_SCALES 解析出多个档位（' + whitelist.length + ' 个）');
+  assert(JSON.stringify(whitelist) === JSON.stringify(buttons),
+    '档位按钮与 FONT_SCALES 逐个一致（白名单 ' + whitelist.join('/') + '，按钮 ' + buttons.join('/') + '）');
+  assert(whitelist.includes(0.6), '最低档到 60%');
+  // 主进程存的默认值必须是个真实档位，否则启动就被归一化成别的档，
+  // "默认 90%" 的说法和实际不符。
+  const mainDefault = Number(fs.readFileSync(path.join(root, 'electron-main.js'), 'utf8')
+    .match(/fontScale:\s*([\d.]+),/)[1]);
+  assert(whitelist.includes(mainDefault), '主进程默认值 ' + mainDefault + ' 是白名单里的档位');
+  const rendererDefault = Number(rendererSrc.match(/const DEFAULT_FONT_SCALE = ([\d.]+);/)[1]);
+  assert(rendererDefault === mainDefault,
+    '两端默认档位一致（渲染 ' + rendererDefault + '，主进程 ' + mainDefault + '）');
+}
+assert(/function normalizeFontScale/.test(rendererSrc), '有非法值归一化 normalizeFontScale');
+// NaN 塞进 calc() 会让整条声明失效、根字号掉回 16px，表现是"字突然变大"。
+assert(/if \(!Number\.isFinite\(n\)\) return DEFAULT_FONT_SCALE;/.test(rendererSrc),
+  '非有限值回落到默认档位，不会把 NaN 写进 CSS');
+assert(/applyFontScale\(state\.config\.fontScale\)/.test(rendererSrc), '启动时应用保存的档位');
+{
+  const mainSrc2 = fs.readFileSync(path.join(root, 'electron-main.js'), 'utf8');
+  assert(/fontScale:\s*0\.9,/.test(mainSrc2), '主进程默认字号档位 0.9');
+}
+
 assert(/showCenteredMenu\(\);\s*\n\s*const inp = \$\('ctx-input'\)/.test(rendererSrc), 'promptInput 用居中显示');
 assert(/menu\.classList\.remove\('ctx-centered'\); \/\/ 右键菜单按坐标定位/.test(rendererSrc),
   '右键菜单会清掉居中态，按坐标定位');
