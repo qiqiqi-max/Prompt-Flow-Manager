@@ -2045,14 +2045,20 @@ function highlightTerm(rawText, q) {
   }
   return out.join('');
 }
+// 竞态守卫（同 updateComposerPreview）：debounce 只合并输入，不阻止上一次 IPC 还在路上。
+// 大库里旧查询慢、新查询快时，旧结果后到会把新结果盖掉；清空搜索框后，
+// 还在路上的那次也会把结果列表重新弹出来。所以清空也要推进序号。
+let searchSeq = 0;
 const doSearch = debounce(async (q) => {
   const box = $('search-results');
+  const seq = ++searchSeq;
   if (!q) {
     box.classList.add('hidden');
     $('tree').classList.remove('hidden');
     return;
   }
   const results = await api.search(q);
+  if (seq !== searchSeq) return;
   $('tree').classList.add('hidden');
   box.classList.remove('hidden');
   if (!results.length) {

@@ -622,6 +622,19 @@ assert(/function showCenteredMenu\(/.test(rendererSrc), '有统一的居中显�
   assert(/\.ctx-centered[\s\S]{0,120}left:\s*50%/.test(cssSrc), '.ctx-centered 显式设置了 left');
   assert(/\.ctx-centered[\s\S]{0,120}top:/.test(cssSrc), '.ctx-centered 显式设置了 top');
 }
+section('异步结果不乱序');
+// debounce 只合并输入，不阻止上一次 IPC 还在路上：旧查询后到会盖掉新结果。
+// 行为测不了（api 被 contextBridge 冻结，没法在自检里注入慢响应），这里查守卫的形状：
+// 序号在函数第一件事就推进（清空分支也要推进），await 之后立刻比对。
+{
+  const m = rendererSrc.match(/const doSearch = debounce\(async \(q\) => \{([\s\S]*?)\n\}, \d+\);/);
+  const body = m ? m[1] : '';
+  assert(/^\s*const box = \$\('search-results'\);\s*const seq = \+\+searchSeq;/.test(body),
+    'doSearch 一进来就推进序号（清空搜索框也会作废在途查询）');
+  assert(/const results = await api\.search\(q\);\s*if \(seq !== searchSeq\) return;/.test(body),
+    'doSearch 拿到结果后先比对序号再渲染');
+}
+
 section('界面字号缩放');
 // 字号缩放全靠 html 的 font-size 乘 --font-scale，所有 font-size 必须写 rem。
 // 这条断言是这套机制唯一的门禁：随手写一个 font-size: 13px 不会报错、界面看着也正常，
