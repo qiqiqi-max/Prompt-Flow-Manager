@@ -229,6 +229,19 @@
         }
       }
 
+      // ---- 连续提示不会被上一条的计时器提前收走 ----
+      {
+        const box = document.getElementById('toast');
+        toast('selftest-toast-1');
+        await sleep(1200);
+        toast('selftest-toast-2');
+        await sleep(1000);
+        check('第二条提示不被第一条的计时器提前隐藏', !box.classList.contains('hidden') && box.textContent === 'selftest-toast-2',
+          'hidden=' + box.classList.contains('hidden') + ' text=' + box.textContent);
+        await sleep(1000);
+        check('提示到时会自动隐藏', box.classList.contains('hidden'));
+      }
+
       // ---- 右键菜单 ----
       const fileRow = document.querySelector('#tree .tree-row.file') || document.querySelector('#tree .tree-row');
       if (fileRow) {

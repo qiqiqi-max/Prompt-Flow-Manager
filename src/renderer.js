@@ -240,11 +240,15 @@ function fileNameNoExt(name) {
   return name.replace(/\.md$/i, '');
 }
 
+// 新提示要清掉上一条的计时器：否则 1.8 秒内连弹两条（比如"保存失败"紧跟在
+// "已复制"后面），第二条会被第一条的计时器提前收走，错误提示一闪而过。
+let toastTimer = null;
 function toast(msg, type = '') {
-  const t = $('toast');
-  t.textContent = msg;
-  t.className = 'toast ' + type;
-  setTimeout(() => t.classList.add('hidden'), 1800);
+  const el = $('toast');
+  el.textContent = msg;
+  el.className = 'toast ' + type;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.add('hidden'), 1800);
 }
 
 async function confirmDialog(msg) {

@@ -87,7 +87,9 @@ child.on('exit', (code) => {
     /\[selftest:ui\] PASS 方向键不会跳进折叠目录里看不见的文件/,
     /\[selftest:ui\] PASS 能挑出一个只命中部分文件的阶段用于验证筛选/,
     /\[selftest:ui\] PASS 刷新文件树后筛选仍然生效/,
-    /\[selftest:ui\] PASS 刷新文件树后筛选下拉框保持选中值/
+    /\[selftest:ui\] PASS 刷新文件树后筛选下拉框保持选中值/,
+    /\[selftest:ui\] PASS 第二条提示不被第一条的计时器提前隐藏/,
+    /\[selftest:ui\] PASS 提示到时会自动隐藏/
   ];
   const missing = mustHave.filter(re => !re.test(out));
   if (missing.length) console.error('[test:ui] 缺少必需的检查项: ' + missing.map(String).join(', '));
