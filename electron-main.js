@@ -356,20 +356,32 @@ const WRITABLE_TOPS = new Set(['prompts', 'workflows', 'templates']);
 // 这条只锁文件名，不锁目标目录（目录由用户每次弹框确认），语义和
 // safeJoinWritable 的"数据目录白名单"互补。
 const RULE_EXPORT_ALLOWED = new Set(['CLAUDE.md', '.cursorrules']);
-function safeJoinWritable(relPath) {
-  const resolved = safeJoin(relPath);
+function contentPathAllowed(resolved, { allowGitkeep }) {
   const rel = path.relative(DATA_ROOT_NORM, resolved).replace(/\\/g, '/');
   const segs = rel.split('/');
   // 必须落在 prompts/ workflows/ templates/ 之下，且不能就是顶层目录本身
-  if (segs.length < 2 || !WRITABLE_TOPS.has(segs[0])) throw appError('E_WRITE_FORBIDDEN', relPath);
+  if (segs.length < 2 || !WRITABLE_TOPS.has(segs[0])) return false;
   // 任何一段以 . 开头都拒绝（.versions/.trash/.git 都在这条上），唯一例外是
   // newFolder 用来占位的 .gitkeep 文件名本身。
   const base = segs[segs.length - 1];
   for (const s of segs.slice(0, -1)) {
-    if (s.startsWith('.')) throw appError('E_WRITE_FORBIDDEN', relPath);
+    if (s.startsWith('.')) return false;
   }
   const isMd = base.toLowerCase().endsWith('.md') && base !== '.md';
-  if (!isMd && base !== '.gitkeep') throw appError('E_WRITE_FORBIDDEN', relPath);
+  return isMd || (allowGitkeep && base === '.gitkeep');
+}
+function safeJoinWritable(relPath) {
+  const resolved = safeJoin(relPath);
+  if (!contentPathAllowed(resolved, { allowGitkeep: true })) throw appError('E_WRITE_FORBIDDEN', relPath);
+  return resolved;
+}
+// 读取用同一套白名单（不含 .gitkeep）。safeJoin 只防逃出 DATA_ROOT，而打包后
+// DATA_ROOT 是 userData：config.json、logs/、drafts/ 都在里面；开发模式下是仓库根，
+// .git/config 也在。read-file 的结果直接显示在预览区，工作流 flow[].prompt 又能写
+// 任意相对路径，点一下节点就能把这些文件读出来。
+function safeJoinReadable(relPath) {
+  const resolved = safeJoin(relPath);
+  if (!contentPathAllowed(resolved, { allowGitkeep: false })) throw appError('E_READ_FORBIDDEN', relPath);
   return resolved;
 }
 
@@ -813,7 +825,7 @@ ipcMain.handle('list-tree-and-meta', async () => {
 });
 
 ipcMain.handle('read-file', async (e, rel) => {
-  const full = safeJoin(rel);
+  const full = safeJoinReadable(rel);
   const content = await fsp.readFile(full, 'utf8');
   const { meta } = parseFrontmatter(content);
   return { content, meta };
@@ -1347,7 +1359,7 @@ async function collectBackupFiles(portableConfig) {
 }
 
 ipcMain.handle('export-single', async (e, rel) => {
-  const full = safeJoin(rel);
+  const full = safeJoinReadable(rel);
   const content = await fsp.readFile(full, 'utf8');
   const meta = parseFrontmatter(content).meta;
   const fileName = safeExportName(meta.title || path.basename(rel, '.md'));

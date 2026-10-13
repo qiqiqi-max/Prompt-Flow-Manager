@@ -367,6 +367,12 @@ section('ZIP 真实往返（压缩 → 解压）');
   assert(/path\.relative\(versionsDir, resolved\)/.test(versionSrc), 'versionDirFor 做了越权校验');
   assert(/relV\.startsWith\('\.\.'\) \|\| path\.isAbsolute\(relV\)/.test(versionSrc), 'versionDirFor 同时判了 isAbsolute（跨盘符）');
   assert(/rel2\.startsWith\('\.\.'\) \|\| path\.isAbsolute\(rel2\)/.test(mainSrc), 'safeJoin 同时判了 isAbsolute（跨盘符）');
+  // 防回归：read-file / export-single 只过 safeJoin 时，config.json、logs/、.git/ 都能读出来。
+  // read-file 的实际拒绝行为由 test:fn 验证；export-single 要弹保存框，这里只查入口。
+  assert(/ipcMain\.handle\('read-file', async \(e, rel\) => \{\s*const full = safeJoinReadable\(rel\);/.test(mainSrc),
+    'read-file 走读取白名单');
+  assert(/ipcMain\.handle\('export-single', async \(e, rel\) => \{\s*const full = safeJoinReadable\(rel\);/.test(mainSrc),
+    'export-single 走读取白名单');
   assert(/function isSelfUrl\(/.test(mainSrc), '导航守卫有 isSelfUrl 白名单判定');
   assert(!/url\.startsWith\('file:\/\/'\)\) return/.test(mainSrc), 'will-navigate 不再放行任意 file:// URL');
   assert(/VERSION_FILE_RE\.test\(name\)/.test(versionSrc), '版本文件名有白名单校验');
