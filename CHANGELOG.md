@@ -36,6 +36,9 @@
   而打包后数据目录就是 userData，`config.json`、日志、草稿都能经由预览区读出来
   （工作流 `flow[].prompt` 写个相对路径、点一下节点即可）。现在和写入共用同一套白名单：
   只放行 prompts / workflows / templates 下的 `.md`，其余返回新错误码 `E_READ_FORBIDDEN`。
+- **`config.json` 损坏不再被默认值覆盖**：原先解析失败静默回落默认值，下一次任何保存
+  （如窗口位置）就把默认值整份写回，锁定、项目类型、标签页全部丢失且无从恢复。
+  现在损坏文件先改名为 `config.json.corrupt-<时间戳>` 留档（`lib/config-file.js`）。
 
 ## [1.6.0] - 2026-09-20
 

@@ -135,6 +135,10 @@ jobs:
       - name: 草稿存储
         run: npm run test:draft-store
 
+      # 配置文件损坏时改名留档，而不是被下一次保存用默认值覆盖。自带反向对照。
+      - name: 配置文件读取
+        run: npm run test:config-file
+
       # 纯逻辑测试，不用起 Electron：从 renderer.js 里抠出 debounce 单独验语义。
       # 自带反向对照（旧版一行 debounce 必须失败），所以它不会变成永远绿的空壳。
       - name: debounce 语义

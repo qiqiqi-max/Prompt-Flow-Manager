@@ -373,6 +373,11 @@ section('ZIP 真实往返（压缩 → 解压）');
     'read-file 走读取白名单');
   assert(/ipcMain\.handle\('export-single', async \(e, rel\) => \{\s*const full = safeJoinReadable\(rel\);/.test(mainSrc),
     'export-single 走读取白名单');
+  // 防回归：config.json 解析失败时裸 catch 回落默认值，下一次保存就把坏文件整份覆盖。
+  // 损坏留档的行为由 test:config-file 验证，这里只查 loadConfig 真的走了它。
+  assert(/async function loadConfig\(\) \{[\s\S]*?const cfg = await readConfigFile\(CONFIG_PATH/.test(mainSrc)
+    && !/JSON\.parse\(await fsp\.readFile\(CONFIG_PATH/.test(mainSrc),
+  'loadConfig 走 readConfigFile（损坏时留档）');
   assert(/function isSelfUrl\(/.test(mainSrc), '导航守卫有 isSelfUrl 白名单判定');
   assert(!/url\.startsWith\('file:\/\/'\)\) return/.test(mainSrc), 'will-navigate 不再放行任意 file:// URL');
   assert(/VERSION_FILE_RE\.test\(name\)/.test(versionSrc), '版本文件名有白名单校验');

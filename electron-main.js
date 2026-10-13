@@ -108,6 +108,7 @@ const { createImportTransaction } = require('./lib/import-transaction');
 const { createWriteGate } = require('./lib/write-gate');
 const { safeExportName, writeExportFile } = require('./lib/export-file');
 const { createDraftStore } = require('./lib/draft-store');
+const { readConfigFile } = require('./lib/config-file');
 // 原生菜单的文案也要跟随语言。i18n.js 结尾有 module.exports，可以直接在主进程 require，
 // 不必再维护第二份翻译表（之前菜单是硬编码中文，切到英文后整个菜单栏还是中文）。
 const I18N_TABLE = require('./src/i18n.js');
@@ -541,12 +542,9 @@ async function loadConfig() {
     updateLastCheckedAt: null,
     updateSkipVersion: null
   };
-  try {
-    const cfg = JSON.parse(await fsp.readFile(CONFIG_PATH, 'utf8'));
-    return { ...defaults, ...cfg, windowBounds: { ...defaults.windowBounds, ...(cfg.windowBounds || {}) } };
-  } catch {
-    return defaults;
-  }
+  const cfg = await readConfigFile(CONFIG_PATH, { logError: (...a) => console.error(...a) });
+  if (!cfg) return defaults;
+  return { ...defaults, ...cfg, windowBounds: { ...defaults.windowBounds, ...(cfg.windowBounds || {}) } };
 }
 // 返回是否真的写成功。原先这里把错误吞掉只 console.error，
 // 于是 set-config 照样 resolve、渲染进程以为存上了，实际磁盘没变。
