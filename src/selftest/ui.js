@@ -169,6 +169,34 @@
         }
       }
 
+      // ---- 筛选在刷新树之后仍然生效 ----
+      // renderTree 重建的行全部可见，populateFilters 用 innerHTML 重建下拉框会把选中值清掉。
+      // 原先 refreshTree 之后两样都不恢复：state.filter 还是旧条件，树和下拉框却回到"全部"。
+      {
+        const visibleFiles = () => Array.from(document.querySelectorAll('#tree .tree-row.file'))
+          .filter(r => r.style.display !== 'none');
+        const total = visibleFiles().length;
+        const stageCounts = {};
+        for (const r of visibleFiles()) {
+          const s = stageOfRel(r.__rel);
+          if (s) stageCounts[s] = (stageCounts[s] || 0) + 1;
+        }
+        const stage = Object.keys(stageCounts).find(s => stageCounts[s] < total);
+        check('能挑出一个只命中部分文件的阶段用于验证筛选', !!stage, JSON.stringify(stageCounts) + ' / ' + total);
+        if (stage) {
+          document.getElementById('filter-stage').value = stage;
+          applyFilter();
+          const before = visibleFiles().length;
+          await refreshTree();
+          const after = visibleFiles().length;
+          check('刷新文件树后筛选仍然生效', before > 0 && before < total && after === before,
+            '筛选后 ' + before + '，刷新后 ' + after + '，总数 ' + total);
+          check('刷新文件树后筛选下拉框保持选中值', document.getElementById('filter-stage').value === stage,
+            '下拉框是 "' + document.getElementById('filter-stage').value + '"，应为 "' + stage + '"');
+          await realClick(document.getElementById('btn-filter-clear'));
+        }
+      }
+
       // ---- 右键菜单 ----
       const fileRow = document.querySelector('#tree .tree-row.file') || document.querySelector('#tree .tree-row');
       if (fileRow) {

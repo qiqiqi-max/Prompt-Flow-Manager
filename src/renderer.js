@@ -352,6 +352,7 @@ async function refreshTree() {
   setMetaList(meta);
   renderTree();
   populateFilters();
+  filterTreeRows();
   updateStatusCounts();
   renderStats();
   renderRecent();
@@ -2064,9 +2065,16 @@ const doSearch = debounce(async (q) => {
 function populateFilters() {
   const stageSel = $('filter-stage');
   const typeSel = $('filter-type');
-  stageSel.innerHTML = '<option value="">' + escapeHtml(t('allStagesOption')) + '</option>' + state.stages.map(s => `<option value="${s}">${escapeHtml(dirLabel(s))}</option>`).join('');
+  stageSel.innerHTML = '<option value="">' + escapeHtml(t('allStagesOption')) + '</option>' + state.stages.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(dirLabel(s))}</option>`).join('');
   const types = [...new Set(state.metaList.map(m => m.meta.projectType).filter(Boolean))];
   typeSel.innerHTML = '<option value="">' + escapeHtml(t('allTypes')) + '</option>' + types.map(type => `<option value="${escapeHtml(type)}">${escapeHtml(type)}</option>`).join('');
+  // innerHTML 重建会把选中值清回"全部"，而 state.filter 还留着旧条件，
+  // 于是保存/改名/切语言之后下拉框和实际筛选对不上。按 state.filter 选回去；
+  // 选项已经不存在（比如该类型最后一个文件被删了）时以下拉框为准，同步回 state。
+  stageSel.value = state.filter.stage;
+  typeSel.value = state.filter.type;
+  state.filter.stage = stageSel.value;
+  state.filter.type = typeSel.value;
   // 标签自动补全（收集所有提示词的标签）
   const tagSet = new Set();
   for (const m of state.metaList) {
@@ -2080,8 +2088,15 @@ function applyFilter() {
   const stage = $('filter-stage').value;
   const type = $('filter-type').value;
   const tag = $('filter-tag').value.trim().toLowerCase();
-  const hasFilter = stage || type || tag;
   state.filter = { stage, type, tag };
+  filterTreeRows();
+}
+
+// 按 state.filter 隐藏树行。renderTree 每次都重建全部行（全部可见），
+// 所以重建之后必须再调一次，否则筛选条件还在、树却显示全部文件。
+function filterTreeRows() {
+  const { stage, type, tag } = state.filter;
+  const hasFilter = stage || type || tag;
   // 过滤文件树
   const allFileRows = document.querySelectorAll('.tree-row.file');
   allFileRows.forEach(row => {
@@ -2097,7 +2112,9 @@ function applyFilter() {
   });
   // 隐藏无可见子项的目录行
   if (hasFilter) {
-    document.querySelectorAll('.tree-node').forEach(node => {
+    // 倒序 = 子目录先于父目录判定。正序时父目录数到的子目录行还没被隐藏，
+    // 只有空子目录的父目录会照样显示。
+    Array.from(document.querySelectorAll('.tree-node')).reverse().forEach(node => {
       const dirRow = node.querySelector(':scope > .tree-row.dir');
       if (!dirRow) return;
       const childrenWrap = node.querySelector(':scope > .tree-children');
@@ -2494,6 +2511,7 @@ async function setLang(lang) {
   // 直到用户重新触发一次渲染才更新。
   renderTree();
   populateFilters();
+  filterTreeRows();
   renderTabs();
   renderStats();
   renderRecent();
