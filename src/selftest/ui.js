@@ -107,16 +107,42 @@
         await sleep(300);
         const firstRel = (document.querySelector('#tree .tree-row.file.active') || {}).__rel ||
           (document.querySelector('#tree .tree-row.file.active') || {}).dataset?.rel || state.currentRel;
-        tree.focus();
-        tree.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
-        await sleep(400);
-        const secondRel = state.currentRel;
-        check('文件树方向键能切到下一个文件', !!firstRel && !!secondRel && firstRel !== secondRel,
-          String(firstRel) + ' → ' + String(secondRel));
-        tree.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
-        await sleep(400);
-        check('方向键能切回上一个文件', state.currentRel === firstRel,
-          String(state.currentRel) + ' 应为 ' + String(firstRel));
+        // 方向键只移焦点、不打开：按键从当前聚焦的行发出（真实键盘事件的 target 就是它）。
+        // 原先每按一下都 click()，按住 ↓ 会沿途给每个文件开一个标签。
+        const focusedRow = () => (document.activeElement && document.activeElement.closest)
+          ? document.activeElement.closest('#tree .tree-row') : null;
+        const key = (k) => (focusedRow() || tree).dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
+        const tabsBefore = state.tabs.length;
+        fileRows[0].focus();
+        key('ArrowDown');
+        await sleep(300);
+        const moved = focusedRow();
+        check('文件树方向键能把焦点移到下一行', !!moved && moved !== fileRows[0],
+          moved ? (moved.__rel || moved.textContent.trim()) : '焦点不在树行上');
+        check('方向键只移焦点、不打开文件', state.currentRel === firstRel && state.tabs.length === tabsBefore,
+          'currentRel=' + String(state.currentRel) + ' tabs ' + tabsBefore + '→' + state.tabs.length);
+        // 走到第一个可见的文件行再按 Enter
+        let target = null;
+        for (let i = 0; i < 50; i++) {
+          const r = focusedRow();
+          if (r && r.classList.contains('file') && r.__rel !== firstRel) { target = r; break; }
+          key('ArrowDown');
+          await sleep(60);
+        }
+        if (target) {
+          key('Enter');
+          await sleep(400);
+          check('Enter 打开聚焦的文件', state.currentRel === target.__rel,
+            String(state.currentRel) + ' 应为 ' + String(target.__rel));
+        } else {
+          check('Enter 打开聚焦的文件', false, '方向键走不到另一个文件行');
+        }
+        fileRows[0].focus();
+        key('ArrowDown');
+        key('ArrowUp');
+        await sleep(200);
+        check('方向键能切回上一行', focusedRow() === fileRows[0],
+          focusedRow() ? (focusedRow().__rel || focusedRow().textContent.trim()) : '焦点不在树行上');
       } else {
         check('文件树里有多于一个文件行可供导航', false, '只有 ' + fileRows.length + ' 个文件行');
       }
@@ -156,13 +182,19 @@
           // 沿着整圈走一遍。每走一步，当前选中的行都必须是真的看得见的行。
           const visibleCount = Array.from(document.querySelectorAll('#tree .tree-row.file'))
             .filter(r => r.offsetParent !== null).length;
+          // 目录行也在导航序列里，所以按可见树行总数走一圈多。
+          const visibleRowCount = Array.from(document.querySelectorAll('#tree .tree-row'))
+            .filter(r => r.offsetParent !== null).length;
           const landed = [];
           tree.focus();
-          for (let i = 0; i < visibleCount + 2; i++) {
-            tree.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
-            await sleep(120);
-            const active = document.querySelector('#tree .tree-row.file.active');
-            if (active && active.offsetParent === null) landed.push(active.__rel || '?');
+          for (let i = 0; i < Math.max(visibleCount, visibleRowCount) + 2; i++) {
+            const from = (document.activeElement && document.activeElement.closest
+              ? document.activeElement.closest('#tree .tree-row') : null) || tree;
+            from.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+            await sleep(60);
+            const cur = document.activeElement && document.activeElement.closest
+              ? document.activeElement.closest('#tree .tree-row') : null;
+            if (cur && cur.offsetParent === null) landed.push(cur.__rel || cur.textContent.trim() || '?');
           }
           check('方向键不会跳进折叠目录里看不见的文件', landed.length === 0,
             landed.length ? '落到了隐藏行：' + landed.slice(0, 3).join(', ') : '走了 ' + (visibleCount + 2) + ' 步都落在可见行上');
