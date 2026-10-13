@@ -367,6 +367,17 @@ section('ZIP 真实往返（压缩 → 解压）');
   assert(/path\.relative\(versionsDir, resolved\)/.test(versionSrc), 'versionDirFor 做了越权校验');
   assert(/relV\.startsWith\('\.\.'\) \|\| path\.isAbsolute\(relV\)/.test(versionSrc), 'versionDirFor 同时判了 isAbsolute（跨盘符）');
   assert(/rel2\.startsWith\('\.\.'\) \|\| path\.isAbsolute\(rel2\)/.test(mainSrc), 'safeJoin 同时判了 isAbsolute（跨盘符）');
+  // 防回归：read-file / export-single 只过 safeJoin 时，config.json、logs/、.git/ 都能读出来。
+  // read-file 的实际拒绝行为由 test:fn 验证；export-single 要弹保存框，这里只查入口。
+  assert(/ipcMain\.handle\('read-file', async \(e, rel\) => \{\s*const full = safeJoinReadable\(rel\);/.test(mainSrc),
+    'read-file 走读取白名单');
+  assert(/ipcMain\.handle\('export-single', async \(e, rel\) => \{\s*const full = safeJoinReadable\(rel\);/.test(mainSrc),
+    'export-single 走读取白名单');
+  // 防回归：config.json 解析失败时裸 catch 回落默认值，下一次保存就把坏文件整份覆盖。
+  // 损坏留档的行为由 test:config-file 验证，这里只查 loadConfig 真的走了它。
+  assert(/async function loadConfig\(\) \{[\s\S]*?const cfg = await readConfigFile\(CONFIG_PATH/.test(mainSrc)
+    && !/JSON\.parse\(await fsp\.readFile\(CONFIG_PATH/.test(mainSrc),
+  'loadConfig 走 readConfigFile（损坏时留档）');
   assert(/function isSelfUrl\(/.test(mainSrc), '导航守卫有 isSelfUrl 白名单判定');
   assert(!/url\.startsWith\('file:\/\/'\)\) return/.test(mainSrc), 'will-navigate 不再放行任意 file:// URL');
   assert(/VERSION_FILE_RE\.test\(name\)/.test(versionSrc), '版本文件名有白名单校验');
@@ -611,6 +622,19 @@ assert(/function showCenteredMenu\(/.test(rendererSrc), '有统一的居中显�
   assert(/\.ctx-centered[\s\S]{0,120}left:\s*50%/.test(cssSrc), '.ctx-centered 显式设置了 left');
   assert(/\.ctx-centered[\s\S]{0,120}top:/.test(cssSrc), '.ctx-centered 显式设置了 top');
 }
+section('异步结果不乱序');
+// debounce 只合并输入，不阻止上一次 IPC 还在路上：旧查询后到会盖掉新结果。
+// 行为测不了（api 被 contextBridge 冻结，没法在自检里注入慢响应），这里查守卫的形状：
+// 序号在函数第一件事就推进（清空分支也要推进），await 之后立刻比对。
+{
+  const m = rendererSrc.match(/const doSearch = debounce\(async \(q\) => \{([\s\S]*?)\n\}, \d+\);/);
+  const body = m ? m[1] : '';
+  assert(/^\s*const box = \$\('search-results'\);\s*const seq = \+\+searchSeq;/.test(body),
+    'doSearch 一进来就推进序号（清空搜索框也会作废在途查询）');
+  assert(/const results = await api\.search\(q\);\s*if \(seq !== searchSeq\) return;/.test(body),
+    'doSearch 拿到结果后先比对序号再渲染');
+}
+
 section('界面字号缩放');
 // 字号缩放全靠 html 的 font-size 乘 --font-scale，所有 font-size 必须写 rem。
 // 这条断言是这套机制唯一的门禁：随手写一个 font-size: 13px 不会报错、界面看着也正常，

@@ -128,6 +128,13 @@
       await codeCheck('E_BAD_VERSION_FILE 已本地化', () => api.readVersion(renamed, 'not-a-version.md'), 'E_BAD_VERSION_FILE');
 
       await expectThrow('拒绝读取库外文件（路径穿越）', () => api.readFile('../../../../Windows/win.ini'));
+      // 库内但不在内容目录里的文件。config.json 在上面 setConfig 之后一定存在，
+      // 所以只判 safeJoin 的实现会真的读成功，这条才分辨得出两种实现。
+      for (const r of ['config.json', 'prompts/../config.json']) {
+        let msg = '';
+        try { await api.readFile(r); } catch (e) { msg = String(e && e.message); }
+        check('拒绝读取内容目录外的库内文件 ' + r, /E_READ_FORBIDDEN/.test(msg), msg || '读取成功了');
+      }
       await expectThrow('拒绝写入库外文件', () => api.saveFile('../../../evil.md', 'x'));
       await expectThrow('拒绝非法的版本文件名', () => api.readVersion(renamed, '../../../../Windows/win.ini'));
 

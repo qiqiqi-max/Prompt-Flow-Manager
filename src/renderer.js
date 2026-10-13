@@ -240,11 +240,15 @@ function fileNameNoExt(name) {
   return name.replace(/\.md$/i, '');
 }
 
+// 新提示要清掉上一条的计时器：否则 1.8 秒内连弹两条（比如"保存失败"紧跟在
+// "已复制"后面），第二条会被第一条的计时器提前收走，错误提示一闪而过。
+let toastTimer = null;
 function toast(msg, type = '') {
-  const t = $('toast');
-  t.textContent = msg;
-  t.className = 'toast ' + type;
-  setTimeout(() => t.classList.add('hidden'), 1800);
+  const el = $('toast');
+  el.textContent = msg;
+  el.className = 'toast ' + type;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.add('hidden'), 1800);
 }
 
 async function confirmDialog(msg) {
@@ -352,6 +356,7 @@ async function refreshTree() {
   setMetaList(meta);
   renderTree();
   populateFilters();
+  filterTreeRows();
   updateStatusCounts();
   renderStats();
   renderRecent();
@@ -408,25 +413,34 @@ function renderTree() {
       // 于是折叠目录里的文件仍然留在导航序列里，方向键会聚焦并 click 打开
       // 一个屏幕上根本看不见的文件——看上去像"按一下方向键就跳到别处去了"。
       // offsetParent 为 null 同时覆盖这两种隐藏方式（display:none 的元素没有 offsetParent）。
-      const rows = Array.from(root.querySelectorAll('.tree-row.file')).filter(r => r.offsetParent !== null);
+      //
+      // 方向键只移焦点，Enter / 空格才打开。原先是 focus() 紧跟 click()，每经过一行
+      // 就走一次 openFile：读盘、开标签、写最近列表，编辑模式下还弹"是否离开"，
+      // 按住 ↓ 会给沿途每个文件开一个标签。目录行也在序列里，Enter 展开/折叠。
+      const rows = Array.from(root.querySelectorAll('.tree-row')).filter(r => r.offsetParent !== null);
       if (!rows.length) return;
-      const current = root.querySelector('.tree-row.file.active') || root.querySelector('.tree-row.file:focus-within');
+      const focused = document.activeElement && document.activeElement.closest
+        ? document.activeElement.closest('.tree-row') : null;
+      const current = (focused && root.contains(focused)) ? focused : root.querySelector('.tree-row.file.active');
       let idx = current ? rows.indexOf(current) : -1;
       if (e.key === 'ArrowDown') idx = idx + 1 >= rows.length ? 0 : idx + 1;
       else idx = idx - 1 < 0 ? rows.length - 1 : idx - 1;
       rows[idx].focus();
-      rows[idx].click();
-    } else if (e.key === 'Enter') {
-      // 已在 click 里处理
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      const row = document.activeElement && document.activeElement.closest
+        ? document.activeElement.closest('.tree-row') : null;
+      if (!row || !root.contains(row)) return;
+      e.preventDefault();
+      row.click();
     }
   };
   // 聚焦状态样式（加到 CSS）
   root.onfocusin = (e) => {
-    const r = e.target.closest('.tree-row.file');
+    const r = e.target.closest('.tree-row');
     if (r) r.classList.add('focused');
   };
   root.onfocusout = (e) => {
-    const r = e.target.closest('.tree-row.file');
+    const r = e.target.closest('.tree-row');
     if (r) r.classList.remove('focused');
   };
 }
@@ -447,6 +461,7 @@ function buildTreeNode(node, depth) {
     name.className = 'name';
     name.textContent = labelForDir(node);
     row.append(caret, icon, name);
+    row.tabIndex = -1;
     const children = document.createElement('div');
     children.className = 'tree-children';
     for (const c of node.children) children.appendChild(buildTreeNode(c, depth + 1));
@@ -2034,14 +2049,20 @@ function highlightTerm(rawText, q) {
   }
   return out.join('');
 }
+// 竞态守卫（同 updateComposerPreview）：debounce 只合并输入，不阻止上一次 IPC 还在路上。
+// 大库里旧查询慢、新查询快时，旧结果后到会把新结果盖掉；清空搜索框后，
+// 还在路上的那次也会把结果列表重新弹出来。所以清空也要推进序号。
+let searchSeq = 0;
 const doSearch = debounce(async (q) => {
   const box = $('search-results');
+  const seq = ++searchSeq;
   if (!q) {
     box.classList.add('hidden');
     $('tree').classList.remove('hidden');
     return;
   }
   const results = await api.search(q);
+  if (seq !== searchSeq) return;
   $('tree').classList.add('hidden');
   box.classList.remove('hidden');
   if (!results.length) {
@@ -2064,9 +2085,16 @@ const doSearch = debounce(async (q) => {
 function populateFilters() {
   const stageSel = $('filter-stage');
   const typeSel = $('filter-type');
-  stageSel.innerHTML = '<option value="">' + escapeHtml(t('allStagesOption')) + '</option>' + state.stages.map(s => `<option value="${s}">${escapeHtml(dirLabel(s))}</option>`).join('');
+  stageSel.innerHTML = '<option value="">' + escapeHtml(t('allStagesOption')) + '</option>' + state.stages.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(dirLabel(s))}</option>`).join('');
   const types = [...new Set(state.metaList.map(m => m.meta.projectType).filter(Boolean))];
   typeSel.innerHTML = '<option value="">' + escapeHtml(t('allTypes')) + '</option>' + types.map(type => `<option value="${escapeHtml(type)}">${escapeHtml(type)}</option>`).join('');
+  // innerHTML 重建会把选中值清回"全部"，而 state.filter 还留着旧条件，
+  // 于是保存/改名/切语言之后下拉框和实际筛选对不上。按 state.filter 选回去；
+  // 选项已经不存在（比如该类型最后一个文件被删了）时以下拉框为准，同步回 state。
+  stageSel.value = state.filter.stage;
+  typeSel.value = state.filter.type;
+  state.filter.stage = stageSel.value;
+  state.filter.type = typeSel.value;
   // 标签自动补全（收集所有提示词的标签）
   const tagSet = new Set();
   for (const m of state.metaList) {
@@ -2080,8 +2108,15 @@ function applyFilter() {
   const stage = $('filter-stage').value;
   const type = $('filter-type').value;
   const tag = $('filter-tag').value.trim().toLowerCase();
-  const hasFilter = stage || type || tag;
   state.filter = { stage, type, tag };
+  filterTreeRows();
+}
+
+// 按 state.filter 隐藏树行。renderTree 每次都重建全部行（全部可见），
+// 所以重建之后必须再调一次，否则筛选条件还在、树却显示全部文件。
+function filterTreeRows() {
+  const { stage, type, tag } = state.filter;
+  const hasFilter = stage || type || tag;
   // 过滤文件树
   const allFileRows = document.querySelectorAll('.tree-row.file');
   allFileRows.forEach(row => {
@@ -2097,7 +2132,9 @@ function applyFilter() {
   });
   // 隐藏无可见子项的目录行
   if (hasFilter) {
-    document.querySelectorAll('.tree-node').forEach(node => {
+    // 倒序 = 子目录先于父目录判定。正序时父目录数到的子目录行还没被隐藏，
+    // 只有空子目录的父目录会照样显示。
+    Array.from(document.querySelectorAll('.tree-node')).reverse().forEach(node => {
       const dirRow = node.querySelector(':scope > .tree-row.dir');
       if (!dirRow) return;
       const childrenWrap = node.querySelector(':scope > .tree-children');
@@ -2494,6 +2531,7 @@ async function setLang(lang) {
   // 直到用户重新触发一次渲染才更新。
   renderTree();
   populateFilters();
+  filterTreeRows();
   renderTabs();
   renderStats();
   renderRecent();
