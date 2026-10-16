@@ -211,6 +211,9 @@ flowchart LR
 ```
 
 不设 `PFM_DATA_DIR` 时用仓库目录（与源码运行时应用自己的数据目录一致）。
+注意 server 本身是从**源码目录**跑起来的——它不随安装包分发（portable 版每次运行都解压到
+临时目录，没有稳定路径可指），所以 `args` 要写你克隆或解压出来的仓库路径；
+`PFM_DATA_DIR` 指的是"要暴露哪个提示词库"，打包版用户的库在 `%APPDATA%\prompt-flow-manager\`。
 打包版的数据在 `%APPDATA%\prompt-flow-manager\`，那种情况下请显式指明。
 
 可用工具：
