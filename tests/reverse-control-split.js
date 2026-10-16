@@ -252,9 +252,19 @@ const CASES = [
   {
     name: 'LRU 上限判断读的不是共享对象',
     rel: 'lib/library.js',
-    find: '  while (contentCache.size > cacheStats.CONTENT_CACHE_MAX) {',
+    // 淘汰条件现在是两道闸（条数 + 总字符预算），所以要整段替换：
+    // 只换第一行的话替换完语法就断了，红的会是"语法错误"而不是目标断言。
+    find: '  while (contentCache.size > cacheStats.CONTENT_CACHE_MAX\n'
+      + '    || cacheStats.cachedChars > cacheStats.CONTENT_CACHE_MAX_CHARS) {',
     replace: '  while (contentCache.size > 5000) {',
     expect: /LRU 上限判断读 cacheStats/
+  },
+  {
+    name: '字符预算那道闸被撤掉（只看条数，大文件能吃光内存）',
+    rel: 'lib/library.js',
+    find: '\n    || cacheStats.cachedChars > cacheStats.CONTENT_CACHE_MAX_CHARS) {',
+    replace: ') {',
+    expect: /淘汰循环同时盯住条数与总字符预算/
   },
 
   // ---- win 不能注入（重建窗口会换实例）----

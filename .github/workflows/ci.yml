@@ -151,6 +151,10 @@ jobs:
       - name: MCP server
         run: npm run test:mcp
 
+      # 正文缓存的两道闸（条数 + 总字符预算）与占用记账。自带反向对照。
+      - name: 正文缓存预算
+        run: npm run test:cache-budget
+
       # 纯逻辑测试，不用起 Electron：从 renderer.js 里抠出 debounce 单独验语义。
       # 自带反向对照（旧版一行 debounce 必须失败），所以它不会变成永远绿的空壳。
       - name: debounce 语义

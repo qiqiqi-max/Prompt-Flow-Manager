@@ -1127,6 +1127,11 @@ section('自检模块拆分（注入契约）');
   // 但下限仍是同一个要求：自检与热路径读写的是同一个对象上的字段。
   assert(/cacheStats\.fileReadCount\+\+/.test(libraryCode), '数据层的读计数加在 cacheStats 上');
   assert(/contentCache\.size > cacheStats\.CONTENT_CACHE_MAX/.test(libraryCode), 'LRU 上限判断读 cacheStats');
+  // 第二道闸：总字符预算。只按条数封顶给的是虚假的安全感——5000 条每条 200KB
+  // 是约 3GB 常驻内存，而 5000 条每条约 1KB 才 15MB，两者只有一个条数上限。
+  // 行为由 test:cache-budget 覆盖，这里卡住"这道闸还在淘汰条件里"。
+  assert(/cacheStats\.cachedChars > cacheStats\.CONTENT_CACHE_MAX_CHARS\) \{/.test(libraryCode),
+    '淘汰循环同时盯住条数与总字符预算');
   assert(/cacheStats\.fileReadCount = 0/.test(selftestCode), '压测清零写的是 cacheStats');
   assert(/cacheStats\.CONTENT_CACHE_MAX = 3/.test(selftestCode), 'LRU 自检调小的也是 cacheStats');
 
