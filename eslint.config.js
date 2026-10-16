@@ -56,7 +56,11 @@ const selftestRendererGlobals = {
   applyFilter: 'readonly',
   refreshTree: 'readonly',
   toast: 'readonly',
-  refreshReferences: 'readonly'
+  refreshReferences: 'readonly',
+  copyContent: 'readonly',
+  // 自检要能取消当前弹层（fillPlaceholderInline 弹的输入框没人点就会挂住），
+  // 这是 renderer.js 里"当前弹层的 resolve 入口"，自检通过它收尾。
+  pendingPromptDone: 'writable'
 };
 
 // 只保留能指向真实缺陷的规则。每条都注明了它在这个项目里能抓到什么。

@@ -93,11 +93,15 @@ const state = {
   activeTab: null,            // 当前激活标签的 rel
   fillMemory: {},             // 占位符填充记忆：token 原文 -> 上次填的值（见 rememberFillValues）
   currentRefs: [],            // 当前文件的被引用列表（工作流 rel），见 refreshReferences
-  danglingCount: 0            // 全库悬空引用条数：工作流引用的文件已经不在了
+  danglingCount: 0,           // 全库悬空引用条数：工作流引用的文件已经不在了
+  previewFills: {}            // 预览区就地填过的占位符：rel -> { token: 值 }，见 enhancePreviewPlaceholders
 };
 
 // ===== 工具 =====
 const $ = (id) => document.getElementById(id);
+// 预览区占位符 chip 的选择器。定义在这里而不是紧挨用法：下面的委托监听器是
+// 顶层语句，在 IIFE 里就用到了它，而 const 不像函数声明那样能提前访问。
+const PLACEHOLDER_MARK = 'mark.ph';
 // 返回的函数会返回一个 promise，它在这次防抖真正执行完之后才 resolve，
 // 并额外挂一个 .flush()：立即执行待处理的那次调用（没有待处理的就等在飞的那次）。
 //
@@ -801,6 +805,27 @@ function renderMetaBar() {
   bar.innerHTML = html;
 }
 
+// 预览区占位符 chip 的点击。委托挂在容器上：预览内容是反复重渲染出来的
+// （切文件、展开 include、填完值都会重画），逐个绑定等于每次重画都要重挂一遍。
+{
+  const preview = $('preview');
+  const pick = async (el) => {
+    if (!el || !el.dataset || !el.dataset.token) return;
+    await fillPlaceholderInline(el.dataset.token);
+  };
+  preview.addEventListener('click', (e) => {
+    const mark = e.target.closest && e.target.closest(PLACEHOLDER_MARK);
+    if (mark) pick(mark);
+  });
+  preview.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const mark = e.target.closest && e.target.closest(PLACEHOLDER_MARK);
+    if (!mark) return;
+    e.preventDefault();
+    pick(mark);
+  });
+}
+
 // 引用 chip 的点击/键盘。用事件委托挂在 meta-bar 上而不是每次重建后逐个绑定：
 // renderMetaBar 会被 refreshReferences 反复调用，逐个绑定等于每次重建都要重挂一遍。
 {
@@ -871,6 +896,7 @@ function renderPromptPreview() {
   const preview = $('preview');
   preview.innerHTML = renderMarkdown(body);
   enhanceCodeBlocks(preview);
+  enhancePreviewPlaceholders(preview);
 
   // 若含 {{include: ...}}，异步解析并刷新预览（带切文件守卫）
   if (INCLUDES.hasInclude(body)) {
@@ -886,9 +912,124 @@ function renderPromptPreview() {
       if (state.currentRel === rel && !state.editMode) {
         preview.innerHTML = renderMarkdown(resolved);
         enhanceCodeBlocks(preview);
+        // 展开 include 之后正文变了，标记要重打一遍：include 进来的片段里的
+        // 占位符此前不在 DOM 里，不重打就点不到。
+        enhancePreviewPlaceholders(preview);
       }
     });
   }
+}
+
+// ===== 预览区里的占位符 =====
+//
+// 约定（templates/prompt-template.md）是用 [提示文字] 标出需要替换的部分，
+// 复制时会弹一次填充面板。但面板只有"提示文字"这一列，用户看不到它在正文里的
+// 位置，也就没法判断该填什么——尤其是同一个提示词里有好几个占位符的时候。
+//
+// 这里把预览区里的占位符标成可点的 chip：点一下就地填，填过的直接显示成值。
+// 填的值只影响**复制出去的正文**，不动磁盘上的文件：占位符是文件格式的一部分，
+// 被替换掉之后这个提示词自己就不能再当模板用了。
+//
+// 标记方式是渲染后的 DOM 二次加工（TreeWalker 包 <mark>），不是渲染前的字符串
+// 替换：字符串替换要自己躲开行内代码和围栏块（那是 PLACEHOLDERS 里最难的部分），
+// 而渲染后的 DOM 里这些已经是 <code>/<pre> 元素，跳过父节点即可。
+function enhancePreviewPlaceholders(container) {
+  const preview = container || $('preview');
+  const rel = state.currentRel;
+  if (!preview || !rel) return;
+  const { body } = parseFrontmatter(state.currentContent);
+  // 只标记 extract 认得的 token（它已经排除了链接、行内代码、围栏块、任务列表
+  // 勾选框这些同形但不相干的 [..]）。片段外的一律不动。
+  const tokens = PLACEHOLDERS.extract(body).map(it => it.token);
+  const values = state.previewFills[rel] || {};
+  const wanted = new Map(tokens.map(tok => [tok, tok]));
+  if (!tokens.length) return;
+
+  const walker = document.createTreeWalker(preview, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parent = node.parentElement;
+      if (!parent) return NodeFilter.FILTER_REJECT;
+      if (parent.closest('pre')) return NodeFilter.FILTER_REJECT;      // 围栏块里是示例，不填
+      if (parent.classList.contains('ph')) return NodeFilter.FILTER_REJECT; // 已经标过
+      return NodeFilter.FILTER_ACCEPT;
+    }
+  });
+  const targets = [];
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    // 每个 text node 只处理"原文里正好有这种 token 文本"的情况。
+    // 用 token 原文比对而不是重新跑一遍正则：正则会把正文里普通的 [..] 也框进来，
+    // 而那些恰好是 extract 特意排除掉的。
+    for (const [tok, key] of wanted) {
+      if (node.nodeValue && node.nodeValue.includes(key)) targets.push({ node, key, tok });
+    }
+  }
+  for (const { node, key, tok } of targets) {
+    if (!node.parentNode) continue;   // 同一轮里可能被前一次替换掉（共享父节点时）
+    const parts = node.nodeValue.split(key);
+    const frag = document.createDocumentFragment();
+    parts.forEach((part, i) => {
+      if (i > 0) {
+        const mark = document.createElement('mark');
+        mark.className = 'ph';
+        mark.dataset.token = tok;
+        // 可聚焦 + role=button：键盘用户要能 Tab 到它并按 Enter。
+        // <mark> 默认不在 tab 序列里，没有这两行这个功能就只对鼠标开放。
+        mark.tabIndex = 0;
+        mark.setAttribute('role', 'button');
+        if (!values[tok]) mark.title = t('fillInlineTitle');
+        const filled = values[tok];
+        if (filled) {
+          // 填过的直接显示值，并且标出"这是填的、不是原文"
+          mark.classList.add('ph-filled');
+          mark.textContent = filled;
+          mark.title = tok;
+        } else {
+          mark.textContent = tok;
+        }
+        frag.appendChild(mark);
+      }
+      if (part) frag.appendChild(document.createTextNode(part));
+    });
+    node.parentNode.replaceChild(frag, node);
+  }
+  renderFillHint();
+}
+
+// 预览区顶部那行提示：还有几个没填。填完就消失。
+// 没有它的话"预览里的 chip 能点"没有任何线索，用户只会以为那是高亮。
+function renderFillHint() {
+  const bar = $('preview-fill-hint');
+  if (!bar) return;
+  const rel = state.currentRel;
+  if (!rel) { bar.classList.add('hidden'); return; }
+  const total = document.querySelectorAll('#preview ' + PLACEHOLDER_MARK).length;
+  if (!total) { bar.classList.add('hidden'); return; }
+  const filled = state.previewFills[rel] || {};
+  const done = Array.from(document.querySelectorAll('#preview ' + PLACEHOLDER_MARK))
+    .filter(el => filled[el.dataset.token]).length;
+  bar.classList.remove('hidden');
+  bar.textContent = done
+    ? t('fillHintProgress', { done, total })
+    : t('fillHintClick', { total });
+}
+
+// 点 chip 就地填。返回是否改动了填充记录（供调用方决定要不要重刷提示行）。
+async function fillPlaceholderInline(token) {
+  const rel = state.currentRel;
+  if (!rel) return false;
+  const values = state.previewFills[rel] || {};
+  const current = values[token] || '';
+  const next = await promptInput(t('fillInlineTitle'), token, current);
+  if (next === null) return false;                 // 取消
+  if (!state.previewFills[rel]) state.previewFills[rel] = {};
+  if (next === '') delete state.previewFills[rel][token];
+  else state.previewFills[rel][token] = next;
+  if (next) rememberFillValues({ [token]: next });
+  // 重绘整个预览：同一 token 可能出现多次，逐个改 DOM 是重复状态。
+  // 预览本来就是重渲染出来的，代价和一帧视图刷新相当。
+  renderContent();
+  return true;
 }
 
 function renderWorkflowPreview() {
@@ -903,6 +1044,9 @@ function renderWorkflowPreview() {
   }
   preview.innerHTML = flowHtml + renderMarkdown(body);
   enhanceCodeBlocks(preview);
+  // 工作流正文里通常没有可填的占位符，但把渲染流程对齐能让"提示行"在切到
+  // 工作流时正确隐藏（否则会留着上一个提示词的计数）。
+  enhancePreviewPlaceholders(preview);
   // 绑定节点点击跳转。
   //
   // 坏节点不再往 openFile 里送。原先无论引用在不在都直接 openFile(p)，
@@ -1171,6 +1315,10 @@ async function enterEditMode() {
   if (!state.currentRel) return;
   state.editMode = true;
   $('preview-wrap').classList.add('hidden');
+  // 提示行跟着预览区一起藏。它在预览区里边，但 #preview-wrap 是整块隐藏，
+  // 这里显式收起来是为了"退出编辑后 hint 不残留旧计数"——重进预览时
+  // renderPromptPreview 会重算，不依赖这里的残留状态。
+  $('preview-fill-hint').classList.add('hidden');
   $('editor-wrap').classList.remove('hidden');
   $('editor').value = state.currentContent;
   state.editBaseline = state.currentContent; // 脏判断的基准
@@ -1362,6 +1510,17 @@ async function copyContent() {
   if (!tokens.length) {
     await writeClipboard(body);
     toast(t('copySuccess'), 'success');
+    return true;
+  }
+  // 预览区已经点着填过的，直接用填好的结果，不再弹面板：用户刚刚就在正文里
+  // 逐处填过，再让他面对一张列着同一批 token 的表，等于把同一件事做两遍。
+  // 想改的话回预览里点那个 chip（点上就是改）。
+  const inline = state.previewFills[state.currentRel] || {};
+  const inlineCount = tokens.filter(it => String(inline[it.token] == null ? '' : inline[it.token]).trim()).length;
+  if (inlineCount) {
+    await writeClipboard(PLACEHOLDERS.fill(body, inline));
+    const missing = tokens.length - inlineCount;
+    toast(missing ? t('fillDonePartial', { count: inlineCount, missing }) : t('fillDone', { count: inlineCount }), 'success');
     return true;
   }
   const values = await promptFillPlaceholders(tokens);
@@ -1743,13 +1902,17 @@ function settlePendingPrompt() {
   fn(null);
 }
 
-function promptInput(title, placeholder) {
+// 第三个参数是预填值。改名/新建那几处传的是"原来的名字"，所以光标要全选，
+// 一输入就整体替换；预览区就地填占位符传的是上次填过的值，光标落在末尾更方便续写，
+// 但两种情况下"全选"都不会让人多做一次操作（想改就打字，想留就按 Enter），
+// 所以这里统一 select()。
+function promptInput(title, placeholder, initial) {
   return new Promise(resolve => {
     const menu = $('ctx-menu');
     menu.innerHTML = `
       <div class="ctx-prompt-wrap">
         <div class="ctx-prompt-title">${escapeHtml(title)}</div>
-        <input id="ctx-input" class="ctx-prompt-input" placeholder="${escapeHtml(placeholder || '')}">
+        <input id="ctx-input" class="ctx-prompt-input" placeholder="${escapeHtml(placeholder || '')}" value="${escapeHtml(initial == null ? '' : String(initial))}">
         <div class="ctx-prompt-actions">
           <button class="btn-link" id="ctx-cancel">${escapeHtml(t('cancel_'))}</button>
           <button class="btn-primary" id="ctx-ok">${escapeHtml(t('ok'))}</button>
@@ -1758,6 +1921,7 @@ function promptInput(title, placeholder) {
     showCenteredMenu();
     const inp = $('ctx-input');
     inp.focus();
+    inp.select();
     const done = (v) => {
       pendingPromptDone = null;
       hideCtxMenu();

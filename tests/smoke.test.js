@@ -635,6 +635,20 @@ section('异步结果不乱序');
     'doSearch 拿到结果后先比对序号再渲染');
 }
 
+section('预览区占位符');
+// 两个容易在重构里丢掉的形状：标记时跳过 <pre>（围栏块里是示例，不该可点），
+// 以及复制时优先用就地填好的值。行为由 test:ui 覆盖，这里只卡住接线。
+{
+  const m = rendererSrc.match(/function enhancePreviewPlaceholders\(container\) \{([\s\S]*?)\n\}/);
+  const body = m ? m[1] : '';
+  assert(/parent\.closest\('pre'\)/.test(body), '标记占位符时跳过围栏代码块');
+  assert(/state\.previewFills\[/.test(rendererSrc), '就地填写的值有独立存放处');
+  assert(/const inline = state\.previewFills\[state\.currentRel\] \|\| \{\};/.test(rendererSrc),
+    'copyContent 读就地填写的值');
+  assert(/if \(inlineCount\) \{[\s\S]{0,200}?writeClipboard\(PLACEHOLDERS\.fill\(body, inline\)\)/.test(rendererSrc),
+    '填过就不再弹面板，直接用填好的正文');
+}
+
 section('工作流引用索引');
 // 索引的失效点挂在 dropFromCache 上（保存/改名/删除/导入/回滚都调它），
 // 这条链断了的表现是"刚改完引用关系还是旧的"，而那是完全静默的。

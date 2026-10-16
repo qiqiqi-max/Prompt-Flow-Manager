@@ -88,6 +88,11 @@ const I18N = {
     fillAndCopy: '填好并复制',
     fillCopyRaw: '直接复制原文',
     fillDone: '已复制（填了 {count} 处）',
+    // 预览区就地填占位符：点正文里那个 chip 就能填，提示行负责告诉用户这件事
+    fillHintClick: '正文里有 {total} 处 [占位符]，点一下即可填入；填好的内容会在复制时生效，不会改动文件',
+    fillHintProgress: '已填 {done}/{total} 处；填好的内容会在复制时生效，不会改动文件',
+    fillInlineTitle: '填入内容（留空恢复原文）',
+    fillDonePartial: '已复制（填了 {count} 处，还有 {missing} 处保留原文）',
     // 状态栏
     ready: '就绪',
     loaded: '已加载',
@@ -467,6 +472,10 @@ const I18N = {
     fillAndCopy: 'Fill and copy',
     fillCopyRaw: 'Copy as-is',
     fillDone: 'Copied ({count} filled)',
+    fillHintClick: '{total} placeholder(s) in the text — click one to fill it. Filled values are used when copying; the file itself is not modified',
+    fillHintProgress: '{done}/{total} filled. Filled values are used when copying; the file itself is not modified',
+    fillInlineTitle: 'Fill in (leave blank to restore)',
+    fillDonePartial: 'Copied ({count} filled, {missing} left as-is)',
     // 状态栏
     ready: 'Ready',
     loaded: 'Loaded',

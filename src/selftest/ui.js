@@ -271,6 +271,84 @@
           document.getElementById('meta-bar').textContent);
       }
 
+      // ---- 预览区就地填占位符 ----
+      // 这条路径此前只有一个入口：点复制之后弹一个面板，面板上只有"提示文字"这一列，
+      // 用户看不到占位符在正文里的位置。现在正文里的 [提示文字] 是可点的 chip。
+      {
+        const target = 'prompts/code-generation/功能实现.md';
+        await openFile(target);
+        await sleep(400);
+        const marks = () => Array.from(document.querySelectorAll('#preview mark.ph'));
+        check('预览区把 [占位符] 标成了可点的 chip（' + marks().length + ' 处）', marks().length >= 2,
+          document.getElementById('preview').textContent.slice(0, 120));
+        check('有占位符时显示提示行', !document.getElementById('preview-fill-hint').classList.contains('hidden'),
+          document.getElementById('preview-fill-hint').textContent);
+        const token = marks()[0] ? marks()[0].dataset.token : null;
+        // 复制时如果弹出填充面板，这里没有真人去点"填好并复制"，copyContent 会
+        // 永远不 resolve —— 后面的断言就一行都不执行，整个 test 却"全绿"。
+        // 第一版就是这么写空的，被反向对照当场抓出来。所以这里给面板挂一个
+        // 兜底应答：它一旦出现就把面板取消掉，让 copyContent 正常返回，
+        // 于是"没写剪贴板"会变成一条**能变红**的失败。
+        // 注意：window.promptFlowApi 是 contextBridge 暴露的，属性不可写，
+        // 给它赋值会当场抛错（第一版这么写过，整段点击自检直接没了）。
+        const origPromptDone = pendingPromptDone;
+        const fillChip = async (el, value) => {
+          el.click();
+          for (let i = 0; i < 40 && !document.getElementById('ctx-input'); i++) await sleep(50);
+          const inp = document.getElementById('ctx-input');
+          if (!inp) return false;
+          inp.value = value;
+          await realClick(document.getElementById('ctx-ok'));
+          return true;
+        };
+        try {
+          check('点 chip 会弹出就地填写框', await fillChip(marks()[0], '自检填充值'),
+            menu() ? 'hidden=' + menu().classList.contains('hidden') : 'no menu');
+          await sleep(300);
+        } finally {
+          if (pendingPromptDone) { const cancel = pendingPromptDone; cancel(null); }
+          pendingPromptDone = origPromptDone;
+        }
+        const filled = marks().find(el => el.dataset.token === token);
+        check('填过的 chip 显示填进去的值',
+          !!filled && filled.classList.contains('ph-filled') && filled.textContent === '自检填充值',
+          filled ? filled.textContent : '(chip 不见了)');
+        // 复制必须用填好的正文，而不是原样带 [占位符] 出去。
+        // 剪贴板没法直接读，所以把 writeText 换成采集器——copyContent 里真正的
+        // 写入点就是它，替换后能拿到用户实际会拿到的那份文本。
+        const origWrite = navigator.clipboard.writeText.bind(navigator.clipboard);
+        let copied = null;
+        navigator.clipboard.writeText = async (text) => { copied = text; };
+        let copyDone = false;
+        // 兜底：万一走到填充面板（说明没走就地填的分支），面板一出现就取消它。
+        // 不做这个的话 copyContent 永远挂在 awaits promptFillPlaceholders 上，
+        // 整段点击自检的输出全丢 —— 而失败原因是"没人点按钮"，不是被测代码错。
+        // 取消之后 copyContent 正常返回 false，下面的断言才是一条能变红的失败。
+        //
+        // 这个看门狗必须在 copyContent **之后**单独 await，不能塞进 finally：
+        // 第一版就是塞在 try/finally 里等它，结果每跑一次白白多等 3 秒，
+        // 把整段自检顶过了 60 秒上限（实测就是这么红的）。
+        const cancelPanelSoon = (async () => {
+          for (let i = 0; i < 12; i++) {
+            await sleep(50);
+            if (pendingPromptDone) pendingPromptDone(null);
+          }
+        })();
+        try {
+          await copyContent();
+          copyDone = true;
+        } catch (err) {
+          copied = 'THREW:' + String(err && err.message);
+        } finally {
+          navigator.clipboard.writeText = origWrite;
+          await cancelPanelSoon;
+        }
+        check('复制用的是填好的正文', copyDone && !!copied && copied.includes('自检填充值'),
+          !copyDone ? 'copyContent 没有返回（多半是弹了填充面板没人点）' : String(copied).slice(0, 120));
+        check('复制不会改动磁盘上的文件', state.currentContent.includes(token),
+          '原文件里应保留 ' + token);
+      }
+
       // ---- 右键菜单 ----
       const fileRow = document.querySelector('#tree .tree-row.file') || document.querySelector('#tree .tree-row');
       if (fileRow) {
