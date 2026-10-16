@@ -322,6 +322,9 @@
   <script src="placeholders.js"></script>
   <!-- 模板包含引擎（src/includes.js）。双用模块：声明全局 INCLUDES -->
   <script src="includes.js"></script>
+  <!-- 工作流图分析（src/flow-graph.js）：分层、成环、不可达。
+       双用模块，tests/flow-graph.test.js 里 require 同一份文件。 -->
+  <script src="flow-graph.js"></script>
   <script src="composer-meta.js"></script>
   <script src="renderer.js"></script>
 </body>

@@ -72,6 +72,9 @@ const I18N = {
     flowMissingNext: 'next 指向了不存在的步骤：{ids}',
     flowBrokenSummary: '有 {count} 处引用失效，已在图上标出',
     flowRefMissingTitle: '引用失效',
+    // 不可达：从入口顺着 next 走不到这个步骤。它不在任何一条执行路径上，
+    // 但节点照常画在图上，此前没有任何提示。
+    flowUnreachable: '这一步从入口走不到（不在任何一条执行路径上）',
     // 复用关系（反方向）：这个提示词被哪些工作流引用。
     // 这是一条用户此前完全看不到的信息 —— 删除前才知道自己有引用，
     // 而那时工作流的节点已经变成坏引用了。
@@ -462,6 +465,7 @@ const I18N = {
     flowMissingNext: 'next points to unknown step(s): {ids}',
     flowBrokenSummary: '{count} broken reference(s), marked in the diagram',
     flowRefMissingTitle: 'Broken reference',
+    flowUnreachable: 'This step is unreachable from the entry point (not on any path)',
     refsChip: 'Used by {count} workflow(s)',
     refsChipTitle: 'Referenced by: {names}',
     refsOpenFailed: 'Could not open the referencing workflow: {name}',

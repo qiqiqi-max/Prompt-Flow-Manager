@@ -1090,7 +1090,7 @@ function renderWorkflowPreview() {
 // 引用是否存在直接查 state.metaByRel（refreshTree 已经把全库元数据拉下来了，
 // 见 setMetaList），不走 IPC：这条路径在每次渲染工作流时都会跑，
 // 为此再发一轮文件存在性查询是白花的往返开销。
-function auditFlowRefs(steps) {
+function auditFlowRefs(steps, graph) {
   const ids = new Set(steps.map(s => s.id).filter(Boolean));
   const issues = new Map();
   for (const s of steps) {
@@ -1105,6 +1105,14 @@ function auditFlowRefs(steps) {
     if (badNext.length) issue.missingNext = badNext;
     if (Object.keys(issue).length) issues.set(s.id, issue);
   }
+  // 不可达是**图**的属性，不是单个节点的引用问题：它由 flow-graph 算出来
+  // （从入口出发顺着 next 走不到），这里合并进同一份 issues，让节点上的 ⚠
+  // 和顶部的汇总都只需要一条路径。指向不存在的 id 不算边，所以那种节点
+  // 不会因此被判成不可达——它报的是 missingNext。
+  const unreachable = (graph && graph.unreachable) || [];
+  for (const id of unreachable) {
+    issues.set(id, Object.assign(issues.get(id) || {}, { unreachable: true }));
+  }
   // count 按"问题条数"算而不是"坏节点数"：一个节点可能同时缺文件和写错 next，
   // 汇总里说"有 2 处失效"比"有 1 个坏节点"更贴近用户要修的工作量。
   let count = 0;
@@ -1112,6 +1120,7 @@ function auditFlowRefs(steps) {
     if (issue.noPrompt) count++;
     if (issue.missingFile) count++;
     if (issue.missingNext) count += issue.missingNext.length;
+    if (issue.unreachable) count++;
   }
   return { issues, count };
 }
@@ -1122,58 +1131,17 @@ function flowIssueText(issue) {
   if (issue.noPrompt) parts.push(t('flowNoPrompt'));
   if (issue.missingFile) parts.push(t('flowMissingFile', { path: issue.missingFile }));
   if (issue.missingNext) parts.push(t('flowMissingNext', { ids: issue.missingNext.join(', ') }));
+  if (issue.unreachable) parts.push(t('flowUnreachable'));
   return parts.join('\n');
 }
 
 // 分支流程图：拓扑分层 + SVG 连线
 function renderFlowDiagram(steps, title) {
-  const byId = new Map(steps.map(s => [s.id, s]));
-  const audit = auditFlowRefs(steps);
-  // 入度计算
-  const indeg = new Map(steps.map(s => [s.id, 0]));
-  for (const s of steps) {
-    for (const n of s.next) {
-      if (byId.has(n)) indeg.set(n, (indeg.get(n) || 0) + 1);
-    }
-  }
-  // 层级 = 所有前驱层级最大值 + 1（最长前导路径）。
-  // Kahn 拓扑排序：出队时直接把层级推给后继，一趟 O(V+E) 完成。
-  // 原先的写法是"排序后再对每个节点回扫全部 steps 找前驱"，O(V·E)。
-  const level = new Map();
-  const indeg2 = new Map(indeg);
-  const queue = steps.filter(s => (indeg.get(s.id) || 0) === 0).map(s => s.id);
-  for (const id of queue) level.set(id, 0);
-  let visited = 0;
-  for (let head = 0; head < queue.length; head++) {
-    const id = queue[head];
-    visited++;
-    const lv = level.get(id) || 0;
-    for (const n of byId.get(id).next) {
-      if (!byId.has(n)) continue;
-      // 后继层级取所有前驱的最大值 + 1
-      level.set(n, Math.max(level.get(n) == null ? 0 : level.get(n), lv + 1));
-      indeg2.set(n, indeg2.get(n) - 1);
-      if (indeg2.get(n) === 0) queue.push(n);
-    }
-  }
-  // 环里的节点入度永远降不到 0，拿不到层级。
-  // 不能放着不管：Math.max(...空) 是 -Infinity，Array.from({length:-Infinity})
-  // 得到零长数组，下面 layers[...].push 就会抛错，而这个异常会被 openFile 的
-  // catch 吞掉并把 currentRel 置空，留下"有标签页却没有当前文件"的坏状态，
-  // 之后任何走到 renderBreadcrumb 的操作都会在 null 上再炸一次，只能重启。
-  // 这里把成环的节点按原始顺序追加到末层，图仍然画得出来，用户也能看到它们。
-  const hasCycle = visited < steps.length;
-  if (hasCycle) {
-    // 全图成环时没有任何入口节点，level 是空的，末层要从 -1 起算，
-    // 否则所有节点都落到第 1 层、第 0 层空着，画出来是一条空白层。
-    let tail = -1;
-    for (const lv of level.values()) tail = Math.max(tail, lv);
-    for (const s of steps) if (!level.has(s.id)) level.set(s.id, tail + 1);
-  }
-  const maxLevel = steps.length ? Math.max(0, ...level.values()) : 0;
-  // 分层
-  const layers = Array.from({ length: maxLevel + 1 }, () => []);
-  for (const s of steps) layers[level.get(s.id) || 0].push(s);
+  // 分层、成环、不可达全部交给 src/flow-graph.js（裸 node 可测，见 test:flow-graph）。
+  // 这段图论代码原先长在这里，验证它只能靠拉起 Electron 数 DOM 节点。
+  const graph = FLOW_GRAPH.analyze(steps);
+  const audit = auditFlowRefs(steps, graph);
+  const layers = graph.layers;
   // 渲染：逐层横向，层内节点等高排列；连线由 drawFlowEdges 绘制
   let html = `<div class="flow-diagram"><div class="flow-title">${escapeHtml(t('flowDiagram'))}${title ? escapeHtml(t('sep')) + escapeHtml(title) : ''}</div>`;
   // 有坏引用就在图上方挂一条汇总。单个节点的 ⚠ 要悬停才看得见，
@@ -1196,13 +1164,8 @@ function renderFlowDiagram(steps, title) {
     html += `</div>`;
   }
   html += `</div></div>`;
-  // 计算 edges 并暂存到全局（drawFlowEdges 布局后读）
-  flowEdges = [];
-  for (const s of steps) {
-    for (const n of s.next) {
-      if (byId.has(n)) flowEdges.push({ from: s.id, to: n });
-    }
-  }
+  // edges 来自图分析（只含两端都存在的边），暂存给 drawFlowEdges 布局后读
+  flowEdges = graph.edges;
   return html;
 }
 
