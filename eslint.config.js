@@ -55,7 +55,8 @@ const selftestRendererGlobals = {
   stageOfRel: 'readonly',
   applyFilter: 'readonly',
   refreshTree: 'readonly',
-  toast: 'readonly'
+  toast: 'readonly',
+  refreshReferences: 'readonly'
 };
 
 // 只保留能指向真实缺陷的规则。每条都注明了它在这个项目里能抓到什么。

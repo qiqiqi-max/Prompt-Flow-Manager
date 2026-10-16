@@ -635,6 +635,23 @@ section('异步结果不乱序');
     'doSearch 拿到结果后先比对序号再渲染');
 }
 
+section('工作流引用索引');
+// 索引的失效点挂在 dropFromCache 上（保存/改名/删除/导入/回滚都调它），
+// 这条链断了的表现是"刚改完引用关系还是旧的"，而那是完全静默的。
+// loadWorkflowIndex 存的是 Promise，所以类型上只能靠这里卡住。
+{
+  assert(/function dropFromCache\(fullPath\) \{[\s\S]{0,200}?dropWorkflowIndex\(\);/.test(mainSrc),
+    'dropFromCache 同时作废工作流引用索引');
+  assert(/let indexPromise = null;/.test(mainSrc) && /indexPromise = workflowIndex\.collectWorkflows\(/.test(mainSrc),
+    '索引缓存存 Promise 而不是已建好的对象（并发首查只会建一次）');
+  // 渲染侧的 chip 数据来源和切文件守卫。少了守卫，上一个文件的引用列表会盖到
+  // 当前文件头上——和搜索结果乱序是同一个形状的 bug。
+  assert(/const chip = e\.target\.closest\('\.meta-chip\.refs'\)/.test(rendererSrc),
+    'meta-bar 上的引用 chip 绑了点击');
+  assert(/const seq = \+\+refsSeq;/.test(rendererSrc) && /if \(seq !== refsSeq \|\| state\.currentRel !== rel\) return;/.test(rendererSrc),
+    '引用查询有切文件守卫');
+}
+
 section('界面字号缩放');
 // 字号缩放全靠 html 的 font-size 乘 --font-scale，所有 font-size 必须写 rem。
 // 这条断言是这套机制唯一的门禁：随手写一个 font-size: 13px 不会报错、界面看着也正常，

@@ -72,6 +72,15 @@ const I18N = {
     flowMissingNext: 'next 指向了不存在的步骤：{ids}',
     flowBrokenSummary: '有 {count} 处引用失效，已在图上标出',
     flowRefMissingTitle: '引用失效',
+    // 复用关系（反方向）：这个提示词被哪些工作流引用。
+    // 这是一条用户此前完全看不到的信息 —— 删除前才知道自己有引用，
+    // 而那时工作流的节点已经变成坏引用了。
+    refsChip: '被 {count} 个工作流引用',
+    refsChipTitle: '被引用的工作流：{names}',
+    refsOpenFailed: '打开被引用的工作流失败：{name}',
+    deleteReferenced: '这个提示词被 {count} 个工作流引用：\n{names}\n\n删除后这些工作流的对应节点会变成失效引用，要在流程图里点开才能发现。仍要删除吗？',
+    // 悬空引用体检：工作流引用的文件已经不在了（被删或被改名）。
+    danglingSummary: '有 {count} 处工作流引用指向不存在的文件',
     // 复制前的占位符填充。templates/prompt-template.md 早就约定了用 [提示文字]
     // 标出要替换的部分，但复制一直是原样进剪贴板，用户粘到对话框里再手改。
     fillTitle: '填写占位符',
@@ -448,6 +457,11 @@ const I18N = {
     flowMissingNext: 'next points to unknown step(s): {ids}',
     flowBrokenSummary: '{count} broken reference(s), marked in the diagram',
     flowRefMissingTitle: 'Broken reference',
+    refsChip: 'Used by {count} workflow(s)',
+    refsChipTitle: 'Referenced by: {names}',
+    refsOpenFailed: 'Could not open the referencing workflow: {name}',
+    deleteReferenced: 'This prompt is used by {count} workflow(s):\n{names}\n\nDeleting it will turn those nodes into broken references, visible only after opening the workflow diagram. Delete anyway?',
+    danglingSummary: '{count} workflow reference(s) point to files that no longer exist',
     fillTitle: 'Fill in placeholders',
     fillHint: 'Leave blank to keep the [ ] as-is',
     fillAndCopy: 'Fill and copy',

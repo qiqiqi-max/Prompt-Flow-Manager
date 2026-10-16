@@ -323,6 +323,14 @@ body {
 .meta-chip.stage { color: var(--primary); border-color: var(--primary); }
 .meta-chip.type { color: var(--accent-text); border-color: var(--accent-text); }
 .meta-chip.tag { color: var(--text-muted); }
+/* 复用关系 chip：它和别的 chip 不一样，是可点的（点了跳到引用它的工作流）。
+   光标和焦点环是"这里能点"的唯一提示——其余 chip 都只是标签，
+   所以这个区别必须让鼠标和键盘都能看见。 */
+.meta-chip.refs { cursor: pointer; color: var(--primary); border-color: var(--primary); }
+.meta-chip.refs:hover { background: var(--bg-alt); }
+.meta-chip.refs:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+/* 悬空引用是警告态，和 stage/type 那套主动配色区分开 */
+.meta-chip.danger { color: var(--danger-text); border-color: var(--danger-text); }
 
 /* ===== 预览区 ===== */
 .preview-wrap { flex: 1; overflow-y: auto; padding: 20px 28px; min-height: 0; }

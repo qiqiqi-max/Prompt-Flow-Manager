@@ -242,6 +242,35 @@
         check('提示到时会自动隐藏', box.classList.contains('hidden'));
       }
 
+      // ---- 复用关系 chip：打开一个被引用的提示词，应能在元数据栏看到
+      //      "被 N 个工作流引用"，点它跳到那个工作流 ----
+      // 用种子里真实存在的引用（需求分析 ← 三个工作流），不用测试现造的夹具：
+      // 造出来的引用只能证明"我刚写的那条链路通"，而这条 chip 的数据来自
+      // 全库扫描，种子的引用关系才是真实输入。
+      {
+        const target = 'prompts/project-init/需求分析.md';
+        await openFile(target);
+        await sleep(600);   // 引用是异步查的，等它回来
+        const chip = document.querySelector('#meta-bar .meta-chip.refs');
+        check('被引用的提示词在元数据栏显示引用 chip', !!chip,
+          document.getElementById('meta-bar').textContent || '(元数据栏为空)');
+        const refs = chip ? JSON.parse(chip.dataset.refs || '[]') : [];
+        check('引用 chip 带上了工作流列表', refs.length >= 1 && refs.every(r => r.startsWith('workflows/')),
+          JSON.stringify(refs));
+        if (chip) {
+          await realClick(chip);
+          await sleep(600);
+          check('点引用 chip 能跳到引用它的工作流',
+            String(state.currentRel).startsWith('workflows/'),
+            String(state.currentRel) + '，chip 里是 ' + refs[0]);
+        }
+        // 反向：没有引用的工作流文件不该显示这枚 chip
+        await openFile('workflows/branch-flow-example.md');
+        await sleep(600);
+        check('没有引用的文件不显示引用 chip', !document.querySelector('#meta-bar .meta-chip.refs'),
+          document.getElementById('meta-bar').textContent);
+      }
+
       // ---- 右键菜单 ----
       const fileRow = document.querySelector('#tree .tree-row.file') || document.querySelector('#tree .tree-row');
       if (fileRow) {

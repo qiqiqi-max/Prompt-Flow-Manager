@@ -91,7 +91,9 @@ const state = {
   lockedFiles: new Set(),     // 锁定文件集合（防止误删）
   tabs: [],                   // 多标签页：[{rel, content, meta, scroll}]
   activeTab: null,            // 当前激活标签的 rel
-  fillMemory: {}              // 占位符填充记忆：token 原文 -> 上次填的值（见 rememberFillValues）
+  fillMemory: {},             // 占位符填充记忆：token 原文 -> 上次填的值（见 rememberFillValues）
+  currentRefs: [],            // 当前文件的被引用列表（工作流 rel），见 refreshReferences
+  danglingCount: 0            // 全库悬空引用条数：工作流引用的文件已经不在了
 };
 
 // ===== 工具 =====
@@ -231,7 +233,11 @@ function parseWorkflowFlow(content) {
 }
 
 function stageOfRel(rel) {
-  if (!rel.startsWith('prompts/')) return null;
+  // rel 可能为 null/undefined：空状态（没有打开任何文件，也没有标签页可恢复）时
+  // 会被 renderMetaBar 和筛选路径带着空 currentRel 走到这里。原先的实现直接
+  // rel.startsWith，在启动那一刻抛 "Cannot read properties of null"，
+  // 而这条异常会被自检当成"渲染进程报错"，一条就够让整轮功能自检变红。
+  if (!rel || !rel.startsWith('prompts/')) return null;
   const segs = rel.split('/');
   return segs.length > 2 ? segs[1] : null;
 }
@@ -360,6 +366,9 @@ async function refreshTree() {
   updateStatusCounts();
   renderStats();
   renderRecent();
+  // 元数据变了，引用关系和悬空体检也要跟着刷新：删除/改名一个提示词之后，
+  // 打开着的工作流那一页的引用列表不能还停在旧结果上。
+  refreshReferences();
 }
 
 function renderStats() {
@@ -597,9 +606,15 @@ async function openFile(rel) {
     addRecent(rel);
     // 更新状态栏信息
     updateStatusInfo((state.currentMeta.title || rel) + ' · ' + t('loaded'));
+    // 引用关系是异步查的，不 await：它的结果只影响 meta-bar 上的一枚 chip，
+    // 让"打开文件"等一次全库工作流扫描不值得。
+    refreshReferences();
     await offerDraftRecovery(rel);
   } catch (e) {
     state.currentRel = null;
+    // 打开失败也要作废在途的引用查询：否则它的结果会在文件没打开的情况下
+    // 把 chip 挂到 meta-bar 上（refsSeq 不动的话守卫认不出它是上一个文件的结果）。
+    refsSeq++;
     toast(tErr('openFailed', e), 'error');
     updateStatusInfo(t('openFailed'));
   }
@@ -766,11 +781,77 @@ function renderMetaBar() {
   let html = '';
   if (stageLabel) html += `<span class="meta-chip stage">${escapeHtml(t('stage'))}${escapeHtml(t('sep'))}${escapeHtml(stageLabel)}</span>`;
   if (m.projectType) html += `<span class="meta-chip type">${escapeHtml(t('projectType'))}${escapeHtml(t('sep'))}${escapeHtml(m.projectType)}</span>`;
-  if (Array.isArray(m.tags)) m.tags.forEach(t => html += `<span class="meta-chip tag">#${escapeHtml(t)}</span>`);
+  if (Array.isArray(m.tags)) m.tags.forEach(tag => html += `<span class="meta-chip tag">#${escapeHtml(tag)}</span>`);
   if (m.description) html += `<span class="meta-chip">${escapeHtml(m.description)}</span>`;
   if (m.version != null) html += `<span class="meta-chip">v${escapeHtml(String(m.version))}</span>`;
   if (m.updatedAt) html += `<span class="meta-chip">${escapeHtml(t('chipUpdated'))}${escapeHtml(t('sep'))}${escapeHtml(String(m.updatedAt).slice(0, 16).replace('T', ' '))}</span>`;
+  // 复用关系：这个提示词被哪些工作流引用。可点击回跳到对应工作流——
+  // 此前这条信息完全不可见，用户只能靠记忆，或者删了之后去逐个打开工作流看坏节点。
+  const refs = state.currentRefs || [];
+  if (refs.length) {
+    const names = refs.map(r => r.replace(/^workflows\//, '').replace(/\.md$/i, ''));
+    const full = names.join(t('sep'));
+    const shown = names.length > 3 ? names.slice(0, 3).join(t('sep')) + ' +' + (names.length - 3) : full;
+    html += `<span class="meta-chip refs" role="button" tabindex="0" data-refs="${escapeHtml(JSON.stringify(refs))}"`
+      + ` title="${escapeHtml(t('refsChipTitle', { names: full }))}">${escapeHtml(t('refsChip', { count: refs.length }))}${escapeHtml(t('sep'))}${escapeHtml(shown)}</span>`;
+  }
+  if (state.danglingCount) {
+    html += `<span class="meta-chip danger" title="${escapeHtml(t('danglingSummary', { count: state.danglingCount }))}">⚠ ${escapeHtml(t('danglingSummary', { count: state.danglingCount }))}</span>`;
+  }
   bar.innerHTML = html;
+}
+
+// 引用 chip 的点击/键盘。用事件委托挂在 meta-bar 上而不是每次重建后逐个绑定：
+// renderMetaBar 会被 refreshReferences 反复调用，逐个绑定等于每次重建都要重挂一遍。
+{
+  const bar = $('meta-bar');
+  const openRef = (target) => {
+    let rels = [];
+    try { rels = JSON.parse(target.dataset.refs || '[]'); } catch { rels = []; }
+    if (!rels.length) return;
+    // 一个提示词被多个工作流引用时，点第一个。多选弹层在这里是过度设计：
+    // chip 的 title 已经列出了全部引用者，想开哪个从文件树开就是了。
+    openFile(rels[0]).catch(e => toast(tErr('refsOpenFailed', e), 'error'));
+  };
+  bar.addEventListener('click', (e) => {
+    const chip = e.target.closest('.meta-chip.refs');
+    if (chip) openRef(chip);
+  });
+  bar.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const chip = e.target.closest('.meta-chip.refs');
+    if (!chip) return;
+    e.preventDefault();
+    openRef(chip);
+  });
+}
+
+// 引用关系查询的序号守卫（同 doSearch / updateComposerPreview）：切文件时
+// 上一个文件的查询可能后返回，不加守卫就会把它的引用列表盖到当前文件头上。
+let refsSeq = 0;
+
+// 刷新当前文件的引用信息。数据来自主进程的 workflow-references：它顺带把
+// 全库悬空体检（引用了不存在文件的工作流）一起带回来，因为两件事走的是同一遍
+// 工作流扫描，拆成两个 IPC 就是白扫两遍。
+async function refreshReferences() {
+  const rel = state.currentRel;
+  state.currentRefs = [];
+  state.danglingCount = 0;
+  if (!rel) { renderMetaBar(); return; }
+  const seq = ++refsSeq;
+  let res = null;
+  try {
+    res = await api.workflowReferences(rel);
+  } catch {
+    // 索引构建失败（工作流目录读不动之类）不该挡住文件本身。
+    // 退化成"没有引用信息"，而不是弹错误——打开提示词这件事与它无关。
+    res = null;
+  }
+  // 切文件守卫：等待期间用户可能已经切走，这时结果属于上一个文件。
+  if (seq !== refsSeq || state.currentRel !== rel) return;
+  state.currentRefs = (res && Array.isArray(res.refs)) ? res.refs : [];
+  state.danglingCount = (res && Number(res.danglingCount)) || 0;
+  renderMetaBar();
 }
 
 function renderContent() {
@@ -1779,7 +1860,18 @@ async function deleteCurrent() {
     toast(t('lockedCannotDelete'), 'error');
     return;
   }
-  if (!(await confirmDialog(t('deleteConfirm', { name: state.currentMeta.title || state.currentRel })))) return;
+  // 被工作流引用的提示词要单独问一次：删掉之后那些工作流的节点会变成坏引用，
+  // 而坏引用在流程图上只是一个 ⚠ 角标，不点开那个工作流根本发现不了。
+  // 用当前缓存（打开文件时拉的）；缓存里没有引用就走普通的删除确认。
+  const refs = state.currentRefs || [];
+  const name = state.currentMeta.title || state.currentRel;
+  const okDelete = refs.length
+    ? await confirmDialog(t('deleteReferenced', {
+      count: refs.length,
+      names: refs.map(r => r.replace(/^workflows\//, '').replace(/\.md$/i, '')).join('\n')
+    }))
+    : await confirmDialog(t('deleteConfirm', { name }));
+  if (!okDelete) return;
   try {
     await api.trash(state.currentRel);
     const delRel = state.currentRel;

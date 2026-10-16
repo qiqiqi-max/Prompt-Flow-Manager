@@ -84,9 +84,13 @@ async function readParsedCached(fullPath) {
   return entry;
 }
 
-// 文件被删除/移动后清掉对应缓存，避免 Map 无限增长
+// 文件被删除/移动后清掉对应缓存，避免 Map 无限增长。
+// 同时作废工作流引用索引：索引里的引用关系来自工作流正文，而正文变了的**唯一**
+// 出口就是这里的调用点（保存/改名/移动/删除/导入/回滚）。挂在别处就得记住每一处，
+// 漏一处就是"刚改完引用关系还是旧的"——和内容缓存同一个失效纪律，就挂同一行。
 function dropFromCache(fullPath) {
   contentCache.delete(fullPath);
+  dropWorkflowIndex();
 }
 // stdout/stderr 的读取端一旦消失（从终端启动后关掉终端、被管道到提前退出的命令、
 // 用 PowerShell 的 | Select-String 截流等），下一次 console.log 就会抛 EPIPE。
@@ -115,6 +119,7 @@ const I18N_TABLE = require('./src/i18n.js');
 // frontmatter 解析同样两边共用（src/frontmatter.js 结尾也有 module.exports）。
 const FRONTMATTER = require('./src/frontmatter.js');
 const WORKFLOW_REFS = require('./src/workflow-refs.js');
+const workflowIndex = require('./lib/workflow-index.js');
 const projectTypes = require('./lib/project-types');
 const ruleExport = require('./lib/rule-export');
 const { createVersionStore } = require('./lib/version-store');
@@ -979,6 +984,56 @@ ipcMain.handle('find-workflow-refs', async (e, rel) => {
     if (WORKFLOW_REFS.hasPromptRef(content, wanted)) refs.push(wRel);
   }
   return refs;
+});
+
+// ---------- 引用索引（反方向：谁在用这个提示词） ----------
+//
+// find-workflow-refs 回答的是"改名时要同步哪几个工作流"，只服务于写路径。
+// 界面要回答的是另一个问题：打开一个提示词时，它被哪几个工作流引用；
+// 以及全库里有没有指向已经不存在文件的引用（悬空引用）。两者共用下面这个索引。
+//
+// 索引不自己缓存内容：readParsedCached 已经带 (mtime, size) 失效判断，
+// 写路径调 dropFromCache 的地方（保存/改名/删除/导入/回滚）也就不用再多记一处。
+// 这里唯一要防的是"同一个请求里重复建索引"，由 indexPromise 合并并发调用。
+// 同一次"查询一批引用"里只建一次索引；null 表示下次查询要重建。
+// 存的是 Promise 而不是已经建好的对象：两个窗口同时首次查询时，
+// 第二个请求会 await 到同一个 Promise，不会各建一遍。
+let indexPromise = null;
+function loadWorkflowIndex() {
+  if (!indexPromise) {
+    indexPromise = workflowIndex.collectWorkflows(
+      DATA_ROOT,
+      // 目录收集自己走 readParsedCached：它对每个文件先 stat 再决定要不要重读，
+      // 所以"没有文件变动"时的重复查询不会真的重读一遍工作流库。
+      (rel) => readParsedCached(safeJoin(rel))
+    ).then(list => workflowIndex.buildIndex(list));
+  }
+  return indexPromise;
+}
+// 任何写入之后调用，让下一次查询重新收集。
+function dropWorkflowIndex() {
+  indexPromise = null;
+}
+
+// rel 为空时不查单向引用，只做全库悬空体检。
+ipcMain.handle('workflow-references', async (e, rel) => {
+  const wanted = String(rel || '').replace(/\\/g, '/');
+  const idx = await loadWorkflowIndex();
+  const refs = wanted ? idx.referencesTo(wanted) : [];
+  // 判"引用还在不在"用主进程自己的一遍遍历，不用渲染进程传过来的列表：
+  // 传过来的列表是上一次 refreshTree 的快照，在改名/删除后可能已经过期，
+  // 而这条路径要回答的恰恰是"现在还在不在"。
+  const existsSet = new Set((await getMetaList()).map(item => item.rel));
+  const dangling = idx.danglingRefs(r => existsSet.has(r));
+  return {
+    rel: wanted,
+    refs,
+    // 引用指向的提示词已经不在库里 —— 界面上那枚 chip 要显示成警告态
+    relDangling: !!wanted && !existsSet.has(wanted) && refs.length > 0,
+    // 悬空引用指向的提示词，供文件树打标记
+    danglingPrompts: dangling.map(d => d.prompt),
+    danglingCount: dangling.length
+  };
 });
 
 // 把 targets 里的每个工作流中指向 oldRel 的 prompt 改成指向 newRel。

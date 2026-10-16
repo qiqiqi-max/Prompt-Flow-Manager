@@ -89,7 +89,13 @@ child.on('exit', (code) => {
     /\[selftest:ui\] PASS 刷新文件树后筛选仍然生效/,
     /\[selftest:ui\] PASS 刷新文件树后筛选下拉框保持选中值/,
     /\[selftest:ui\] PASS 第二条提示不被第一条的计时器提前隐藏/,
-    /\[selftest:ui\] PASS 提示到时会自动隐藏/
+    /\[selftest:ui\] PASS 提示到时会自动隐藏/,
+    // 复用关系 chip：这枚 chip 的数据来自全库工作流扫描，只有真的把索引建起来
+    // 才会有内容。它在 DOM 里不出现时说不上是"没有引用"还是"没接上"，所以要点名。
+    /\[selftest:ui\] PASS 被引用的提示词在元数据栏显示引用 chip/,
+    /\[selftest:ui\] PASS 引用 chip 带上了工作流列表/,
+    /\[selftest:ui\] PASS 点引用 chip 能跳到引用它的工作流/,
+    /\[selftest:ui\] PASS 没有引用的文件不显示引用 chip/
   ];
   const missing = mustHave.filter(re => !re.test(out));
   if (missing.length) console.error('[test:ui] 缺少必需的检查项: ' + missing.map(String).join(', '));

@@ -201,6 +201,15 @@ child.on('exit', (code) => {
     /\[selftest:fn\] PASS 导入的回收站条目可恢复且带版本历史/,
     /\[selftest:fn\] PASS 工作流引用精确更新/,
     /\[selftest:fn\] PASS 工作流引用不误改相近路径和正文/,
+    // 引用索引（第 6c 节）：反方向查询 + 悬空体检 + 索引随内容失效。
+    // 这是界面 meta-bar 上那枚 chip 和删除前提醒的数据来源。
+    /\[selftest:fn\] PASS 能查出引用当前提示词的工作流/,
+    /\[selftest:fn\] PASS 被引用的提示词不算悬空/,
+    /\[selftest:fn\] PASS 保存工作流后引用索引立刻反映新内容/,
+    /\[selftest:fn\] PASS 引用指向不存在的文件时能识别为悬空/,
+    /\[selftest:fn\] PASS 悬空体检带上了全库条数/,
+    /\[selftest:fn\] PASS 引用不存在的文件时工作流列表仍然给出来/,
+    /\[selftest:fn\] PASS 已经没有引用的提示词不算悬空/,
     /\[selftest:fn\] PASS 拒绝读取内容目录外的库内文件 config\.json/,
     /\[selftest:fn\] PASS 拒绝读取内容目录外的库内文件 prompts\/\.\.\/config\.json/,
     // 三选一对话框的三条分支各自都要落到磁盘断言上，见 functionalScript 第 13 节

@@ -139,6 +139,10 @@ jobs:
       - name: 配置文件读取
         run: npm run test:config-file
 
+      # 引用索引：谁在引用这个提示词、有没有指向已删文件的引用。自带反向对照。
+      - name: 工作流引用索引
+        run: npm run test:workflow-index
+
       # 纯逻辑测试，不用起 Electron：从 renderer.js 里抠出 debounce 单独验语义。
       # 自带反向对照（旧版一行 debounce 必须失败），所以它不会变成永远绿的空壳。
       - name: debounce 语义
