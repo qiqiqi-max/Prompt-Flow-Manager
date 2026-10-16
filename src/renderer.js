@@ -184,56 +184,11 @@ function parseFrontmatter(content) {
   return FRONTMATTER.parse(content);
 }
 
+// 步骤解析在 src/flow-graph.js 里（parseSteps）：主进程的 MCP server 与
+// 渲染进程必须用同一份实现，否则图上画出来的步骤和接口报出来的步骤
+// 会在某个写法上分叉，而且两边看着都对。
 function parseWorkflowFlow(content) {
-  // 解析 frontmatter 里 flow 的步骤（- id/prompt/label/next，next 支持数组）
-  const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!m) return [];
-  const lines = m[1].split(/\r?\n/);
-  // 按行取块，不要用惰性正则去截 flow 段。之前的写法在多行模式下会被行尾锚点
-  // 提前截断，只解析出第一个步骤而且丢掉 prompt，导致流程图永远只有一个空节点。
-  const startIdx = lines.findIndex(l => /^flow:\s*$/.test(l));
-  if (startIdx === -1) return [];
-  const blockLines = [];
-  for (let i = startIdx + 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.trim() === '') { blockLines.push(line); continue; }
-    if (/^\s/.test(line)) blockLines.push(line); // 缩进行 = 仍在 flow 段内
-    else break;                                  // 顶格 = 下一个 frontmatter 字段
-  }
-  const block = blockLines.join('\n');
-  const steps = [];
-  let cur = null;
-  for (const line of block.split(/\r?\n/)) {
-    if (/^\s*-\s/.test(line)) {
-      if (cur) steps.push(cur);
-      cur = {};
-      const rest = line.replace(/^\s*-\s*/, '');
-      const kv = rest.match(/^(\w+):\s*(.*)$/);
-      if (kv) cur[kv[1]] = kv[2].trim().replace(/^["']|["']$/g, '');
-    } else if (cur && /^\s+\w+:/.test(line)) {
-      const kv = line.trim().match(/^(\w+):\s*(.*)$/);
-      if (kv) cur[kv[1]] = kv[2].trim().replace(/^["']|["']$/g, '');
-    }
-  }
-  if (cur) steps.push(cur);
-  // 归一化 next 与 prompt 路径（Windows 反斜杠统一转正斜杠）
-  for (const s of steps) {
-    if (s.prompt) s.prompt = String(s.prompt).replace(/\\/g, '/');
-    if (s.next == null || s.next === '') {
-      s.next = [];
-    } else if (Array.isArray(s.next)) {
-      s.next = s.next.map(x => String(x).trim()).filter(Boolean);
-    } else {
-      // 形如 "[a, b]" 或 "a"
-      let v = String(s.next).trim().replace(/^["']|["']$/g, '');
-      if (v.startsWith('[') && v.endsWith(']')) {
-        s.next = v.slice(1, -1).split(',').map(x => x.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
-      } else {
-        s.next = [v];
-      }
-    }
-  }
-  return steps;
+  return FLOW_GRAPH.parseSteps(content);
 }
 
 function stageOfRel(rel) {

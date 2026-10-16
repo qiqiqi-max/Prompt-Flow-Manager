@@ -20,6 +20,7 @@ Prompt Flow Manager 用于集中整理项目开发中反复使用的提示词、
 - [文件格式](#文件格式)
 - [数据与备份](#数据与备份)
 - [架构与安全](#架构与安全)
+- [只读 MCP 接口](#只读-mcp-接口)
 - [开发与测试](#开发与测试)
 - [项目结构](#项目结构)
 - [许可证](#许可证)
@@ -41,6 +42,7 @@ Prompt Flow Manager 用于集中整理项目开发中反复使用的提示词、
 | 启动自愈 | 启动时检查数据目录：摘掉回收站里点不动的幽灵记录、把孤立正文收养回可见状态、清掉写入中断留下的半截临时文件 |
 | 可诊断 | 运行日志滚动写入 `logs/`（单文件 2 MB、最多 5 个），设置里可导出一份脱敏的诊断信息用于报障 |
 | 升级提示 | 启动时查询 GitHub 最新发布版本并在右下角提示。只读版本号，不自动下载安装，不发送任何本机信息，设置里可完全关闭 |
+| 只读 MCP 接口 | 自带一个 stdio 的 MCP server，把提示词库暴露给 Claude Code / Codex 等支持 MCP 的工具查询。**只有读操作**，没有任何写入工具 |
 
 应用对大规模提示词库做了针对性优化：文件内容与解析结果按修改时间和大小缓存，目录树与元数据一次遍历返回，搜索时复用正文索引。项目内置的基准脚本可用于复测这些性能路径。
 
@@ -186,6 +188,47 @@ flowchart LR
   响应体上限 256 KiB，不携带任何本机标识，失败一律静默；发布页地址是代码里的常量，
   不取自响应内容。设置里关掉后连请求都不会发出。除此之外应用不联网。
 
+## 只读 MCP 接口
+
+把本地提示词库接到支持 [MCP](https://modelcontextprotocol.io) 的 AI 工具上（Claude Code、Codex 等），
+让它们直接查"我库里有哪些提示词、某条讲了什么、哪个工作流用它"。
+
+**全部是读操作**：列库、检索、读正文、看工作流图、查引用关系。没有写入工具，
+应用本身仍然不调用任何 AI 服务——数据流向是使用者来读这个库。
+
+在 MCP 客户端的配置里加一项：
+
+```json
+{
+  "mcpServers": {
+    "prompt-flow-manager": {
+      "command": "node",
+      "args": ["<仓库绝对路径>/mcp/server.js"],
+      "env": { "PFM_DATA_DIR": "<可选：要暴露的提示词库目录>" }
+    }
+  }
+}
+```
+
+不设 `PFM_DATA_DIR` 时用仓库目录（与源码运行时应用自己的数据目录一致）。
+打包版的数据在 `%APPDATA%\prompt-flow-manager\`，那种情况下请显式指明。
+
+可用工具：
+
+| 工具 | 用途 |
+| --- | --- |
+| `library_overview` | 库里有多少提示词/工作流、阶段分布、工程类型与标签清单 |
+| `prompts_list` | 列提示词（不含正文），可按阶段或工程类型过滤 |
+| `prompts_search` | 全文检索，返回命中片段 |
+| `prompts_get` | 读一条提示词的元数据与正文（超长会截断并注明） |
+| `workflows_list` | 工作流及其步骤图，含分支与"从入口走不到的步骤" |
+| `prompts_references` | 某条提示词被哪些工作流引用；不传参数则做全库悬空引用体检 |
+
+安全边界：只读；路径只允许 `prompts/` `workflows/` `templates/` 下的 `.md`
+（`../` 逃逸、`.versions/`、`config.json`、日志与草稿目录一律拒绝）；返回正文有长度上限。
+没有引入第三方 MCP SDK——协议面只有 initialize / tools/list / tools/call / ping，
+沿用项目"运行时依赖最小"的取舍（目前只有 archiver 与 yauzl 两个）。
+
 ## 开发与测试
 
 ```bash
@@ -265,13 +308,17 @@ Prompt-Flow-Manager/
 │   ├── diagnostics.js       # 诊断信息收集与导出
 │   ├── sandbox-state.js     # 沙箱开关判定与降级记录
 │   ├── update-check.js      # 启动时查最新发布版本
+│   ├── library.js          # 内容库数据层：正文缓存、元数据、全文搜索
+│   ├── workflow-index.js   # 工作流引用索引与悬空引用体检
 │   └── selftest.js          # 测试专用代码（不参与正常启动路径）
+├── mcp/                     # 只读 MCP server（stdio，不依赖 electron）
 ├── src/
 │   ├── index.html           # 应用界面骨架
 │   ├── styles.css           # 主题与组件样式
 │   ├── renderer.js          # 渲染进程交互逻辑
 │   ├── i18n.js              # 中英文文案
 │   ├── frontmatter.js       # frontmatter 解析与自动字段更新
+│   ├── flow-graph.js        # 工作流图：步骤解析、分层、成环、不可达
 │   ├── selftest/            # 自检脚本（在页面上下文里执行的真实 .js）
 │   └── vendor/              # 本地化的渲染进程依赖
 ├── prompts/                 # 内置提示词示例

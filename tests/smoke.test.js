@@ -760,10 +760,17 @@ section('工作流流程图解析');
 // 故障回顾：flow 段用惰性正则 /^flow:\\s*\\n([\\s\\S]*?)(?=^\\S|\\n\\S|$)/m 去截，
 // 多行模式下第一行行尾就满足 $，结果只解析出 1 个步骤且丢掉 prompt，
 // 流程图永远只有一个空节点。README 里承诺的"点击节点跳转"实际一直是坏的。
-assert(!/\(\?=\^\\S\|\\n\\S\|\$\)/.test(rendererSrc), '不再用会被行尾锚点截断的惰性正则截 flow 段');
-assert(/lines\.findIndex\(l => \/\^flow:/.test(rendererSrc), 'flow 段改为按行提取');
-assert(/if \(\/\^\\s\/\.test\(line\)\) blockLines\.push\(line\)/.test(rendererSrc), '缩进行归入 flow 段');
-assert(/else break;/.test(rendererSrc), '遇到顶格行才结束 flow 段');
+// 这几条查的是 flow 段的解析实现，它现在在 src/flow-graph.js 里（parseSteps）：
+// 渲染进程、MCP server、测试共用同一份。断言跟着实现走，留在 renderer.js 上会
+// 变成"永远查不到"的假绿——而这正是它们要防的那类失效。
+const flowGraphSrc = fs.readFileSync(path.join(root, 'src/flow-graph.js'), 'utf8');
+assert(!/\(\?=\^\\S\|\\n\\S\|\$\)/.test(rendererSrc + flowGraphSrc), '不再用会被行尾锚点截断的惰性正则截 flow 段');
+assert(/lines\.findIndex\(l => \/\^flow:/.test(flowGraphSrc), 'flow 段改为按行提取');
+assert(/if \(\/\^\\s\/\.test\(line\)\) blockLines\.push\(line\)/.test(flowGraphSrc), '缩进行归入 flow 段');
+assert(/else break;/.test(flowGraphSrc), '遇到顶格行才结束 flow 段');
+// 渲染进程只能委托，不能自己再抄一份（抄一份是这条债的原始形状）
+assert(/function parseWorkflowFlow\(content\) \{\s*return FLOW_GRAPH\.parseSteps\(content\);/.test(rendererSrc),
+  '渲染进程的步骤解析委托给 FLOW_GRAPH.parseSteps（不再各有一份）');
 // 用真实的种子工作流验证解析结果
 {
   const wf = fs.readFileSync(path.join(root, 'workflows/full-project-flow.md'), 'utf8');

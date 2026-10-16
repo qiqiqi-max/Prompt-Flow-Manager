@@ -38,6 +38,17 @@
 
 ### 变更
 
+- **只读 MCP 接口**：新增 mcp/ 下的 stdio MCP server，把提示词库暴露给
+  Claude Code / Codex 等支持 MCP 的工具查询——列库、检索、读正文、看工作流图、
+  查引用关系。**只有读操作**，没有写入工具：写操作要接的是写队列、版本快照、
+  回收站、导入事务、锁定与引用同步那一整套一致性机制，那是主进程的职责，
+  一个 stdio 子进程硬写会绕过它们的全部保证。应用本身仍然不调用任何 AI 服务。
+  路径被限制在 prompts/ workflows/ templates/ 下的 .md（ 逃逸、.versions/、
+  config.json、logs/ drafts/ 一律拒绝），正文超长会截断并在结果里说明。
+  没有引入第三方 MCP SDK：协议面只有 initialize / tools-list / tools-call / ping，
+  沿用项目运行时依赖只有两个的取舍。自带 test:mcp（真子进程走 JSON-RPC，
+  覆盖协议往返、只读边界、返回上限，并含一组反向对照）。
+
 - **内容库数据层抽成 lib/library.js**：正文缓存、元数据列表、全文搜索此前长在
   electron-main.js 里，于是任何别的入口（MCP server、命令行工具、裸 node 测试）
   想复用都得先把主进程整个 require 起来，而那会拉起 electron。现在它们只依赖
