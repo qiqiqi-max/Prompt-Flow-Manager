@@ -54,12 +54,16 @@ child.stderr.on('data', (d) => { out += d; process.stderr.write(d); });
 
 const cleanup = () => { try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch (_) {} };
 
+// 120 秒不是随手写的余量：自检本身包含只读体检（遍历整库并逐个渲染）和
+// 一百多步真实点击，每步都带等待，实测已经到 60 秒上下，而 CI 机器更慢。
+// 第一版上限 60 秒时，新增的占位符点击段把它顶过了线，报出来的是"超时"
+// 而不是任何一条失败的断言——超时值要留出余量，否则它自己会变成假故障源。
 const timeout = setTimeout(() => {
-  console.error('\n[test:ui] 超时：60 秒内没有完成自检，判定失败');
+  console.error('\n[test:ui] 超时：120 秒内没完成自检，判定失败');
   child.kill();
   cleanup();
   process.exit(1);
-}, 60000);
+}, 120000);
 
 child.on('exit', (code) => {
   clearTimeout(timeout);
@@ -89,7 +93,21 @@ child.on('exit', (code) => {
     /\[selftest:ui\] PASS 刷新文件树后筛选仍然生效/,
     /\[selftest:ui\] PASS 刷新文件树后筛选下拉框保持选中值/,
     /\[selftest:ui\] PASS 第二条提示不被第一条的计时器提前隐藏/,
-    /\[selftest:ui\] PASS 提示到时会自动隐藏/
+    /\[selftest:ui\] PASS 提示到时会自动隐藏/,
+    // 复用关系 chip：这枚 chip 的数据来自全库工作流扫描，只有真的把索引建起来
+    // 才会有内容。它在 DOM 里不出现时说不上是"没有引用"还是"没接上"，所以要点名。
+    /\[selftest:ui\] PASS 被引用的提示词在元数据栏显示引用 chip/,
+    /\[selftest:ui\] PASS 引用 chip 带上了工作流列表/,
+    /\[selftest:ui\] PASS 点引用 chip 能跳到引用它的工作流/,
+    /\[selftest:ui\] PASS 没有引用的文件不显示引用 chip/,
+    // 预览区就地填占位符。这几条要显式点名：整段包在 if (marks().length) 里，
+    // 种子内容改了导致标记不上时，段里一条都不会输出，而"没有 FAIL"照样是绿的。
+    /\[selftest:ui\] PASS 预览区把 \[占位符\] 标成了可点的 chip/,
+    /\[selftest:ui\] PASS 有占位符时显示提示行/,
+    /\[selftest:ui\] PASS 点 chip 会弹出就地填写框/,
+    /\[selftest:ui\] PASS 填过的 chip 显示填进去的值/,
+    /\[selftest:ui\] PASS 复制用的是填好的正文/,
+    /\[selftest:ui\] PASS 复制不会改动磁盘上的文件/
   ];
   const missing = mustHave.filter(re => !re.test(out));
   if (missing.length) console.error('[test:ui] 缺少必需的检查项: ' + missing.map(String).join(', '));

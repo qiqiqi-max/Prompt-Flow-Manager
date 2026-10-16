@@ -111,6 +111,9 @@
 
           <!-- 预览区 -->
           <div id="preview-wrap" class="preview-wrap">
+            <!-- 占位符提示行：[提示文字] 在正文里标成可点的 chip，但这没有自解释性，
+                 没有这行字用户只会以为那是普通高亮。没有占位符时整行隐藏。 -->
+            <div id="preview-fill-hint" class="fill-hint-bar hidden" role="status" aria-live="polite"></div>
             <div id="preview" class="preview markdown-body"></div>
           </div>
 
@@ -319,6 +322,9 @@
   <script src="placeholders.js"></script>
   <!-- 模板包含引擎（src/includes.js）。双用模块：声明全局 INCLUDES -->
   <script src="includes.js"></script>
+  <!-- 工作流图分析（src/flow-graph.js）：分层、成环、不可达。
+       双用模块，tests/flow-graph.test.js 里 require 同一份文件。 -->
+  <script src="flow-graph.js"></script>
   <script src="composer-meta.js"></script>
   <script src="renderer.js"></script>
 </body>

@@ -177,6 +177,9 @@ npm run test:export-file # 单文件导出原子写入，失败时保留原文�
 npm run test:failure-feedback # 删除和新增工程类型的失败不会被当成成功（裸 node）
 npm run test:draft-store # 草稿按文件独立保存、清除和处理损坏文件（裸 node）
 npm run test:config-file # config.json 损坏时改名留档而不是被默认值覆盖（裸 node，自带一组反向对照）
+npm run test:workflow-index # 引用索引：谁在引用这个提示词、悬空引用体检（裸 node，自带一组反向对照）
+npm run test:flow-graph # 工作流图：分层、成环、不可达步骤（裸 node，自带一组反向对照）
+npm run test:mcp          # 只读 MCP server：协议往返、只读边界、返回上限（裸 node，自带一组反向对照）
 npm run test:import-rollback # 真实 Electron 完整备份中途失败后整体撤回
 npm run test:ui-failure # 真实 Electron 配置写入失败时显示提示并恢复界面状态
 npm run test:includes     # 模板包含引擎（裸 node，自带一组反向对照）

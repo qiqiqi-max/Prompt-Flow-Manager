@@ -323,10 +323,41 @@ body {
 .meta-chip.stage { color: var(--primary); border-color: var(--primary); }
 .meta-chip.type { color: var(--accent-text); border-color: var(--accent-text); }
 .meta-chip.tag { color: var(--text-muted); }
+/* 复用关系 chip：它和别的 chip 不一样，是可点的（点了跳到引用它的工作流）。
+   光标和焦点环是"这里能点"的唯一提示——其余 chip 都只是标签，
+   所以这个区别必须让鼠标和键盘都能看见。 */
+.meta-chip.refs { cursor: pointer; color: var(--primary); border-color: var(--primary); }
+.meta-chip.refs:hover { background: var(--bg-alt); }
+.meta-chip.refs:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+/* 悬空引用是警告态，和 stage/type 那套主动配色区分开 */
+.meta-chip.danger { color: var(--danger-text); border-color: var(--danger-text); }
 
 /* ===== 预览区 ===== */
 .preview-wrap { flex: 1; overflow-y: auto; padding: 20px 28px; min-height: 0; }
 .preview { max-width: 780px; }
+
+/* 占位符提示行。它和正文一起滚动，不吸顶：吸顶会挤掉正文的可视高度，
+   而这条提示只在"有占位符且还没填完"时出现，本来就是过渡状态。 */
+.fill-hint-bar {
+  max-width: 780px; margin-bottom: 12px; padding: 6px 10px; border-radius: 6px;
+  font-size: 0.75rem; line-height: 1.6;
+  background: var(--bg-alt); border: 1px solid var(--border); color: var(--text-muted);
+}
+/* 正文里被标出来的 [占位符]。虚线底 + 手型光标是"这里能点"的提示；
+   填过的换成实底色，和"还没填"一眼分得开。 */
+.preview mark.ph {
+  background: transparent; color: inherit; cursor: pointer;
+  border-bottom: 1px dashed var(--primary); padding: 0 1px; border-radius: 2px;
+}
+.preview mark.ph:hover { background: var(--bg-alt); }
+.preview mark.ph:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.preview mark.ph-filled {
+  background: color-mix(in srgb, var(--primary) 18%, transparent);
+  border-bottom-style: solid;
+}
+@media (prefers-color-scheme: dark) {
+  .preview mark.ph-filled { background: color-mix(in srgb, var(--primary) 26%, transparent); }
+}
 .editor-wrap { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 12px 14px; }
 .editor {
   flex: 1; width: 100%; resize: none; border: 1px solid var(--border); border-radius: 6px;

@@ -71,6 +71,68 @@
       check('工作流引用精确更新', refContent.includes('    prompt: "' + refTarget + '"'), refContent);
       check('工作流引用不误改相近路径和正文', refContent.includes(renamed + '.bak') && refContent.includes('正文保留 ' + renamed), refContent);
       await api.setConfig({ lockedFiles: [] });
+
+      // 6c. 引用索引（反方向）：谁在引用这个提示词、全库有没有悬空引用。
+      // 与 6b 的区别是方向：6b 服务于改名同步（写路径），这里服务于界面展示
+      // （打开一个提示词时告诉用户"它在哪些工作流里"、删除前提醒）。
+      //
+      // 先把 6b 改走的引用改回来：6b 结尾把 prompt 指向了 refTarget，
+      // 不复位的话"查得到引用"这条会落在一个已经没有引用的文件上，无从判断真假。
+      await api.saveFile(refWorkflow, [
+        '---',
+        'title: 自检引用',
+        'flow:',
+        '  - id: a',
+        '    prompt: ' + renamed,
+        '---',
+        '正文保留 ' + renamed
+      ].join('\n'));
+      const back = await api.workflowReferences(renamed);
+      check('能查出引用当前提示词的工作流', back.refs.includes(refWorkflow), JSON.stringify(back.refs));
+      check('被引用的提示词不算悬空', back.relDangling === false, JSON.stringify(back));
+
+      // 索引随内容失效。顺序必须是"先查一次 → 再改工作流 → 再查"，两次查询
+      // 之间隔着一次写。写成"改完再连查两次"是空断言：那次查询本来就在新建
+      // 索引，根本不经过"旧索引还在不在"这条路。
+      const beforeEdit = await api.workflowReferences(renamed);
+      await api.saveFile(refWorkflow, [
+        '---',
+        'title: 自检引用',
+        'flow:',
+        '  - id: a',
+        '    prompt: ' + refTarget,
+        '---',
+        '正文保留 ' + renamed
+      ].join('\n'));
+      const afterEdit = await api.workflowReferences(renamed);
+      check('保存工作流后引用索引立刻反映新内容',
+        beforeEdit.refs.includes(refWorkflow) && afterEdit.refs.length === 0,
+        JSON.stringify({ before: beforeEdit.refs, after: afterEdit.refs }));
+
+      // 换成指向一个不存在的文件：悬空体检必须认出它。
+      // 只在 danglingCount 上断言是不够的——"多算了一条别的坏引用"也会让它变大，
+      // 所以要看 danglingPrompts 里有没有这一个具体路径。
+      await api.saveFile(refWorkflow, [
+        '---',
+        'title: 自检引用',
+        'flow:',
+        '  - id: a',
+        '    prompt: ' + 'prompts/testing/自检幽灵.md',
+        '---',
+        '正文保留 ' + renamed
+      ].join('\n'));
+      const ghost = await api.workflowReferences('prompts/testing/自检幽灵.md');
+      check('引用指向不存在的文件时能识别为悬空',
+        ghost.relDangling === true && ghost.danglingPrompts.includes('prompts/testing/自检幽灵.md'),
+        JSON.stringify(ghost));
+      check('悬空体检带上了全库条数',
+        typeof ghost.danglingCount === 'number' && ghost.danglingCount >= 1,
+        JSON.stringify(ghost.danglingCount));
+      check('引用不存在的文件时工作流列表仍然给出来', ghost.refs.includes(refWorkflow),
+        JSON.stringify(ghost.refs));
+      check('已经没有引用的提示词不算悬空', (await api.workflowReferences(renamed)).refs.length === 0,
+        JSON.stringify((await api.workflowReferences(renamed)).refs));
+
       await api.trash(refWorkflow);
 
       // 7. 解锁 → 删除 → 回收站 → 恢复

@@ -91,11 +91,17 @@ const state = {
   lockedFiles: new Set(),     // 锁定文件集合（防止误删）
   tabs: [],                   // 多标签页：[{rel, content, meta, scroll}]
   activeTab: null,            // 当前激活标签的 rel
-  fillMemory: {}              // 占位符填充记忆：token 原文 -> 上次填的值（见 rememberFillValues）
+  fillMemory: {},             // 占位符填充记忆：token 原文 -> 上次填的值（见 rememberFillValues）
+  currentRefs: [],            // 当前文件的被引用列表（工作流 rel），见 refreshReferences
+  danglingCount: 0,           // 全库悬空引用条数：工作流引用的文件已经不在了
+  previewFills: {}            // 预览区就地填过的占位符：rel -> { token: 值 }，见 enhancePreviewPlaceholders
 };
 
 // ===== 工具 =====
 const $ = (id) => document.getElementById(id);
+// 预览区占位符 chip 的选择器。定义在这里而不是紧挨用法：下面的委托监听器是
+// 顶层语句，在 IIFE 里就用到了它，而 const 不像函数声明那样能提前访问。
+const PLACEHOLDER_MARK = 'mark.ph';
 // 返回的函数会返回一个 promise，它在这次防抖真正执行完之后才 resolve，
 // 并额外挂一个 .flush()：立即执行待处理的那次调用（没有待处理的就等在飞的那次）。
 //
@@ -178,60 +184,19 @@ function parseFrontmatter(content) {
   return FRONTMATTER.parse(content);
 }
 
+// 步骤解析在 src/flow-graph.js 里（parseSteps）：主进程的 MCP server 与
+// 渲染进程必须用同一份实现，否则图上画出来的步骤和接口报出来的步骤
+// 会在某个写法上分叉，而且两边看着都对。
 function parseWorkflowFlow(content) {
-  // 解析 frontmatter 里 flow 的步骤（- id/prompt/label/next，next 支持数组）
-  const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!m) return [];
-  const lines = m[1].split(/\r?\n/);
-  // 按行取块，不要用惰性正则去截 flow 段。之前的写法在多行模式下会被行尾锚点
-  // 提前截断，只解析出第一个步骤而且丢掉 prompt，导致流程图永远只有一个空节点。
-  const startIdx = lines.findIndex(l => /^flow:\s*$/.test(l));
-  if (startIdx === -1) return [];
-  const blockLines = [];
-  for (let i = startIdx + 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.trim() === '') { blockLines.push(line); continue; }
-    if (/^\s/.test(line)) blockLines.push(line); // 缩进行 = 仍在 flow 段内
-    else break;                                  // 顶格 = 下一个 frontmatter 字段
-  }
-  const block = blockLines.join('\n');
-  const steps = [];
-  let cur = null;
-  for (const line of block.split(/\r?\n/)) {
-    if (/^\s*-\s/.test(line)) {
-      if (cur) steps.push(cur);
-      cur = {};
-      const rest = line.replace(/^\s*-\s*/, '');
-      const kv = rest.match(/^(\w+):\s*(.*)$/);
-      if (kv) cur[kv[1]] = kv[2].trim().replace(/^["']|["']$/g, '');
-    } else if (cur && /^\s+\w+:/.test(line)) {
-      const kv = line.trim().match(/^(\w+):\s*(.*)$/);
-      if (kv) cur[kv[1]] = kv[2].trim().replace(/^["']|["']$/g, '');
-    }
-  }
-  if (cur) steps.push(cur);
-  // 归一化 next 与 prompt 路径（Windows 反斜杠统一转正斜杠）
-  for (const s of steps) {
-    if (s.prompt) s.prompt = String(s.prompt).replace(/\\/g, '/');
-    if (s.next == null || s.next === '') {
-      s.next = [];
-    } else if (Array.isArray(s.next)) {
-      s.next = s.next.map(x => String(x).trim()).filter(Boolean);
-    } else {
-      // 形如 "[a, b]" 或 "a"
-      let v = String(s.next).trim().replace(/^["']|["']$/g, '');
-      if (v.startsWith('[') && v.endsWith(']')) {
-        s.next = v.slice(1, -1).split(',').map(x => x.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
-      } else {
-        s.next = [v];
-      }
-    }
-  }
-  return steps;
+  return FLOW_GRAPH.parseSteps(content);
 }
 
 function stageOfRel(rel) {
-  if (!rel.startsWith('prompts/')) return null;
+  // rel 可能为 null/undefined：空状态（没有打开任何文件，也没有标签页可恢复）时
+  // 会被 renderMetaBar 和筛选路径带着空 currentRel 走到这里。原先的实现直接
+  // rel.startsWith，在启动那一刻抛 "Cannot read properties of null"，
+  // 而这条异常会被自检当成"渲染进程报错"，一条就够让整轮功能自检变红。
+  if (!rel || !rel.startsWith('prompts/')) return null;
   const segs = rel.split('/');
   return segs.length > 2 ? segs[1] : null;
 }
@@ -360,6 +325,9 @@ async function refreshTree() {
   updateStatusCounts();
   renderStats();
   renderRecent();
+  // 元数据变了，引用关系和悬空体检也要跟着刷新：删除/改名一个提示词之后，
+  // 打开着的工作流那一页的引用列表不能还停在旧结果上。
+  refreshReferences();
 }
 
 function renderStats() {
@@ -597,9 +565,15 @@ async function openFile(rel) {
     addRecent(rel);
     // 更新状态栏信息
     updateStatusInfo((state.currentMeta.title || rel) + ' · ' + t('loaded'));
+    // 引用关系是异步查的，不 await：它的结果只影响 meta-bar 上的一枚 chip，
+    // 让"打开文件"等一次全库工作流扫描不值得。
+    refreshReferences();
     await offerDraftRecovery(rel);
   } catch (e) {
     state.currentRel = null;
+    // 打开失败也要作废在途的引用查询：否则它的结果会在文件没打开的情况下
+    // 把 chip 挂到 meta-bar 上（refsSeq 不动的话守卫认不出它是上一个文件的结果）。
+    refsSeq++;
     toast(tErr('openFailed', e), 'error');
     updateStatusInfo(t('openFailed'));
   }
@@ -766,11 +740,98 @@ function renderMetaBar() {
   let html = '';
   if (stageLabel) html += `<span class="meta-chip stage">${escapeHtml(t('stage'))}${escapeHtml(t('sep'))}${escapeHtml(stageLabel)}</span>`;
   if (m.projectType) html += `<span class="meta-chip type">${escapeHtml(t('projectType'))}${escapeHtml(t('sep'))}${escapeHtml(m.projectType)}</span>`;
-  if (Array.isArray(m.tags)) m.tags.forEach(t => html += `<span class="meta-chip tag">#${escapeHtml(t)}</span>`);
+  if (Array.isArray(m.tags)) m.tags.forEach(tag => html += `<span class="meta-chip tag">#${escapeHtml(tag)}</span>`);
   if (m.description) html += `<span class="meta-chip">${escapeHtml(m.description)}</span>`;
   if (m.version != null) html += `<span class="meta-chip">v${escapeHtml(String(m.version))}</span>`;
   if (m.updatedAt) html += `<span class="meta-chip">${escapeHtml(t('chipUpdated'))}${escapeHtml(t('sep'))}${escapeHtml(String(m.updatedAt).slice(0, 16).replace('T', ' '))}</span>`;
+  // 复用关系：这个提示词被哪些工作流引用。可点击回跳到对应工作流——
+  // 此前这条信息完全不可见，用户只能靠记忆，或者删了之后去逐个打开工作流看坏节点。
+  const refs = state.currentRefs || [];
+  if (refs.length) {
+    const names = refs.map(r => r.replace(/^workflows\//, '').replace(/\.md$/i, ''));
+    const full = names.join(t('sep'));
+    const shown = names.length > 3 ? names.slice(0, 3).join(t('sep')) + ' +' + (names.length - 3) : full;
+    html += `<span class="meta-chip refs" role="button" tabindex="0" data-refs="${escapeHtml(JSON.stringify(refs))}"`
+      + ` title="${escapeHtml(t('refsChipTitle', { names: full }))}">${escapeHtml(t('refsChip', { count: refs.length }))}${escapeHtml(t('sep'))}${escapeHtml(shown)}</span>`;
+  }
+  if (state.danglingCount) {
+    html += `<span class="meta-chip danger" title="${escapeHtml(t('danglingSummary', { count: state.danglingCount }))}">⚠ ${escapeHtml(t('danglingSummary', { count: state.danglingCount }))}</span>`;
+  }
   bar.innerHTML = html;
+}
+
+// 预览区占位符 chip 的点击。委托挂在容器上：预览内容是反复重渲染出来的
+// （切文件、展开 include、填完值都会重画），逐个绑定等于每次重画都要重挂一遍。
+{
+  const preview = $('preview');
+  const pick = async (el) => {
+    if (!el || !el.dataset || !el.dataset.token) return;
+    await fillPlaceholderInline(el.dataset.token);
+  };
+  preview.addEventListener('click', (e) => {
+    const mark = e.target.closest && e.target.closest(PLACEHOLDER_MARK);
+    if (mark) pick(mark);
+  });
+  preview.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const mark = e.target.closest && e.target.closest(PLACEHOLDER_MARK);
+    if (!mark) return;
+    e.preventDefault();
+    pick(mark);
+  });
+}
+
+// 引用 chip 的点击/键盘。用事件委托挂在 meta-bar 上而不是每次重建后逐个绑定：
+// renderMetaBar 会被 refreshReferences 反复调用，逐个绑定等于每次重建都要重挂一遍。
+{
+  const bar = $('meta-bar');
+  const openRef = (target) => {
+    let rels = [];
+    try { rels = JSON.parse(target.dataset.refs || '[]'); } catch { rels = []; }
+    if (!rels.length) return;
+    // 一个提示词被多个工作流引用时，点第一个。多选弹层在这里是过度设计：
+    // chip 的 title 已经列出了全部引用者，想开哪个从文件树开就是了。
+    openFile(rels[0]).catch(e => toast(tErr('refsOpenFailed', e), 'error'));
+  };
+  bar.addEventListener('click', (e) => {
+    const chip = e.target.closest('.meta-chip.refs');
+    if (chip) openRef(chip);
+  });
+  bar.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const chip = e.target.closest('.meta-chip.refs');
+    if (!chip) return;
+    e.preventDefault();
+    openRef(chip);
+  });
+}
+
+// 引用关系查询的序号守卫（同 doSearch / updateComposerPreview）：切文件时
+// 上一个文件的查询可能后返回，不加守卫就会把它的引用列表盖到当前文件头上。
+let refsSeq = 0;
+
+// 刷新当前文件的引用信息。数据来自主进程的 workflow-references：它顺带把
+// 全库悬空体检（引用了不存在文件的工作流）一起带回来，因为两件事走的是同一遍
+// 工作流扫描，拆成两个 IPC 就是白扫两遍。
+async function refreshReferences() {
+  const rel = state.currentRel;
+  state.currentRefs = [];
+  state.danglingCount = 0;
+  if (!rel) { renderMetaBar(); return; }
+  const seq = ++refsSeq;
+  let res = null;
+  try {
+    res = await api.workflowReferences(rel);
+  } catch {
+    // 索引构建失败（工作流目录读不动之类）不该挡住文件本身。
+    // 退化成"没有引用信息"，而不是弹错误——打开提示词这件事与它无关。
+    res = null;
+  }
+  // 切文件守卫：等待期间用户可能已经切走，这时结果属于上一个文件。
+  if (seq !== refsSeq || state.currentRel !== rel) return;
+  state.currentRefs = (res && Array.isArray(res.refs)) ? res.refs : [];
+  state.danglingCount = (res && Number(res.danglingCount)) || 0;
+  renderMetaBar();
 }
 
 function renderContent() {
@@ -790,6 +851,7 @@ function renderPromptPreview() {
   const preview = $('preview');
   preview.innerHTML = renderMarkdown(body);
   enhanceCodeBlocks(preview);
+  enhancePreviewPlaceholders(preview);
 
   // 若含 {{include: ...}}，异步解析并刷新预览（带切文件守卫）
   if (INCLUDES.hasInclude(body)) {
@@ -805,9 +867,124 @@ function renderPromptPreview() {
       if (state.currentRel === rel && !state.editMode) {
         preview.innerHTML = renderMarkdown(resolved);
         enhanceCodeBlocks(preview);
+        // 展开 include 之后正文变了，标记要重打一遍：include 进来的片段里的
+        // 占位符此前不在 DOM 里，不重打就点不到。
+        enhancePreviewPlaceholders(preview);
       }
     });
   }
+}
+
+// ===== 预览区里的占位符 =====
+//
+// 约定（templates/prompt-template.md）是用 [提示文字] 标出需要替换的部分，
+// 复制时会弹一次填充面板。但面板只有"提示文字"这一列，用户看不到它在正文里的
+// 位置，也就没法判断该填什么——尤其是同一个提示词里有好几个占位符的时候。
+//
+// 这里把预览区里的占位符标成可点的 chip：点一下就地填，填过的直接显示成值。
+// 填的值只影响**复制出去的正文**，不动磁盘上的文件：占位符是文件格式的一部分，
+// 被替换掉之后这个提示词自己就不能再当模板用了。
+//
+// 标记方式是渲染后的 DOM 二次加工（TreeWalker 包 <mark>），不是渲染前的字符串
+// 替换：字符串替换要自己躲开行内代码和围栏块（那是 PLACEHOLDERS 里最难的部分），
+// 而渲染后的 DOM 里这些已经是 <code>/<pre> 元素，跳过父节点即可。
+function enhancePreviewPlaceholders(container) {
+  const preview = container || $('preview');
+  const rel = state.currentRel;
+  if (!preview || !rel) return;
+  const { body } = parseFrontmatter(state.currentContent);
+  // 只标记 extract 认得的 token（它已经排除了链接、行内代码、围栏块、任务列表
+  // 勾选框这些同形但不相干的 [..]）。片段外的一律不动。
+  const tokens = PLACEHOLDERS.extract(body).map(it => it.token);
+  const values = state.previewFills[rel] || {};
+  const wanted = new Map(tokens.map(tok => [tok, tok]));
+  if (!tokens.length) return;
+
+  const walker = document.createTreeWalker(preview, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parent = node.parentElement;
+      if (!parent) return NodeFilter.FILTER_REJECT;
+      if (parent.closest('pre')) return NodeFilter.FILTER_REJECT;      // 围栏块里是示例，不填
+      if (parent.classList.contains('ph')) return NodeFilter.FILTER_REJECT; // 已经标过
+      return NodeFilter.FILTER_ACCEPT;
+    }
+  });
+  const targets = [];
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    // 每个 text node 只处理"原文里正好有这种 token 文本"的情况。
+    // 用 token 原文比对而不是重新跑一遍正则：正则会把正文里普通的 [..] 也框进来，
+    // 而那些恰好是 extract 特意排除掉的。
+    for (const [tok, key] of wanted) {
+      if (node.nodeValue && node.nodeValue.includes(key)) targets.push({ node, key, tok });
+    }
+  }
+  for (const { node, key, tok } of targets) {
+    if (!node.parentNode) continue;   // 同一轮里可能被前一次替换掉（共享父节点时）
+    const parts = node.nodeValue.split(key);
+    const frag = document.createDocumentFragment();
+    parts.forEach((part, i) => {
+      if (i > 0) {
+        const mark = document.createElement('mark');
+        mark.className = 'ph';
+        mark.dataset.token = tok;
+        // 可聚焦 + role=button：键盘用户要能 Tab 到它并按 Enter。
+        // <mark> 默认不在 tab 序列里，没有这两行这个功能就只对鼠标开放。
+        mark.tabIndex = 0;
+        mark.setAttribute('role', 'button');
+        if (!values[tok]) mark.title = t('fillInlineTitle');
+        const filled = values[tok];
+        if (filled) {
+          // 填过的直接显示值，并且标出"这是填的、不是原文"
+          mark.classList.add('ph-filled');
+          mark.textContent = filled;
+          mark.title = tok;
+        } else {
+          mark.textContent = tok;
+        }
+        frag.appendChild(mark);
+      }
+      if (part) frag.appendChild(document.createTextNode(part));
+    });
+    node.parentNode.replaceChild(frag, node);
+  }
+  renderFillHint();
+}
+
+// 预览区顶部那行提示：还有几个没填。填完就消失。
+// 没有它的话"预览里的 chip 能点"没有任何线索，用户只会以为那是高亮。
+function renderFillHint() {
+  const bar = $('preview-fill-hint');
+  if (!bar) return;
+  const rel = state.currentRel;
+  if (!rel) { bar.classList.add('hidden'); return; }
+  const total = document.querySelectorAll('#preview ' + PLACEHOLDER_MARK).length;
+  if (!total) { bar.classList.add('hidden'); return; }
+  const filled = state.previewFills[rel] || {};
+  const done = Array.from(document.querySelectorAll('#preview ' + PLACEHOLDER_MARK))
+    .filter(el => filled[el.dataset.token]).length;
+  bar.classList.remove('hidden');
+  bar.textContent = done
+    ? t('fillHintProgress', { done, total })
+    : t('fillHintClick', { total });
+}
+
+// 点 chip 就地填。返回是否改动了填充记录（供调用方决定要不要重刷提示行）。
+async function fillPlaceholderInline(token) {
+  const rel = state.currentRel;
+  if (!rel) return false;
+  const values = state.previewFills[rel] || {};
+  const current = values[token] || '';
+  const next = await promptInput(t('fillInlineTitle'), token, current);
+  if (next === null) return false;                 // 取消
+  if (!state.previewFills[rel]) state.previewFills[rel] = {};
+  if (next === '') delete state.previewFills[rel][token];
+  else state.previewFills[rel][token] = next;
+  if (next) rememberFillValues({ [token]: next });
+  // 重绘整个预览：同一 token 可能出现多次，逐个改 DOM 是重复状态。
+  // 预览本来就是重渲染出来的，代价和一帧视图刷新相当。
+  renderContent();
+  return true;
 }
 
 function renderWorkflowPreview() {
@@ -822,6 +999,9 @@ function renderWorkflowPreview() {
   }
   preview.innerHTML = flowHtml + renderMarkdown(body);
   enhanceCodeBlocks(preview);
+  // 工作流正文里通常没有可填的占位符，但把渲染流程对齐能让"提示行"在切到
+  // 工作流时正确隐藏（否则会留着上一个提示词的计数）。
+  enhancePreviewPlaceholders(preview);
   // 绑定节点点击跳转。
   //
   // 坏节点不再往 openFile 里送。原先无论引用在不在都直接 openFile(p)，
@@ -865,7 +1045,7 @@ function renderWorkflowPreview() {
 // 引用是否存在直接查 state.metaByRel（refreshTree 已经把全库元数据拉下来了，
 // 见 setMetaList），不走 IPC：这条路径在每次渲染工作流时都会跑，
 // 为此再发一轮文件存在性查询是白花的往返开销。
-function auditFlowRefs(steps) {
+function auditFlowRefs(steps, graph) {
   const ids = new Set(steps.map(s => s.id).filter(Boolean));
   const issues = new Map();
   for (const s of steps) {
@@ -880,6 +1060,14 @@ function auditFlowRefs(steps) {
     if (badNext.length) issue.missingNext = badNext;
     if (Object.keys(issue).length) issues.set(s.id, issue);
   }
+  // 不可达是**图**的属性，不是单个节点的引用问题：它由 flow-graph 算出来
+  // （从入口出发顺着 next 走不到），这里合并进同一份 issues，让节点上的 ⚠
+  // 和顶部的汇总都只需要一条路径。指向不存在的 id 不算边，所以那种节点
+  // 不会因此被判成不可达——它报的是 missingNext。
+  const unreachable = (graph && graph.unreachable) || [];
+  for (const id of unreachable) {
+    issues.set(id, Object.assign(issues.get(id) || {}, { unreachable: true }));
+  }
   // count 按"问题条数"算而不是"坏节点数"：一个节点可能同时缺文件和写错 next，
   // 汇总里说"有 2 处失效"比"有 1 个坏节点"更贴近用户要修的工作量。
   let count = 0;
@@ -887,6 +1075,7 @@ function auditFlowRefs(steps) {
     if (issue.noPrompt) count++;
     if (issue.missingFile) count++;
     if (issue.missingNext) count += issue.missingNext.length;
+    if (issue.unreachable) count++;
   }
   return { issues, count };
 }
@@ -897,58 +1086,17 @@ function flowIssueText(issue) {
   if (issue.noPrompt) parts.push(t('flowNoPrompt'));
   if (issue.missingFile) parts.push(t('flowMissingFile', { path: issue.missingFile }));
   if (issue.missingNext) parts.push(t('flowMissingNext', { ids: issue.missingNext.join(', ') }));
+  if (issue.unreachable) parts.push(t('flowUnreachable'));
   return parts.join('\n');
 }
 
 // 分支流程图：拓扑分层 + SVG 连线
 function renderFlowDiagram(steps, title) {
-  const byId = new Map(steps.map(s => [s.id, s]));
-  const audit = auditFlowRefs(steps);
-  // 入度计算
-  const indeg = new Map(steps.map(s => [s.id, 0]));
-  for (const s of steps) {
-    for (const n of s.next) {
-      if (byId.has(n)) indeg.set(n, (indeg.get(n) || 0) + 1);
-    }
-  }
-  // 层级 = 所有前驱层级最大值 + 1（最长前导路径）。
-  // Kahn 拓扑排序：出队时直接把层级推给后继，一趟 O(V+E) 完成。
-  // 原先的写法是"排序后再对每个节点回扫全部 steps 找前驱"，O(V·E)。
-  const level = new Map();
-  const indeg2 = new Map(indeg);
-  const queue = steps.filter(s => (indeg.get(s.id) || 0) === 0).map(s => s.id);
-  for (const id of queue) level.set(id, 0);
-  let visited = 0;
-  for (let head = 0; head < queue.length; head++) {
-    const id = queue[head];
-    visited++;
-    const lv = level.get(id) || 0;
-    for (const n of byId.get(id).next) {
-      if (!byId.has(n)) continue;
-      // 后继层级取所有前驱的最大值 + 1
-      level.set(n, Math.max(level.get(n) == null ? 0 : level.get(n), lv + 1));
-      indeg2.set(n, indeg2.get(n) - 1);
-      if (indeg2.get(n) === 0) queue.push(n);
-    }
-  }
-  // 环里的节点入度永远降不到 0，拿不到层级。
-  // 不能放着不管：Math.max(...空) 是 -Infinity，Array.from({length:-Infinity})
-  // 得到零长数组，下面 layers[...].push 就会抛错，而这个异常会被 openFile 的
-  // catch 吞掉并把 currentRel 置空，留下"有标签页却没有当前文件"的坏状态，
-  // 之后任何走到 renderBreadcrumb 的操作都会在 null 上再炸一次，只能重启。
-  // 这里把成环的节点按原始顺序追加到末层，图仍然画得出来，用户也能看到它们。
-  const hasCycle = visited < steps.length;
-  if (hasCycle) {
-    // 全图成环时没有任何入口节点，level 是空的，末层要从 -1 起算，
-    // 否则所有节点都落到第 1 层、第 0 层空着，画出来是一条空白层。
-    let tail = -1;
-    for (const lv of level.values()) tail = Math.max(tail, lv);
-    for (const s of steps) if (!level.has(s.id)) level.set(s.id, tail + 1);
-  }
-  const maxLevel = steps.length ? Math.max(0, ...level.values()) : 0;
-  // 分层
-  const layers = Array.from({ length: maxLevel + 1 }, () => []);
-  for (const s of steps) layers[level.get(s.id) || 0].push(s);
+  // 分层、成环、不可达全部交给 src/flow-graph.js（裸 node 可测，见 test:flow-graph）。
+  // 这段图论代码原先长在这里，验证它只能靠拉起 Electron 数 DOM 节点。
+  const graph = FLOW_GRAPH.analyze(steps);
+  const audit = auditFlowRefs(steps, graph);
+  const layers = graph.layers;
   // 渲染：逐层横向，层内节点等高排列；连线由 drawFlowEdges 绘制
   let html = `<div class="flow-diagram"><div class="flow-title">${escapeHtml(t('flowDiagram'))}${title ? escapeHtml(t('sep')) + escapeHtml(title) : ''}</div>`;
   // 有坏引用就在图上方挂一条汇总。单个节点的 ⚠ 要悬停才看得见，
@@ -971,13 +1119,8 @@ function renderFlowDiagram(steps, title) {
     html += `</div>`;
   }
   html += `</div></div>`;
-  // 计算 edges 并暂存到全局（drawFlowEdges 布局后读）
-  flowEdges = [];
-  for (const s of steps) {
-    for (const n of s.next) {
-      if (byId.has(n)) flowEdges.push({ from: s.id, to: n });
-    }
-  }
+  // edges 来自图分析（只含两端都存在的边），暂存给 drawFlowEdges 布局后读
+  flowEdges = graph.edges;
   return html;
 }
 
@@ -1090,6 +1233,10 @@ async function enterEditMode() {
   if (!state.currentRel) return;
   state.editMode = true;
   $('preview-wrap').classList.add('hidden');
+  // 提示行跟着预览区一起藏。它在预览区里边，但 #preview-wrap 是整块隐藏，
+  // 这里显式收起来是为了"退出编辑后 hint 不残留旧计数"——重进预览时
+  // renderPromptPreview 会重算，不依赖这里的残留状态。
+  $('preview-fill-hint').classList.add('hidden');
   $('editor-wrap').classList.remove('hidden');
   $('editor').value = state.currentContent;
   state.editBaseline = state.currentContent; // 脏判断的基准
@@ -1281,6 +1428,17 @@ async function copyContent() {
   if (!tokens.length) {
     await writeClipboard(body);
     toast(t('copySuccess'), 'success');
+    return true;
+  }
+  // 预览区已经点着填过的，直接用填好的结果，不再弹面板：用户刚刚就在正文里
+  // 逐处填过，再让他面对一张列着同一批 token 的表，等于把同一件事做两遍。
+  // 想改的话回预览里点那个 chip（点上就是改）。
+  const inline = state.previewFills[state.currentRel] || {};
+  const inlineCount = tokens.filter(it => String(inline[it.token] == null ? '' : inline[it.token]).trim()).length;
+  if (inlineCount) {
+    await writeClipboard(PLACEHOLDERS.fill(body, inline));
+    const missing = tokens.length - inlineCount;
+    toast(missing ? t('fillDonePartial', { count: inlineCount, missing }) : t('fillDone', { count: inlineCount }), 'success');
     return true;
   }
   const values = await promptFillPlaceholders(tokens);
@@ -1662,13 +1820,17 @@ function settlePendingPrompt() {
   fn(null);
 }
 
-function promptInput(title, placeholder) {
+// 第三个参数是预填值。改名/新建那几处传的是"原来的名字"，所以光标要全选，
+// 一输入就整体替换；预览区就地填占位符传的是上次填过的值，光标落在末尾更方便续写，
+// 但两种情况下"全选"都不会让人多做一次操作（想改就打字，想留就按 Enter），
+// 所以这里统一 select()。
+function promptInput(title, placeholder, initial) {
   return new Promise(resolve => {
     const menu = $('ctx-menu');
     menu.innerHTML = `
       <div class="ctx-prompt-wrap">
         <div class="ctx-prompt-title">${escapeHtml(title)}</div>
-        <input id="ctx-input" class="ctx-prompt-input" placeholder="${escapeHtml(placeholder || '')}">
+        <input id="ctx-input" class="ctx-prompt-input" placeholder="${escapeHtml(placeholder || '')}" value="${escapeHtml(initial == null ? '' : String(initial))}">
         <div class="ctx-prompt-actions">
           <button class="btn-link" id="ctx-cancel">${escapeHtml(t('cancel_'))}</button>
           <button class="btn-primary" id="ctx-ok">${escapeHtml(t('ok'))}</button>
@@ -1677,6 +1839,7 @@ function promptInput(title, placeholder) {
     showCenteredMenu();
     const inp = $('ctx-input');
     inp.focus();
+    inp.select();
     const done = (v) => {
       pendingPromptDone = null;
       hideCtxMenu();
@@ -1779,7 +1942,18 @@ async function deleteCurrent() {
     toast(t('lockedCannotDelete'), 'error');
     return;
   }
-  if (!(await confirmDialog(t('deleteConfirm', { name: state.currentMeta.title || state.currentRel })))) return;
+  // 被工作流引用的提示词要单独问一次：删掉之后那些工作流的节点会变成坏引用，
+  // 而坏引用在流程图上只是一个 ⚠ 角标，不点开那个工作流根本发现不了。
+  // 用当前缓存（打开文件时拉的）；缓存里没有引用就走普通的删除确认。
+  const refs = state.currentRefs || [];
+  const name = state.currentMeta.title || state.currentRel;
+  const okDelete = refs.length
+    ? await confirmDialog(t('deleteReferenced', {
+      count: refs.length,
+      names: refs.map(r => r.replace(/^workflows\//, '').replace(/\.md$/i, '')).join('\n')
+    }))
+    : await confirmDialog(t('deleteConfirm', { name }));
+  if (!okDelete) return;
   try {
     await api.trash(state.currentRel);
     const delRel = state.currentRel;

@@ -27,7 +27,9 @@ const rendererGlobals = {
   FRONTMATTER: 'readonly',
   PLACEHOLDERS: 'readonly',
   INCLUDES: 'readonly',
-  COMPOSER_META: 'readonly'
+  COMPOSER_META: 'readonly',
+  // src/flow-graph.js 声明的常量（renderer.js 里只读）
+  FLOW_GRAPH: 'readonly'
 };
 
 // src/selftest/*.js 是由主进程读成文本、丢进页面上下文执行的，所以 renderer.js
@@ -55,7 +57,12 @@ const selftestRendererGlobals = {
   stageOfRel: 'readonly',
   applyFilter: 'readonly',
   refreshTree: 'readonly',
-  toast: 'readonly'
+  toast: 'readonly',
+  refreshReferences: 'readonly',
+  copyContent: 'readonly',
+  // 自检要能取消当前弹层（fillPlaceholderInline 弹的输入框没人点就会挂住），
+  // 这是 renderer.js 里"当前弹层的 resolve 入口"，自检通过它收尾。
+  pendingPromptDone: 'writable'
 };
 
 // 只保留能指向真实缺陷的规则。每条都注明了它在这个项目里能抓到什么。
@@ -176,7 +183,7 @@ module.exports = [
   {
     // 双用模块：浏览器里当 <script>，主进程里被 require。
     // 两套 global 都要给，否则结尾那句 typeof module !== 'undefined' 会报 no-undef。
-    files: ['src/i18n.js', 'src/frontmatter.js', 'src/placeholders.js', 'src/includes.js', 'src/composer-meta.js', 'src/workflow-refs.js'],
+    files: ['src/i18n.js', 'src/frontmatter.js', 'src/placeholders.js', 'src/includes.js', 'src/composer-meta.js', 'src/workflow-refs.js', 'src/flow-graph.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',

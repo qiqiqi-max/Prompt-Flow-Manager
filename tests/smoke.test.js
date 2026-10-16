@@ -16,6 +16,10 @@ function assert(cond, msg) {
 function section(name) { console.log('--- ' + name + ' ---'); }
 
 const mainSrc = fs.readFileSync(path.join(root, 'electron-main.js'), 'utf8');
+// 内容库数据层（正文缓存 / 元数据 / 全文搜索）在 lib/library.js 里，不在主文件里。
+// 盯这几条的断言要跟过去：搬家是刻意的（数据层不该 require electron，否则
+// MCP server 之类别的入口复用不了），断言留在原地会变成"永远查不到"的假绿。
+const librarySrc = fs.readFileSync(path.join(root, 'lib/library.js'), 'utf8');
 // 自检 / 压测 / 安全回归已经搬到 lib/selftest.js（原先占 electron-main.js 的 35%）。
 // 下面凡是查"自检里有没有某段逻辑"的断言都改读这一份，**不是**把两份源码拼起来查。
 // 拼起来的话，断言就不再关心那段代码住在哪个文件里：哪天有人把对话框桩搬回主进程、
@@ -522,11 +526,12 @@ assert(/describeError\(e\)/.test(rendererSrc), 'tErr 走 describeError');
 
 section('搜索性能');
 // 搜索会遍历整库。原先 getMetaList 读一遍、searchAll 再读一遍，是 2N 次 I/O。
-assert(/async function getMetaList\(includeContent = false\)/.test(mainSrc), 'getMetaList 支持带出正文');
-assert(/const meta = await getMetaList\(true\)/.test(mainSrc), 'searchAll 复用 getMetaList 读到的正文');
-assert(!/countedReadFile\(safeJoin\(item\.rel\)\)/.test(mainSrc), 'searchAll 不再逐个重读文件');
-assert(/async function readParsedCached\(/.test(mainSrc), '有按 mtime+size 失效的正文缓存');
-assert(/hit\.mtimeMs === st\.mtimeMs && hit\.size === st\.size/.test(mainSrc), '缓存同时校验 mtime 与 size');
+assert(/async function getMetaList\(\{ topDirs, parseFrontmatter, stripFrontmatter, includeContent = false \}\)/.test(librarySrc),
+  'getMetaList 支持带出正文');
+assert(/const meta = await library\.getMetaList\(true\)/.test(librarySrc), 'searchAll 复用 getMetaList 读到的正文');
+assert(!/countedReadFile\(safeJoin\(item\.rel\)\)/.test(mainSrc + librarySrc), 'searchAll 不再逐个重读文件');
+assert(/async function readParsedCached\(/.test(librarySrc), '有按 mtime+size 失效的正文缓存');
+assert(/hit\.mtimeMs === st\.mtimeMs && hit\.size === st\.size/.test(librarySrc), '缓存同时校验 mtime 与 size');
 // 所有写入/移动/删除路径都必须清缓存，否则会读到旧内容
 const dropCount = (mainSrc.match(/dropFromCache\(/g) || []).length;
 const movedCacheHooks = (mainSrc.match(/onFileMoved: dropFromCache/g) || []).length;
@@ -541,9 +546,9 @@ assert(!!pkg.scripts.bench, '有 npm run bench');
 // 多词搜索语义：单 token 时"标题命中"必须是最高优先级（rank 3，语义与原实现等价），
 // 多 token 时是 AND 语义（每个 token 都要在标题/标签/正文某处命中）。
 // 这条断言把"分词后的 rank 分支"锁定住，防止后续改动把标题优先级悄悄降掉。
-assert(/if \(allInTitle\) rank = 3/.test(mainSrc), '多词搜索：全部 token 命中标题仍是最高优先级（rank 3）');
-assert(/else if \(allInTagsOrTitle\) rank = 2/.test(mainSrc), '多词搜索：全部 token 命中标题/标签降为 rank 2');
-assert(/if \(!nameHit && !tagHit && !bodyHit\)/.test(mainSrc), '多词搜索：AND 语义——任一 token 未命中就排除该文件');
+assert(/if \(allInTitle\) rank = 3/.test(librarySrc), '多词搜索：全部 token 命中标题仍是最高优先级（rank 3）');
+assert(/else if \(allInTagsOrTitle\) rank = 2/.test(librarySrc), '多词搜索：全部 token 命中标题/标签降为 rank 2');
+assert(/if \(!nameHit && !tagHit && !bodyHit\)/.test(librarySrc), '多词搜索：AND 语义——任一 token 未命中就排除该文件');
 
 section('对话框自动化');
 // 导出/导入四个流程要弹系统对话框，原先只能人工点
@@ -635,6 +640,37 @@ section('异步结果不乱序');
     'doSearch 拿到结果后先比对序号再渲染');
 }
 
+section('预览区占位符');
+// 两个容易在重构里丢掉的形状：标记时跳过 <pre>（围栏块里是示例，不该可点），
+// 以及复制时优先用就地填好的值。行为由 test:ui 覆盖，这里只卡住接线。
+{
+  const m = rendererSrc.match(/function enhancePreviewPlaceholders\(container\) \{([\s\S]*?)\n\}/);
+  const body = m ? m[1] : '';
+  assert(/parent\.closest\('pre'\)/.test(body), '标记占位符时跳过围栏代码块');
+  assert(/state\.previewFills\[/.test(rendererSrc), '就地填写的值有独立存放处');
+  assert(/const inline = state\.previewFills\[state\.currentRel\] \|\| \{\};/.test(rendererSrc),
+    'copyContent 读就地填写的值');
+  assert(/if \(inlineCount\) \{[\s\S]{0,200}?writeClipboard\(PLACEHOLDERS\.fill\(body, inline\)\)/.test(rendererSrc),
+    '填过就不再弹面板，直接用填好的正文');
+}
+
+section('工作流引用索引');
+// 索引的失效点挂在 dropFromCache 上（保存/改名/删除/导入/回滚都调它），
+// 这条链断了的表现是"刚改完引用关系还是旧的"，而那是完全静默的。
+// loadWorkflowIndex 存的是 Promise，所以类型上只能靠这里卡住。
+{
+  assert(/function dropFromCache\(fullPath\) \{[\s\S]{0,200}?dropWorkflowIndex\(\);/.test(mainSrc),
+    'dropFromCache 同时作废工作流引用索引');
+  assert(/let indexPromise = null;/.test(mainSrc) && /indexPromise = workflowIndex\.collectWorkflows\(/.test(mainSrc),
+    '索引缓存存 Promise 而不是已建好的对象（并发首查只会建一次）');
+  // 渲染侧的 chip 数据来源和切文件守卫。少了守卫，上一个文件的引用列表会盖到
+  // 当前文件头上——和搜索结果乱序是同一个形状的 bug。
+  assert(/const chip = e\.target\.closest\('\.meta-chip\.refs'\)/.test(rendererSrc),
+    'meta-bar 上的引用 chip 绑了点击');
+  assert(/const seq = \+\+refsSeq;/.test(rendererSrc) && /if \(seq !== refsSeq \|\| state\.currentRel !== rel\) return;/.test(rendererSrc),
+    '引用查询有切文件守卫');
+}
+
 section('界面字号缩放');
 // 字号缩放全靠 html 的 font-size 乘 --font-scale，所有 font-size 必须写 rem。
 // 这条断言是这套机制唯一的门禁：随手写一个 font-size: 13px 不会报错、界面看着也正常，
@@ -724,10 +760,17 @@ section('工作流流程图解析');
 // 故障回顾：flow 段用惰性正则 /^flow:\\s*\\n([\\s\\S]*?)(?=^\\S|\\n\\S|$)/m 去截，
 // 多行模式下第一行行尾就满足 $，结果只解析出 1 个步骤且丢掉 prompt，
 // 流程图永远只有一个空节点。README 里承诺的"点击节点跳转"实际一直是坏的。
-assert(!/\(\?=\^\\S\|\\n\\S\|\$\)/.test(rendererSrc), '不再用会被行尾锚点截断的惰性正则截 flow 段');
-assert(/lines\.findIndex\(l => \/\^flow:/.test(rendererSrc), 'flow 段改为按行提取');
-assert(/if \(\/\^\\s\/\.test\(line\)\) blockLines\.push\(line\)/.test(rendererSrc), '缩进行归入 flow 段');
-assert(/else break;/.test(rendererSrc), '遇到顶格行才结束 flow 段');
+// 这几条查的是 flow 段的解析实现，它现在在 src/flow-graph.js 里（parseSteps）：
+// 渲染进程、MCP server、测试共用同一份。断言跟着实现走，留在 renderer.js 上会
+// 变成"永远查不到"的假绿——而这正是它们要防的那类失效。
+const flowGraphSrc = fs.readFileSync(path.join(root, 'src/flow-graph.js'), 'utf8');
+assert(!/\(\?=\^\\S\|\\n\\S\|\$\)/.test(rendererSrc + flowGraphSrc), '不再用会被行尾锚点截断的惰性正则截 flow 段');
+assert(/lines\.findIndex\(l => \/\^flow:/.test(flowGraphSrc), 'flow 段改为按行提取');
+assert(/if \(\/\^\\s\/\.test\(line\)\) blockLines\.push\(line\)/.test(flowGraphSrc), '缩进行归入 flow 段');
+assert(/else break;/.test(flowGraphSrc), '遇到顶格行才结束 flow 段');
+// 渲染进程只能委托，不能自己再抄一份（抄一份是这条债的原始形状）
+assert(/function parseWorkflowFlow\(content\) \{\s*return FLOW_GRAPH\.parseSteps\(content\);/.test(rendererSrc),
+  '渲染进程的步骤解析委托给 FLOW_GRAPH.parseSteps（不再各有一份）');
 // 用真实的种子工作流验证解析结果
 {
   const wf = fs.readFileSync(path.join(root, 'workflows/full-project-flow.md'), 'utf8');
@@ -960,6 +1003,7 @@ section('自检模块拆分（注入契约）');
   const strip = (s) => s.split(/\r?\n/).filter(l => !/^\s*(\/\/|\*)/.test(l)).join('\n');
   const mainCode = strip(mainSrc);
   const selftestCode = strip(selftestSrc);
+  const libraryCode = strip(librarySrc);
 
   // ---- 搬走了，而不是抄了一份 ----
   // 复制比漏搬危险得多：两份会各自演化，而自检跑的是模块那份，
@@ -1067,12 +1111,22 @@ section('自检模块拆分（注入契约）');
     assert(!REQ.includes(c), c + ' 不单独注入（按值传会写进死副本）');
     assert(!new RegExp('^\\s*let\\s+' + c + '\\b', 'm').test(selftestCode),
       'lib/selftest.js 没有自己声明 ' + c + '（否则改的是模块内的影子变量）');
+    // 两条：主进程和**数据层**都不能自己声明影子变量。
+    //
+    // 数据层这条是被反向对照逼出来的：热路径搬进 lib/library.js 之后，原来那条
+    // "主进程没有模块级 CONTENT_CACHE_MAX" 从"盯住真正的变量"变成了恒真——
+    // 往 library.js 里加一个模块级 let 时它照样全绿，而热路径已经在读那个影子
+    // 变量了。搬家之后每一条"某文件里没有 X"的断言都要配一条新家的同款。
     assert(!new RegExp('^let\\s+' + c + '\\b', 'm').test(mainCode),
       'electron-main.js 也不再有模块级 ' + c + '（已并入 cacheStats）');
+    assert(!new RegExp('^let\\s+' + c + '\\b', 'm').test(libraryCode),
+      'lib/library.js 也不再有模块级 ' + c + '（热路径已并入 cacheStats）');
   }
   // 两侧都必须通过同一个对象读写
-  assert(/cacheStats\.fileReadCount\+\+/.test(mainCode), '主进程的读计数加在 cacheStats 上');
-  assert(/contentCache\.size > cacheStats\.CONTENT_CACHE_MAX/.test(mainCode), 'LRU 上限判断读 cacheStats');
+  // 这两条查的是**数据层**（lib/library.js），因为热路径搬过去了。
+  // 但下限仍是同一个要求：自检与热路径读写的是同一个对象上的字段。
+  assert(/cacheStats\.fileReadCount\+\+/.test(libraryCode), '数据层的读计数加在 cacheStats 上');
+  assert(/contentCache\.size > cacheStats\.CONTENT_CACHE_MAX/.test(libraryCode), 'LRU 上限判断读 cacheStats');
   assert(/cacheStats\.fileReadCount = 0/.test(selftestCode), '压测清零写的是 cacheStats');
   assert(/cacheStats\.CONTENT_CACHE_MAX = 3/.test(selftestCode), 'LRU 自检调小的也是 cacheStats');
 

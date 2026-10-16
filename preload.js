@@ -18,6 +18,8 @@ const api = {
   // 工作流引用同步：改名/移动提示词后，把 workflows 里指向旧路径的引用批量迁走
   findWorkflowRefs: (rel) => ipcRenderer.invoke('find-workflow-refs', rel),
   updateWorkflowRefs: (targets, oldRel, newRel) => ipcRenderer.invoke('update-workflow-refs', targets, oldRel, newRel),
+  // 反方向：这个提示词被哪些工作流引用；顺带带上全库悬空引用体检
+  workflowReferences: (rel) => ipcRenderer.invoke('workflow-references', rel),
   trash: (rel) => ipcRenderer.invoke('trash', rel),
   listTrash: () => ipcRenderer.invoke('list-trash'),
   restore: (id) => ipcRenderer.invoke('restore', id),

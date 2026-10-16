@@ -72,6 +72,18 @@ const I18N = {
     flowMissingNext: 'next 指向了不存在的步骤：{ids}',
     flowBrokenSummary: '有 {count} 处引用失效，已在图上标出',
     flowRefMissingTitle: '引用失效',
+    // 不可达：从入口顺着 next 走不到这个步骤。它不在任何一条执行路径上，
+    // 但节点照常画在图上，此前没有任何提示。
+    flowUnreachable: '这一步从入口走不到（不在任何一条执行路径上）',
+    // 复用关系（反方向）：这个提示词被哪些工作流引用。
+    // 这是一条用户此前完全看不到的信息 —— 删除前才知道自己有引用，
+    // 而那时工作流的节点已经变成坏引用了。
+    refsChip: '被 {count} 个工作流引用',
+    refsChipTitle: '被引用的工作流：{names}',
+    refsOpenFailed: '打开被引用的工作流失败：{name}',
+    deleteReferenced: '这个提示词被 {count} 个工作流引用：\n{names}\n\n删除后这些工作流的对应节点会变成失效引用，要在流程图里点开才能发现。仍要删除吗？',
+    // 悬空引用体检：工作流引用的文件已经不在了（被删或被改名）。
+    danglingSummary: '有 {count} 处工作流引用指向不存在的文件',
     // 复制前的占位符填充。templates/prompt-template.md 早就约定了用 [提示文字]
     // 标出要替换的部分，但复制一直是原样进剪贴板，用户粘到对话框里再手改。
     fillTitle: '填写占位符',
@@ -79,6 +91,11 @@ const I18N = {
     fillAndCopy: '填好并复制',
     fillCopyRaw: '直接复制原文',
     fillDone: '已复制（填了 {count} 处）',
+    // 预览区就地填占位符：点正文里那个 chip 就能填，提示行负责告诉用户这件事
+    fillHintClick: '正文里有 {total} 处 [占位符]，点一下即可填入；填好的内容会在复制时生效，不会改动文件',
+    fillHintProgress: '已填 {done}/{total} 处；填好的内容会在复制时生效，不会改动文件',
+    fillInlineTitle: '填入内容（留空恢复原文）',
+    fillDonePartial: '已复制（填了 {count} 处，还有 {missing} 处保留原文）',
     // 状态栏
     ready: '就绪',
     loaded: '已加载',
@@ -448,11 +465,21 @@ const I18N = {
     flowMissingNext: 'next points to unknown step(s): {ids}',
     flowBrokenSummary: '{count} broken reference(s), marked in the diagram',
     flowRefMissingTitle: 'Broken reference',
+    flowUnreachable: 'This step is unreachable from the entry point (not on any path)',
+    refsChip: 'Used by {count} workflow(s)',
+    refsChipTitle: 'Referenced by: {names}',
+    refsOpenFailed: 'Could not open the referencing workflow: {name}',
+    deleteReferenced: 'This prompt is used by {count} workflow(s):\n{names}\n\nDeleting it will turn those nodes into broken references, visible only after opening the workflow diagram. Delete anyway?',
+    danglingSummary: '{count} workflow reference(s) point to files that no longer exist',
     fillTitle: 'Fill in placeholders',
     fillHint: 'Leave blank to keep the [ ] as-is',
     fillAndCopy: 'Fill and copy',
     fillCopyRaw: 'Copy as-is',
     fillDone: 'Copied ({count} filled)',
+    fillHintClick: '{total} placeholder(s) in the text — click one to fill it. Filled values are used when copying; the file itself is not modified',
+    fillHintProgress: '{done}/{total} filled. Filled values are used when copying; the file itself is not modified',
+    fillInlineTitle: 'Fill in (leave blank to restore)',
+    fillDonePartial: 'Copied ({count} filled, {missing} left as-is)',
     // 状态栏
     ready: 'Ready',
     loaded: 'Loaded',
