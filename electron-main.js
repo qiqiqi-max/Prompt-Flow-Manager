@@ -138,6 +138,21 @@ const CODE_ROOT = __dirname;
 const DATA_ROOT = process.env.PFM_DATA_DIR
   ? path.resolve(process.env.PFM_DATA_DIR)
   : (app.isPackaged ? app.getPath('userData') : __dirname);
+
+// 自动化运行时把 Chromium 自己的配置目录也挪进临时数据目录。
+//
+// 为什么必须挪：Chromium 按来源持久化页面缩放，而那个值存在 profile 里。
+// 自检共用一个 profile 时，上一轮运行留下的缩放会漏进下一轮——实测的失败形态是
+// 布局测试里主进程 getZoomFactor() 读回 1.25，而渲染进程按 devicePixelRatio
+// 反推出来的是 1.0 或 1.5（上一次运行的值），于是"设置缩放"这一步看着成功、
+// 渲染进程却根本没变，2 秒后报"页面缩放没有生效"。每次运行一个干净的 profile
+// 之后这个来源就不存在了。
+//
+// 生产路径不受影响：只有设了 PFM_DATA_DIR（自检专用开关）才走这一支。
+// app.setPath 必须在 app ready 之前调用，所以只能放在这里（文件顶部）。
+if (process.env.PFM_DATA_DIR) {
+  app.setPath('userData', path.join(DATA_ROOT, '__chromium-profile'));
+}
 const PROMPTS_DIR = path.join(DATA_ROOT, 'prompts');
 const WORKFLOWS_DIR = path.join(DATA_ROOT, 'workflows');
 const TEMPLATES_DIR = path.join(DATA_ROOT, 'templates');
@@ -2217,6 +2232,13 @@ function sanitizeWindowBounds(raw) {
 async function createWindow() {
   const config = await loadConfig();
   const bounds = sanitizeWindowBounds(config.windowBounds);
+  // 自检指定了缩放倍数时，窗口创建就带上它（见 webPreferences.zoomFactor 处说明）。
+  // 校验范围与 lib/selftest.js 里那条 PFM_SELFTEST_ZOOM 检查一致：非法值不当数字用，
+  // 那边会自己报"必须在 0.5 到 3 之间"，这里悄悄忽略即可（不能因此起不来窗口）。
+  const selfTestZoom = (() => {
+    const z = Number(process.env.PFM_SELFTEST_ZOOM);
+    return Number.isFinite(z) && z >= 0.5 && z <= 3 ? z : null;
+  })();
   win = new BrowserWindow({
     ...bounds,
     minWidth: MIN_W,
@@ -2238,7 +2260,13 @@ async function createWindow() {
       // 读后者的话重建出来的窗口又会开着沙箱，于是崩溃→重建→再崩溃，
       // 除了 rebuilding 那个 guard 拦着之外就是个死循环——白窗口照旧。
       sandbox: sandboxActive,
-      webgl: false
+      webgl: false,
+      // 自检要量"这个倍数下的布局"，那就让窗口**生下来**就在这个倍数上。
+      // 只靠事后 webContents.setZoomFactor 有一个竞态：渲染进程可能仍按 profile
+      // 里持久化的值走，于是设置看着成功、实测没变。窗口创建时给的 zoomFactor
+      // 是渲染进程的初始配置，不存在这个竞态。
+      // 生产路径上这一项不存在（PFM_SELFTEST_ZOOM 只在自检里设）。
+      ...(selfTestZoom ? { zoomFactor: selfTestZoom } : {})
     }
   });
   attachNavigationGuard(win);

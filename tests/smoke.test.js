@@ -1314,6 +1314,21 @@ section('文档与代码一致');
       (undocumented.length ? '，漏了：' + undocumented.join(', ') : '（' + inCode.size + ' 个）'));
   }
 
+  // 自检必须用一个干净的 Chromium 配置目录。
+  //
+  // 为什么值得单列一条断言：Chromium 按来源持久化页面缩放，自检共用 profile 时
+  // 上一轮的值会漏进下一轮，表现是"设置缩放看着成功了、渲染进程没变"——布局测试
+  // 于是间歇地报"页面缩放没有生效"，而它自己看起来像偶发，实测约三次红两次。
+  // 这条断言盯的是那行 app.setPath 还在、且仍被 PFM_DATA_DIR 守着：
+  // 撤掉它不会让任何测试立刻变红（是概率性回归），所以只能静态卡住。
+  assert(/if \(process\.env\.PFM_DATA_DIR\) \{\s*app\.setPath\('userData'/.test(mainSrc),
+    '自检运行时把 Chromium 配置目录也隔离到临时数据目录');
+  // 生产路径不能被这一支影响：setPath 必须在 PFM_DATA_DIR 判断之内。
+  // 匹配顶格（不带 \s*）：带缩进的调用属于上面那个 if 块，正是我们要的写法，
+  // 写成 /^\s*app\.setPath/ 会把缩进版也判成违规——实测就是这么假红过一次。
+  assert(!/^app\.setPath\('userData'/m.test(mainSrc),
+    'app.setPath 只在自检分支里调用（否则会改掉真实用户的 userData）');
+
   // 反向：package.json 里的每个 test* 脚本都要在 CONTRIBUTING.md 里出现。
   // 上面那条查的是"文档写的脚本存在"，方向是文档→代码，挡不住
   // "加了新测试但没人知道"——那种漏法下文档依然全绿。
