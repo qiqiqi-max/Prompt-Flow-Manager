@@ -5,93 +5,13 @@ const path = require('path');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const { pathToFileURL } = require('url');
-// 缓存的计数器与容量上限。压测（runSearchBench）要把计数清零再读回来，
-// 缓存淘汰的自检要临时把上限调小——这两件事都在 lib/selftest.js 里，
-// 而递增/判断上限的热路径在本文件。所以这四项必须是**同一个对象上的字段**，
-// 不能按值传进模块：那样自检清零写的是自己那份副本，热路径继续加在原来的
-// 变量上，压测报出来的永远是 0 次读、0 命中，而且一切看着都正常。
-// （原先它们是四个模块级 let，同文件内闭包共享；拆文件之后闭包没了。）
-const cacheStats = {
-  // 读文件次数。搜索是唯一随库规模线性变差的操作，压测时用它量化 I/O。
-  fileReadCount: 0,
-  cacheHits: 0,
-  cacheMisses: 0,
-  // 缓存上限。原先没有：dropFromCache 只在删除/移动/保存时清对应条目，
-  // 从没被删过、只是不再被访问的文件会永久留在 Map 里，而每条都存了正文 +
-  // 一份全小写副本（约 2 倍文件大小）。长会话里反复浏览/搜索一个大库，常驻内存
-  // 只增不减。按 LRU 封顶：命中时把条目挪到队尾，插入后从队首淘汰最久未用的。
-  // 取 5000：远高于注释里 1000 条的性能基准，正常库一次搜索遍历不会触发淘汰
-  // （否则会拉低命中率）；真超了也只是退化成重读，正确性不受影响。
-  // 可写是为了让自检能临时调小，不必造几千个文件来验证淘汰。
-  CONTENT_CACHE_MAX: 5000
-};
-
-function countedReadFile(fullPath) {
-  cacheStats.fileReadCount++;
-  return fsp.readFile(fullPath, 'utf8');
-}
-
-// ---------- 正文缓存 ----------
-// 搜索要遍历整库读正文。用户在搜索框里连打几个字，库没变却要重读所有文件。
-// 这里按 (mtime, size) 做缓存：每次仍然 stat（很便宜），只重读真正变过的文件。
-// 所以外部编辑器改的文件也能被发现，不会读到旧内容。
-// 已知边界：同一个 mtime 刻度内把文件改成同样大小会命中旧缓存，概率极低且两个
-// 维度同时相等才会发生，代价只是搜索结果延迟一次刷新。
-// 连 frontmatter 的解析结果一起缓存：getMetaList 每次都要对全库解析一遍，
-// 在 1000 条规模下这部分和 stat 一样构成主要耗时。
-// 搜索用的派生字段（去掉 frontmatter 的正文 + 其小写形式）同样缓存：
-// 否则用户每敲一个字符，searchAll 就要对全库重做一次 stripFrontmatter 正则和
-// toLowerCase 大字符串分配——1000 条规模下这是搜索剩余耗时的绝大部分，
-// 而它们只随文件内容变化，和查询词无关，完全可以复用。
-// Map 保持插入顺序，所以队首就是最久未 touch 的条目（上限见 cacheStats）。
-const contentCache = new Map(); // fullPath -> { mtimeMs, size, content, meta, bodyRaw, bodyLower }
-
-const EMPTY_ENTRY = { content: '', meta: {}, bodyRaw: '', bodyLower: '' };
-
-async function readParsedCached(fullPath) {
-  let st;
-  try { st = await fsp.stat(fullPath); } catch { return EMPTY_ENTRY; }
-  const hit = contentCache.get(fullPath);
-  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
-    cacheStats.cacheHits++;
-    // 命中即 touch：删了重插挪到队尾，这样淘汰时队首永远是最久未访问的那条。
-    contentCache.delete(fullPath);
-    contentCache.set(fullPath, hit);
-    return hit;
-  }
-  cacheStats.cacheMisses++;
-  let content = '';
-  try { content = await countedReadFile(fullPath); } catch { return EMPTY_ENTRY; }
-  const bodyRaw = stripFrontmatter(content);
-  const entry = {
-    mtimeMs: st.mtimeMs,
-    size: st.size,
-    content,
-    meta: parseFrontmatter(content).meta,
-    bodyRaw,
-    bodyLower: bodyRaw.toLowerCase()
-  };
-  // 先 delete 再 set：过期条目重读后要挪到队尾，否则同 key 的 set 只更新值不改
-  // 顺序，这条刚刷新却还排在队首，下一次淘汰就会把它当成最旧的删掉。
-  contentCache.delete(fullPath);
-  contentCache.set(fullPath, entry);
-  // 超限则从队首（最久未用）逐个淘汰
-  while (contentCache.size > cacheStats.CONTENT_CACHE_MAX) {
-    const oldest = contentCache.keys().next().value;
-    if (oldest === undefined) break;
-    contentCache.delete(oldest);
-  }
-  return entry;
-}
-
-// 文件被删除/移动后清掉对应缓存，避免 Map 无限增长。
-// 同时作废工作流引用索引：索引里的引用关系来自工作流正文，而正文变了的**唯一**
-// 出口就是这里的调用点（保存/改名/移动/删除/导入/回滚）。挂在别处就得记住每一处，
-// 漏一处就是"刚改完引用关系还是旧的"——和内容缓存同一个失效纪律，就挂同一行。
-function dropFromCache(fullPath) {
-  contentCache.delete(fullPath);
-  dropWorkflowIndex();
-}
+// 数据层（正文缓存 / 元数据 / 全文搜索）在 lib/library.js 里，不 require electron。
+// 这里只把目录和 frontmatter 解析器绑上去；缓存与计数器是该模块的模块级状态，
+// 下面的 const library 直接取用，保证自检拿到的和热路径用的是同一份。
+const {
+  createLibrary, cacheStats, contentCache, readParsedCached,
+  dropFromCache: dropFromContentCache
+} = require('./lib/library.js');
 // stdout/stderr 的读取端一旦消失（从终端启动后关掉终端、被管道到提前退出的命令、
 // 用 PowerShell 的 | Select-String 截流等），下一次 console.log 就会抛 EPIPE。
 // 主进程里的未捕获异常会让 Electron 弹"A JavaScript error occurred in the main process"，
@@ -427,6 +347,102 @@ function bumpAutoFields(content, prevContent) {
 
 const stripFrontmatter = (content) => FRONTMATTER.strip(content);
 
+// 内容库数据层。position 不能往文件前面挪：DATA_ROOT 在上面才定义。
+const library = createLibrary({
+  dataRoot: DATA_ROOT,
+  parseFrontmatter,
+  stripFrontmatter
+});
+// 这三个名字保持原样，是因为全文件（含自检注入点）都在用。
+// getMetaList / searchAll 是薄绑定：实现都在 lib/library.js。
+function getMetaList(includeContent = false) { return library.getMetaList(includeContent); }
+function searchAll(query) { return library.search(query); }
+
+// ---------- 目录树 ----------
+async function buildSubTree(dir, baseRel) {
+  const nodes = [];
+  let entries;
+  try {
+    entries = await fsp.readdir(dir, { withFileTypes: true });
+  } catch {
+    return nodes; // 目录不存在或不可读：当作空目录，不阻塞整棵树
+  }
+  for (const e of entries) {
+    if (e.name.startsWith('.')) continue;
+    const rel = baseRel ? `${baseRel}/${e.name}` : e.name;
+    if (e.isDirectory()) {
+      const children = await buildSubTree(path.join(dir, e.name), rel);
+      if (children.length) nodes.push({ type: 'dir', name: e.name, rel, children });
+    } else if (e.name.toLowerCase().endsWith('.md')) {
+      nodes.push({ type: 'file', name: e.name, rel });
+    }
+  }
+  return nodes;
+}
+
+async function listTree() {
+  return [
+    { type: 'dir', name: 'prompts', rel: 'prompts', children: await buildSubTree(library.topDirs.prompts, 'prompts') },
+    { type: 'dir', name: 'workflows', rel: 'workflows', children: await buildSubTree(library.topDirs.workflows, 'workflows') },
+    { type: 'dir', name: 'templates', rel: 'templates', children: await buildSubTree(library.topDirs.templates, 'templates') }
+  ];
+}
+
+// 一次遍历同时产出文件树和元数据列表。
+// 为什么合并：渲染进程每次 refreshTree 都要这两份数据，而 listTree 和 getMetaList
+// 走的是同一套目录递归——分开调用等于把整库 readdir 两遍（新建/删除/重命名/移动/
+// 保存后都会触发）。这里合成一次遍历、一次 IPC 往返。
+// 语义必须与原来的两个函数逐字一致：目录为空则不出现在树里（children.length 判断），
+// stage 只对 prompts 顶层的二级目录有意义。
+async function listTreeAndMeta() {
+  const meta = [];
+  // 每个目录内的条目并发处理。串行 await 的代价实测很显著：1000 个文件
+  // 逐个 stat 约 180ms，并发降到 25ms 量级——缓存命中时 stat 就是主要开销
+  // （读文件次数为 0，字符串处理只占个位数毫秒）。
+  // 顺序必须保持稳定：用 map 收集结果再按原序拼装，不要在回调里 push。
+  const walk = async (dir, baseRel, top) => {
+    let entries;
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      return []; // 目录不存在或不可读：当作空目录，不阻塞整棵树
+    }
+    const slots = await Promise.all(entries.map(async (e) => {
+      if (e.name.startsWith('.')) return null;
+      const rel = `${baseRel}/${e.name}`;
+      if (e.isDirectory()) {
+        const children = await walk(path.join(dir, e.name), rel, top);
+        // 空目录不进树（与旧 buildSubTree 行为一致）
+        if (!children.length) return null;
+        return { node: { type: 'dir', name: e.name, rel, children } };
+      }
+      if (!e.name.toLowerCase().endsWith('.md')) return null;
+      const entry = await library.readParsedCached(path.join(dir, e.name));
+      let stage = null;
+      if (top === 'prompts') {
+        const segs = rel.split('/');
+        stage = segs.length > 2 ? segs[1] : null;
+      }
+      return {
+        node: { type: 'file', name: e.name, rel },
+        metaItem: { rel, name: e.name, meta: entry.meta, stage, top }
+      };
+    }));
+    const nodes = [];
+    for (const slot of slots) {
+      if (!slot) continue;
+      nodes.push(slot.node);
+      if (slot.metaItem) meta.push(slot.metaItem);
+    }
+    return nodes;
+  };
+  const tree = [];
+  for (const top of ['prompts', 'workflows', 'templates']) {
+    tree.push({ type: 'dir', name: top, rel: top, children: await walk(library.topDirs[top], top, top) });
+  }
+  return { tree, meta };
+}
+
 // ---------- 版本管理 ----------
 // 版本路径、快照命名、星标索引和裁剪规则都在 lib/version-store.js。
 
@@ -623,194 +639,6 @@ function queueWriteMulti(keys, fn) {
 }
 
 // ---------- 目录树 ----------
-async function buildSubTree(dir, baseRel) {
-  const nodes = [];
-  let entries;
-  try {
-    entries = await fsp.readdir(dir, { withFileTypes: true });
-  } catch {
-    return nodes; // 目录不存在或不可读：当作空目录，不阻塞整棵树
-  }
-  for (const e of entries) {
-    if (e.name.startsWith('.')) continue;
-    const rel = baseRel ? `${baseRel}/${e.name}` : e.name;
-    if (e.isDirectory()) {
-      const children = await buildSubTree(path.join(dir, e.name), rel);
-      if (children.length) nodes.push({ type: 'dir', name: e.name, rel, children });
-    } else if (e.name.toLowerCase().endsWith('.md')) {
-      nodes.push({ type: 'file', name: e.name, rel });
-    }
-  }
-  return nodes;
-}
-
-async function listTree() {
-  return [
-    { type: 'dir', name: 'prompts', rel: 'prompts', children: await buildSubTree(PROMPTS_DIR, 'prompts') },
-    { type: 'dir', name: 'workflows', rel: 'workflows', children: await buildSubTree(WORKFLOWS_DIR, 'workflows') },
-    { type: 'dir', name: 'templates', rel: 'templates', children: await buildSubTree(TEMPLATES_DIR, 'templates') }
-  ];
-}
-
-// 一次遍历同时产出文件树和元数据列表。
-// 为什么合并：渲染进程每次 refreshTree 都要这两份数据，而 listTree 和 getMetaList
-// 走的是同一套目录递归——分开调用等于把整库 readdir 两遍（新建/删除/重命名/移动/
-// 保存后都会触发）。这里合成一次遍历、一次 IPC 往返。
-// 语义必须与原来的两个函数逐字一致：目录为空则不出现在树里（children.length 判断），
-// stage 只对 prompts 顶层的二级目录有意义。
-async function listTreeAndMeta() {
-  const meta = [];
-  // 每个目录内的条目并发处理。串行 await 的代价实测很显著：1000 个文件
-  // 逐个 stat 约 180ms，并发降到 25ms 量级——缓存命中时 stat 就是主要开销
-  // （读文件次数为 0，字符串处理只占个位数毫秒）。
-  // 顺序必须保持稳定：用 map 收集结果再按原序拼装，不要在回调里 push。
-  const walk = async (dir, baseRel, top) => {
-    let entries;
-    try {
-      entries = await fsp.readdir(dir, { withFileTypes: true });
-    } catch {
-      return []; // 目录不存在或不可读：当作空目录，不阻塞整棵树
-    }
-    const slots = await Promise.all(entries.map(async (e) => {
-      if (e.name.startsWith('.')) return null;
-      const rel = `${baseRel}/${e.name}`;
-      if (e.isDirectory()) {
-        const children = await walk(path.join(dir, e.name), rel, top);
-        // 空目录不进树（与旧 buildSubTree 行为一致）
-        if (!children.length) return null;
-        return { node: { type: 'dir', name: e.name, rel, children } };
-      }
-      if (!e.name.toLowerCase().endsWith('.md')) return null;
-      const entry = await readParsedCached(path.join(dir, e.name));
-      let stage = null;
-      if (top === 'prompts') {
-        const segs = rel.split('/');
-        stage = segs.length > 2 ? segs[1] : null;
-      }
-      return {
-        node: { type: 'file', name: e.name, rel },
-        metaItem: { rel, name: e.name, meta: entry.meta, stage, top }
-      };
-    }));
-    const nodes = [];
-    for (const slot of slots) {
-      if (!slot) continue;
-      nodes.push(slot.node);
-      if (slot.metaItem) meta.push(slot.metaItem);
-    }
-    return nodes;
-  };
-  const tree = [];
-  for (const top of ['prompts', 'workflows', 'templates']) {
-    tree.push({ type: 'dir', name: top, rel: top, children: await walk(TOP_DIRS[top], top, top) });
-  }
-  return { tree, meta };
-}
-
-// ---------- 元数据列表（用于筛选） ----------
-// includeContent=true 时把已经读到的正文一并带出来。
-// 搜索需要正文，如果不带出去，searchAll 就得把每个文件再读一遍（2N 次 I/O）。
-// 默认不带：get-meta-list 的结果要经 IPC 序列化给渲染进程，正文会白白拷一份。
-async function getMetaList(includeContent = false) {
-  const out = [];
-  for (const top of ['prompts', 'workflows', 'templates']) {
-    const rootDir = TOP_DIRS[top];
-    // 目录内并发。缓存命中时每个文件仍要 stat 一次做失效判断，
-    // 串行 await 让整库 stat 排成一条链——1000 文件实测约 180ms，
-    // 并发后降到 25ms 量级。字符串处理只占个位数毫秒，不是瓶颈。
-    // 结果按原序拼装，保持输出顺序稳定。
-    const walk = async (dir, baseRel) => {
-      let entries;
-      try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
-      const slots = await Promise.all(entries.map(async (e) => {
-        if (e.name.startsWith('.')) return null;
-        const rel = `${baseRel}/${e.name}`;
-        if (e.isDirectory()) return { subdir: path.join(dir, e.name), rel };
-        if (!e.name.toLowerCase().endsWith('.md')) return null;
-        const entry = await readParsedCached(path.join(dir, e.name));
-        let stage = null;
-        if (top === 'prompts') {
-          const segs = rel.split('/');
-          stage = segs.length > 2 ? segs[1] : null;
-        }
-        const item = { rel, name: e.name, meta: entry.meta, stage, top };
-        // 搜索走 includeContent=true，直接把缓存里的派生字段带过去（不再重算）。
-        // 这些字段只在进程内使用，不经 IPC 发给渲染进程。
-        if (includeContent) {
-          item.content = entry.content;
-          item.bodyRaw = entry.bodyRaw;
-          item.bodyLower = entry.bodyLower;
-        }
-        return { item };
-      }));
-      // 子目录递归留在串行段：并发已经在每一层内部生效，
-      // 再叠一层并发会把打开的文件句柄数放大到不可控。
-      for (const slot of slots) {
-        if (!slot) continue;
-        if (slot.item) out.push(slot.item);
-        else if (slot.subdir) await walk(slot.subdir, slot.rel);
-      }
-    };
-    await walk(rootDir, top);
-  }
-  return out;
-}
-
-// ---------- 全文搜索 ----------
-async function searchAll(query) {
-  const q = String(query || '').trim().toLowerCase();
-  if (!q) return [];
-  const tokens = q.split(/\s+/).filter(Boolean);
-  if (!tokens.length) return [];
-  // 复用 getMetaList 已经读到的正文，不再逐个重读（原先是 2N 次 I/O）
-  const meta = await getMetaList(true);
-  const results = [];
-  for (const item of meta) {
-    const titleLower = (item.meta.title || item.name).toLowerCase();
-    const tagsLower = Array.isArray(item.meta.tags) ? item.meta.tags.map(t => String(t).toLowerCase()) : [];
-    // bodyRaw / bodyLower 来自 contentCache（见 readParsedCached），
-    // 不在这里重算——每敲一个字符重做全库的正则+toLowerCase 是搜索的主要开销。
-    const bodyRaw = item.bodyRaw || '';
-    const bodyLower = item.bodyLower || '';
-
-    let allHit = true;
-    let allInTitle = true;
-    let allInTagsOrTitle = true;
-    let firstBodyIdx = -1;
-
-    for (const token of tokens) {
-      const nameHit = titleLower.includes(token);
-      const tagHit = tagsLower.some(t => t.includes(token));
-      const bIdx = bodyLower.indexOf(token);
-      const bodyHit = bIdx >= 0;
-
-      if (!nameHit) allInTitle = false;
-      if (!nameHit && !tagHit) allInTagsOrTitle = false;
-      if (bodyHit && (firstBodyIdx === -1 || bIdx < firstBodyIdx)) {
-        firstBodyIdx = bIdx;
-      }
-      if (!nameHit && !tagHit && !bodyHit) {
-        allHit = false;
-        break;
-      }
-    }
-    if (!allHit) continue;
-
-    let rank = 1, snippet = '';
-    if (allInTitle) rank = 3;
-    else if (allInTagsOrTitle) rank = 2;
-
-    if (firstBodyIdx >= 0) {
-      const start = Math.max(0, firstBodyIdx - 30);
-      const end = Math.min(bodyRaw.length, firstBodyIdx + 80);
-      snippet = (start > 0 ? '…' : '') + bodyRaw.slice(start, end) + (end < bodyRaw.length ? '…' : '');
-    }
-    results.push({ rel: item.rel, name: item.meta.title || item.name, stage: item.stage, projectType: item.meta.projectType, rank, snippet });
-  }
-  results.sort((a, b) => b.rank - a.rank);
-  return results.slice(0, 60);
-}
-
 // ---------- IPC ----------
 ipcMain.handle('get-root', () => DATA_ROOT);
 ipcMain.handle('log', (e, msg) => { console.log('[renderer]', String(msg)); });
@@ -1013,6 +841,17 @@ function loadWorkflowIndex() {
 // 任何写入之后调用，让下一次查询重新收集。
 function dropWorkflowIndex() {
   indexPromise = null;
+}
+
+// 文件内容变了的唯一出口。挂在**内容缓存这一层**而不是散在五个写路径上：
+// 保存/改名/移动/删除/导入/回滚都调它，漏一处就是"刚改完引用关系还是旧的"——
+// 和内容缓存同一个失效纪律，就挂同一行。
+//
+// 工作流引用索引的作废放在这里而不是 lib/library.js：那是主进程的状态，
+// 数据层不该知道它存在。
+function dropFromCache(fullPath) {
+  dropFromContentCache(fullPath);
+  dropWorkflowIndex();
 }
 
 // rel 为空时不查单向引用，只做全库悬空体检。

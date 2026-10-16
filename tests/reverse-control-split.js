@@ -40,7 +40,7 @@ function writeFileRetry(file, text) {
   }
 }
 
-const FILES = ['electron-main.js', 'lib/selftest.js'];
+const FILES = ['electron-main.js', 'lib/selftest.js', 'lib/library.js'];
 const BACKUP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'pfm-rc-split-'));
 const original = new Map();
 for (const rel of FILES) {
@@ -219,8 +219,11 @@ const CASES = [
     expect: /没有自己声明 cacheHits/
   },
   {
+    // 热路径（读计数、LRU 上限）在 lib/library.js 里——数据层搬家之后，
+    // 这几个用例的目标文件也要跟着走，否则 find 永远找不到，用例报的是
+    // '和代码脱节'而不是'目标断言没变红'。
     name: '主进程又恢复成模块级 CONTENT_CACHE_MAX（自检调小的是另一个变量）',
-    rel: 'electron-main.js',
+    rel: 'lib/library.js',
     find: 'function countedReadFile(fullPath) {',
     replace: 'let CONTENT_CACHE_MAX = 5000;\nfunction countedReadFile(fullPath) {',
     expect: /不再有模块级 CONTENT_CACHE_MAX/
@@ -240,15 +243,15 @@ const CASES = [
     expect: /LRU 自检调小的也是 cacheStats/
   },
   {
-    name: '主进程的读计数不加在共享对象上',
-    rel: 'electron-main.js',
+    name: '数据层的读计数不加在共享对象上',
+    rel: 'lib/library.js',
     find: '  cacheStats.fileReadCount++;',
     replace: '  void 0;',
-    expect: /主进程的读计数加在 cacheStats 上/
+    expect: /数据层的读计数加在 cacheStats 上/
   },
   {
     name: 'LRU 上限判断读的不是共享对象',
-    rel: 'electron-main.js',
+    rel: 'lib/library.js',
     find: '  while (contentCache.size > cacheStats.CONTENT_CACHE_MAX) {',
     replace: '  while (contentCache.size > 5000) {',
     expect: /LRU 上限判断读 cacheStats/

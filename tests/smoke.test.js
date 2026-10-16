@@ -16,6 +16,10 @@ function assert(cond, msg) {
 function section(name) { console.log('--- ' + name + ' ---'); }
 
 const mainSrc = fs.readFileSync(path.join(root, 'electron-main.js'), 'utf8');
+// 内容库数据层（正文缓存 / 元数据 / 全文搜索）在 lib/library.js 里，不在主文件里。
+// 盯这几条的断言要跟过去：搬家是刻意的（数据层不该 require electron，否则
+// MCP server 之类别的入口复用不了），断言留在原地会变成"永远查不到"的假绿。
+const librarySrc = fs.readFileSync(path.join(root, 'lib/library.js'), 'utf8');
 // 自检 / 压测 / 安全回归已经搬到 lib/selftest.js（原先占 electron-main.js 的 35%）。
 // 下面凡是查"自检里有没有某段逻辑"的断言都改读这一份，**不是**把两份源码拼起来查。
 // 拼起来的话，断言就不再关心那段代码住在哪个文件里：哪天有人把对话框桩搬回主进程、
@@ -522,11 +526,12 @@ assert(/describeError\(e\)/.test(rendererSrc), 'tErr 走 describeError');
 
 section('搜索性能');
 // 搜索会遍历整库。原先 getMetaList 读一遍、searchAll 再读一遍，是 2N 次 I/O。
-assert(/async function getMetaList\(includeContent = false\)/.test(mainSrc), 'getMetaList 支持带出正文');
-assert(/const meta = await getMetaList\(true\)/.test(mainSrc), 'searchAll 复用 getMetaList 读到的正文');
-assert(!/countedReadFile\(safeJoin\(item\.rel\)\)/.test(mainSrc), 'searchAll 不再逐个重读文件');
-assert(/async function readParsedCached\(/.test(mainSrc), '有按 mtime+size 失效的正文缓存');
-assert(/hit\.mtimeMs === st\.mtimeMs && hit\.size === st\.size/.test(mainSrc), '缓存同时校验 mtime 与 size');
+assert(/async function getMetaList\(\{ topDirs, parseFrontmatter, stripFrontmatter, includeContent = false \}\)/.test(librarySrc),
+  'getMetaList 支持带出正文');
+assert(/const meta = await library\.getMetaList\(true\)/.test(librarySrc), 'searchAll 复用 getMetaList 读到的正文');
+assert(!/countedReadFile\(safeJoin\(item\.rel\)\)/.test(mainSrc + librarySrc), 'searchAll 不再逐个重读文件');
+assert(/async function readParsedCached\(/.test(librarySrc), '有按 mtime+size 失效的正文缓存');
+assert(/hit\.mtimeMs === st\.mtimeMs && hit\.size === st\.size/.test(librarySrc), '缓存同时校验 mtime 与 size');
 // 所有写入/移动/删除路径都必须清缓存，否则会读到旧内容
 const dropCount = (mainSrc.match(/dropFromCache\(/g) || []).length;
 const movedCacheHooks = (mainSrc.match(/onFileMoved: dropFromCache/g) || []).length;
@@ -541,9 +546,9 @@ assert(!!pkg.scripts.bench, '有 npm run bench');
 // 多词搜索语义：单 token 时"标题命中"必须是最高优先级（rank 3，语义与原实现等价），
 // 多 token 时是 AND 语义（每个 token 都要在标题/标签/正文某处命中）。
 // 这条断言把"分词后的 rank 分支"锁定住，防止后续改动把标题优先级悄悄降掉。
-assert(/if \(allInTitle\) rank = 3/.test(mainSrc), '多词搜索：全部 token 命中标题仍是最高优先级（rank 3）');
-assert(/else if \(allInTagsOrTitle\) rank = 2/.test(mainSrc), '多词搜索：全部 token 命中标题/标签降为 rank 2');
-assert(/if \(!nameHit && !tagHit && !bodyHit\)/.test(mainSrc), '多词搜索：AND 语义——任一 token 未命中就排除该文件');
+assert(/if \(allInTitle\) rank = 3/.test(librarySrc), '多词搜索：全部 token 命中标题仍是最高优先级（rank 3）');
+assert(/else if \(allInTagsOrTitle\) rank = 2/.test(librarySrc), '多词搜索：全部 token 命中标题/标签降为 rank 2');
+assert(/if \(!nameHit && !tagHit && !bodyHit\)/.test(librarySrc), '多词搜索：AND 语义——任一 token 未命中就排除该文件');
 
 section('对话框自动化');
 // 导出/导入四个流程要弹系统对话框，原先只能人工点
@@ -991,6 +996,7 @@ section('自检模块拆分（注入契约）');
   const strip = (s) => s.split(/\r?\n/).filter(l => !/^\s*(\/\/|\*)/.test(l)).join('\n');
   const mainCode = strip(mainSrc);
   const selftestCode = strip(selftestSrc);
+  const libraryCode = strip(librarySrc);
 
   // ---- 搬走了，而不是抄了一份 ----
   // 复制比漏搬危险得多：两份会各自演化，而自检跑的是模块那份，
@@ -1098,12 +1104,22 @@ section('自检模块拆分（注入契约）');
     assert(!REQ.includes(c), c + ' 不单独注入（按值传会写进死副本）');
     assert(!new RegExp('^\\s*let\\s+' + c + '\\b', 'm').test(selftestCode),
       'lib/selftest.js 没有自己声明 ' + c + '（否则改的是模块内的影子变量）');
+    // 两条：主进程和**数据层**都不能自己声明影子变量。
+    //
+    // 数据层这条是被反向对照逼出来的：热路径搬进 lib/library.js 之后，原来那条
+    // "主进程没有模块级 CONTENT_CACHE_MAX" 从"盯住真正的变量"变成了恒真——
+    // 往 library.js 里加一个模块级 let 时它照样全绿，而热路径已经在读那个影子
+    // 变量了。搬家之后每一条"某文件里没有 X"的断言都要配一条新家的同款。
     assert(!new RegExp('^let\\s+' + c + '\\b', 'm').test(mainCode),
       'electron-main.js 也不再有模块级 ' + c + '（已并入 cacheStats）');
+    assert(!new RegExp('^let\\s+' + c + '\\b', 'm').test(libraryCode),
+      'lib/library.js 也不再有模块级 ' + c + '（热路径已并入 cacheStats）');
   }
   // 两侧都必须通过同一个对象读写
-  assert(/cacheStats\.fileReadCount\+\+/.test(mainCode), '主进程的读计数加在 cacheStats 上');
-  assert(/contentCache\.size > cacheStats\.CONTENT_CACHE_MAX/.test(mainCode), 'LRU 上限判断读 cacheStats');
+  // 这两条查的是**数据层**（lib/library.js），因为热路径搬过去了。
+  // 但下限仍是同一个要求：自检与热路径读写的是同一个对象上的字段。
+  assert(/cacheStats\.fileReadCount\+\+/.test(libraryCode), '数据层的读计数加在 cacheStats 上');
+  assert(/contentCache\.size > cacheStats\.CONTENT_CACHE_MAX/.test(libraryCode), 'LRU 上限判断读 cacheStats');
   assert(/cacheStats\.fileReadCount = 0/.test(selftestCode), '压测清零写的是 cacheStats');
   assert(/cacheStats\.CONTENT_CACHE_MAX = 3/.test(selftestCode), 'LRU 自检调小的也是 cacheStats');
 

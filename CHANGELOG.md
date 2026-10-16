@@ -38,6 +38,14 @@
 
 ### 变更
 
+- **内容库数据层抽成 lib/library.js**：正文缓存、元数据列表、全文搜索此前长在
+  electron-main.js 里，于是任何别的入口（MCP server、命令行工具、裸 node 测试）
+  想复用都得先把主进程整个 require 起来，而那会拉起 electron。现在它们只依赖
+  DATA_ROOT 与 frontmatter 解析器，不 require electron（与 lib/logger.js、
+  lib/diagnostics.js 同一约定）。缓存与计数器仍是模块级状态，主进程与自检
+  读写的是同一个对象——这一点由反向对照脚本盯着，热路径搬家后它当场抓出
+  "主进程没有模块级 CONTENT_CACHE_MAX"这条断言已经变成恒真。
+
 - **流程图会标出从入口走不到的步骤**：工作流的图论部分（分层、成环、不可达）
   从 renderer.js 抽到 src/flow-graph.js（裸 node 可测，新增 test:flow-graph）。
   此前这些判断只能靠拉起 Electron 数 DOM 节点验证，于是"某个步骤不在任何一条
