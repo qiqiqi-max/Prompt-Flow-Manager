@@ -1133,7 +1133,31 @@ ipcMain.handle('get-config', async () => loadConfig());
 // 扔掉结果、照常 return next，于是 set-config 正常 resolve、渲染进程把内存里的
 // state.config 当成已落盘。症状是改主题/语言/锁定当场生效，重启后全部回滚，
 // 而且没有任何提示——用户只会觉得"这软件存不住设置"。
+// 配置里允许出现的键。这份清单是**契约**：渲染进程能写什么，看这里。
+//
+// 为什么要有它：updateConfig 原先是裸的 {...cur, ...patch}，渲染进程发来什么就
+// 落盘什么。后果有两条——一是 __proto__ 这类键能被写进 config.json（跨次启动
+// 一直在里面，任何 Object.assign / for...in 的地方都可能被它咬到）；
+// 二是任意垃圾键会永久累积，而 updateConfig 在窗口移动这类热路径上被反复调用。
+//
+// 已知键之外的键**不拒绝、只记日志**：拒绝会连带把将来新增的键卡死在这里，
+// 而"渲染进程写了个没人认识的键"和"有人往配置里塞了危险对象"是两种严重程度。
+const KNOWN_CONFIG_KEYS = new Set([
+  'theme', 'lang', 'fontScale', 'windowBounds', 'projectTypes', 'lockedFiles',
+  'expandedPaths', 'recent', 'fillMemory', 'sidebarWidth', 'tabs', 'activeTab',
+  'updateCheck', 'updateLastCheckedAt', 'updateSkipVersion'
+]);
+// 原型链上的键。JSON.parse 出来的对象里它们是**自有属性**（不是原型），
+// 展开进配置对象之后会跟着 saveConfig 落盘。
+const DANGEROUS_CONFIG_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
 function updateConfig(patch) {
+  const incoming = Object.keys(patch || {});
+  const bad = incoming.filter(k => DANGEROUS_CONFIG_KEYS.has(k));
+  if (bad.length) throw appError('E_CONFIG_BAD_KEY', bad.join(', '));
+  for (const k of incoming) {
+    if (!KNOWN_CONFIG_KEYS.has(k)) console.error('[config] 未知配置键（已写入，可能该同步 KNOWN_CONFIG_KEYS）: ' + k);
+  }
   return queueConfigWrite(async () => {
     const cur = await loadConfig();
     const next = { ...cur, ...(patch || {}) };

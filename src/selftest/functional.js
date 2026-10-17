@@ -72,6 +72,25 @@
       check('工作流引用不误改相近路径和正文', refContent.includes(renamed + '.bak') && refContent.includes('正文保留 ' + renamed), refContent);
       await api.setConfig({ lockedFiles: [] });
 
+      // 6d. 配置键闸门：原型链上的键必须被拒，且不能落进 config.json。
+      // 先验证前提——这个 patch 是真的带着自有 __proto__ 属性（而不是设了原型），
+      // 否则这条用例拦的是一个空对象，什么都证明不了。
+      {
+        const payload = JSON.parse('{"__proto__":{"polluted":1}}');
+        check('构造的配置载荷带着自有 __proto__ 属性', Object.keys(payload).includes('__proto__'),
+          JSON.stringify(Object.keys(payload)));
+        let msg = '';
+        try { await api.setConfig(payload); } catch (e) { msg = String(e && e.message); }
+        check('原型链上的配置键被拒绝（带 E_CONFIG_BAD_KEY）', /E_CONFIG_BAD_KEY/.test(msg), msg || '居然写成功了');
+        check('原型没有被污染', ({}).polluted === undefined, String(({}).polluted));
+        const cfg = await api.getConfig();
+        check('被拒的键没有出现在配置里', !Object.keys(cfg).includes('__proto__') && !('polluted' in cfg),
+          JSON.stringify(Object.keys(cfg).slice(0, 8)));
+        // 反面：正常键照常写入（别把闸门做成把什么都拦下的墙）
+        await api.setConfig({ recent: ['prompts/testing/自检临时.md'] });
+        check('正常配置键照常写入', (await api.getConfig()).recent.length === 1);
+      }
+
       // 6c. 引用索引（反方向）：谁在引用这个提示词、全库有没有悬空引用。
       // 与 6b 的区别是方向：6b 服务于改名同步（写路径），这里服务于界面展示
       // （打开一个提示词时告诉用户"它在哪些工作流里"、删除前提醒）。

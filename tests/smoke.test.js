@@ -654,6 +654,19 @@ section('预览区占位符');
     '填过就不再弹面板，直接用填好的正文');
 }
 
+section('配置键闸门与 CSP');
+// 行为由 test:fn 覆盖，这里卡住"闸门还在"：撤掉它不会让任何现有测试立刻变红
+// （渲染进程从来没有写过危险键），所以只能静态盯住。
+{
+  assert(/const DANGEROUS_CONFIG_KEYS = new Set\(\['__proto__', 'constructor', 'prototype'\]\)/.test(mainSrc),
+    'updateConfig 拦原型链上的键');
+  assert(/throw appError\('E_CONFIG_BAD_KEY'/.test(mainSrc), '被拒时抛 E_CONFIG_BAD_KEY');
+  assert(/const KNOWN_CONFIG_KEYS = new Set\(\[/.test(mainSrc), '有已知键清单（新增键要同步它）');
+  const html = fs.readFileSync(path.join(root, 'src/index.html'), 'utf8');
+  assert(/object-src 'none'/.test(html), 'CSP 禁止 object/embed');
+  assert(/base-uri 'none'/.test(html), 'CSP 禁止 <base> 改写相对地址');
+}
+
 section('工作流引用索引');
 // 索引的失效点挂在 dropFromCache 上（保存/改名/删除/导入/回滚都调它），
 // 这条链断了的表现是"刚改完引用关系还是旧的"，而那是完全静默的。
