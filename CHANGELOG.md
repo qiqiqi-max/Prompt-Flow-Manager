@@ -38,6 +38,13 @@
 
 ### 变更
 
+- **命令行入口 `npm run pfm`**：只读的库查询与体检，六个子命令——`overview`、`list`、
+  `search`、`get`、`refs`、`check`，都支持 `--json`。`check` 是给流水线用的：
+  悬空引用或不可达步骤任一存在就退出码 1，可以直接当提示词库的 lint。
+  与 MCP server 复用同一份数据层（`lib/library.js` + `lib/workflow-index.js`），
+  路径白名单也一致（只放行三个内容目录下的 `.md`）。新增 `test:cli`（真子进程，
+  含退出码与路径边界的反向对照）。
+
 - **只读 MCP 接口**：新增 mcp/ 下的 stdio MCP server，把提示词库暴露给
   Claude Code / Codex 等支持 MCP 的工具查询——列库、检索、读正文、看工作流图、
   查引用关系。**只有读操作**，没有写入工具：写操作要接的是写队列、版本快照、
