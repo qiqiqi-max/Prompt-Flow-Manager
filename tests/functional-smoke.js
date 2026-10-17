@@ -203,6 +203,12 @@ child.on('exit', (code) => {
     /\[selftest:fn\] PASS 工作流引用不误改相近路径和正文/,
     // 引用索引（第 6c 节）：反方向查询 + 悬空体检 + 索引随内容失效。
     // 这是界面 meta-bar 上那枚 chip 和删除前提醒的数据来源。
+    // 配置键闸门（第 6d 节）：原型链键被拒 + 没污染 + 没落盘，反面是正常键照常写入
+    /\[selftest:fn\] PASS 构造的配置载荷带着自有 __proto__ 属性/,
+    /\[selftest:fn\] PASS 原型链上的配置键被拒绝（带 E_CONFIG_BAD_KEY）/,
+    /\[selftest:fn\] PASS 原型没有被污染/,
+    /\[selftest:fn\] PASS 被拒的键没有出现在配置里/,
+    /\[selftest:fn\] PASS 正常配置键照常写入/,
     /\[selftest:fn\] PASS 能查出引用当前提示词的工作流/,
     /\[selftest:fn\] PASS 被引用的提示词不算悬空/,
     /\[selftest:fn\] PASS 保存工作流后引用索引立刻反映新内容/,
