@@ -281,6 +281,8 @@ postinstall，二进制改成惰性下载，所以干净环境里 `npm ci` 之�
 | `PFM_SELFTEST_OPEN=<相对路径>` | 启动后先打开指定文件 | |
 | `PFM_SELFTEST_SHOT=<png>` | 存一张渲染截图供人工核对 | |
 | `PFM_SELFTEST_BENCH=<条数>` | 生成指定规模的库跑搜索压测 | |
+| `PFM_TMP_MIN_AGE_MS=<毫秒>` | 自愈清理残留临时文件的年龄下限（默认 60000） | 只给 `test:heal` 用：缩短它，"启动时太新→后台复查再扫"才在几秒内跑得完 |
+| `PFM_HEAL_RECHECK_MS=<毫秒>` | 后台复查的延迟（默认 = 年龄下限 + 5 秒） | 同上 |
 
 ### 运行期逃生口（不是自检开关）
 

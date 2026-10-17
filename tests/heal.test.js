@@ -216,6 +216,36 @@ function snapshot(dir) {
     && after.orphanAdopted.length === 1 && ctrl.orphanAdopted.length === 0
     && after.staleParts.every(v => v === false) && ctrl.staleParts.every(Boolean));
 
+  // ---------- 第二个场景：启动时太新的残留，由后台复查清掉 ----------
+  // 为什么单开一段：年龄下限（生产 60 秒）会让崩溃后立刻重启时的那批残留被跳过，
+  // 而用户很可能接着把应用开上几天——不复查的话它整场都在数据目录里。
+  // 这条路只有把下限和复查延迟一起缩短才跑得完，所以两个值都留了测试开关。
+  {
+    const dir3 = fs.mkdtempSync(path.join(os.tmpdir(), 'pfm-heal-recheck-'));
+    fs.mkdirSync(path.join(dir3, 'prompts', 'testing'), { recursive: true });
+    // 年轻残留：此刻比年龄下限还新，启动那一轮必须放过它
+    const young = path.join(dir3, '.tmp-999997-0-刚被中断的写入.md.part');
+    fs.writeFileSync(young, '半截', 'utf8');
+    // 下限 1200ms、复查 2000ms：启动时它 0 秒（太新 → 跳过），复查时约 2 秒（够老 → 删掉）
+    const r3 = await run(dir3, {
+      PFM_SELFTEST: '1',
+      PFM_TMP_MIN_AGE_MS: '1200',
+      PFM_HEAL_RECHECK_MS: '2000',
+      // 自检在页面加载完就跑完并退出，2 秒的复查根本来不及。用 EVAL 拖住进程
+      // 3.5 秒——它跑在页面里，而复查在主进程的定时器上，两者互不阻塞。
+      // 不这么做的话失败信息会是"文件还在"，看着像复查没实现，其实是进程先退了。
+      PFM_SELFTEST_EVAL: '(async () => { await new Promise(r => setTimeout(r, 3500)); })()'
+    });
+    push('第二场景：进程正常退出', r3.code === 0, 'exit=' + r3.code);
+    push('启动这一轮把太新的残留放过了（否则测的就不是复查那条路）',
+      !/删除残留临时文件: \.tmp-999997/.test(r3.out),
+      (r3.out.match(/\[heal\][^\n]*/g) || []).join(' | ').slice(0, 200));
+    push('后台复查跑过并报告了', /\[heal\] 后台复查/.test(r3.out),
+      (r3.out.match(/\[heal\] 后台复查[^\n]*/g) || []).join(' | '));
+    push('太新的残留最终被清掉', !fs.existsSync(young), young);
+    try { fs.rmSync(dir3, { recursive: true, force: true }); } catch (_) {}
+  }
+
   for (const d of [dir, dir2]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch (_) {}
   }

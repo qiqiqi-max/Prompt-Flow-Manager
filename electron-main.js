@@ -1729,7 +1729,17 @@ const TMP_PART_RE = /^\.tmp-\d+-\d+-.*\.part$/;
 const CLOSE_TMP_RE = /\.tmp-close$/;
 // 只清理"明显不是正在写"的：本进程刚生成的、以及 60 秒内动过的都跳过。
 // 自检会同时拉起多个 Electron，但它们各自 PFM_DATA_DIR 不同，不会互相看见。
-const TMP_PART_MIN_AGE_MS = 60 * 1000;
+// PFM_TMP_MIN_AGE_MS 只给测试用：把 60 秒缩短，好让"太新 → 稍后再扫"这条路
+// 在几秒内跑完（生产路径不设它）。
+const TMP_PART_MIN_AGE_MS = Number(process.env.PFM_TMP_MIN_AGE_MS) > 0
+  ? Number(process.env.PFM_TMP_MIN_AGE_MS)
+  : 60 * 1000;
+
+// 后台复查的延迟：要等被跳过的那些文件长过年龄下限，否则再扫一遍还是跳过。
+// 多给 5 秒余量，避免卡在边界上反复空跑。生产路径下约 65 秒后跑一次。
+const HEAL_RECHECK_MS = Number(process.env.PFM_HEAL_RECHECK_MS) > 0
+  ? Number(process.env.PFM_HEAL_RECHECK_MS)
+  : TMP_PART_MIN_AGE_MS + 5000;
 
 async function healDataDir() {
   const report = {
@@ -1740,6 +1750,8 @@ async function healDataDir() {
     orphanVersionDirs: [],     // 孤立的版本目录（只报告，不动）
     unrestorableEntries: [],   // originalRel 现在已不允许写入（只报告，不动）
     removedTempFiles: [],
+    // 因为"太新"被跳过、等后台复查再处理的临时文件（见 HEAL_RECHECK_MS）
+    tooYoungTempFiles: [],
     errors: []
   };
 
@@ -1860,7 +1872,12 @@ async function healDataDir() {
     const full = path.join(dir, name);
     let st;
     try { st = await fsp.stat(full); } catch { return; }
-    if (now - st.mtimeMs < TMP_PART_MIN_AGE_MS) return; // 可能是别人正在写
+    if (now - st.mtimeMs < TMP_PART_MIN_AGE_MS) {
+      // 可能是别人正在写。记下来：如果启动这一轮跳过了它，就要安排一次后台复查——
+      // 用户重启后可能几天不关应用，不复查的话它会一直躺在数据目录里。
+      report.tooYoungTempFiles.push(path.relative(DATA_ROOT, full).replace(/\\/g, '/'));
+      return;
+    }
     try {
       await fsp.unlink(full);
       report.removedTempFiles.push(path.relative(DATA_ROOT, full).replace(/\\/g, '/'));
@@ -1892,10 +1909,44 @@ async function healDataDir() {
 }
 
 // 启动时跑一次，任何异常都吞掉：自愈是尽力而为，不能成为新的启动失败原因。
+// 后台复查：处理"启动时还太新、没敢删"的残留临时文件。
+//
+// 为什么需要它：年龄下限（60 秒）是为了不误删别的实例正在写的文件，代价是
+// 崩溃后立刻重启时那一批会被跳过——而用户很可能接着把应用开上几天，整个会话里
+// 它们都留在数据目录里（开发模式下就在仓库根目录）。实测过这个形状：12 行前
+// 才因为 .tmp-close 不匹配形状而扫不到，它同样会被年龄下限跳过。
+//
+// 只在**这一轮真的跳过了东西**时才安排：没有跳过就不需要第二次目录遍历，
+// 也就不必为一个多数启动都用不上的机制常驻一个定时器。一次启动最多复查一次。
+let healRecheckTimer = null;
+function scheduleHealRecheck(report) {
+  if (healRecheckTimer) return;
+  if (!report || !report.tooYoungTempFiles || !report.tooYoungTempFiles.length) return;
+  healRecheckTimer = setTimeout(async () => {
+    try {
+      const r = await healDataDir();
+      lastHealReport = r;
+      if (r.removedTempFiles.length) {
+        logger.info('[heal] 后台复查清掉启动时还太新的残留临时文件: ' + r.removedTempFiles.join(', '));
+      } else {
+        logger.info('[heal] 后台复查没有可清的东西（启动时跳过 ' + report.tooYoungTempFiles.length + ' 个，复查时也不满足条件）');
+      }
+    } catch (e) {
+      // 复查失败不是启动失败：它处理的是"迟早会被下一次启动清掉"的东西
+      logger.error('[heal] 后台复查失败: ' + (e && e.message ? e.message : String(e)));
+    } finally {
+      healRecheckTimer = null;
+    }
+  }, HEAL_RECHECK_MS);
+  // 别让这个定时器把进程吊住不退出（关窗时 Electron 会等定时器）
+  if (healRecheckTimer.unref) healRecheckTimer.unref();
+}
+
 async function runStartupHeal() {
   try {
     const r = await healDataDir();
     lastHealReport = r;
+    scheduleHealRecheck(r);
     const counts = [
       ['幽灵条目', r.droppedGhostEntries.length],
       ['收养孤立正文', r.adoptedOrphanFiles.length],
