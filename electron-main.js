@@ -1679,6 +1679,11 @@ let lastHealReport = null;
 // .part 临时文件的判定必须严格按 writeFileAtomic 生成的形态来，
 // 不能宽到 /\.part$/：用户自己的 .part 文件（下载工具的半成品之类）不该被删。
 const TMP_PART_RE = /^\.tmp-\d+-\d+-.*\.part$/;
+// 关窗那一次同步写用的临时名（config.json.tmp-close）。它是固定名字、每次关窗
+// 覆盖，所以不会累积——但它同样可能被 kill 留在半路，而那个形状不匹配上面
+// 这条正则，于是自愈一直扫不到它：开发模式下它会躺在仓库根目录，而 .gitignore
+// 的 *.tmp / .tmp-* 也都不匹配 *.tmp-close（实测确认过）。所以显式再认一种形状。
+const CLOSE_TMP_RE = /\.tmp-close$/;
 // 只清理"明显不是正在写"的：本进程刚生成的、以及 60 秒内动过的都跳过。
 // 自检会同时拉起多个 Electron，但它们各自 PFM_DATA_DIR 不同，不会互相看见。
 const TMP_PART_MIN_AGE_MS = 60 * 1000;
@@ -1801,8 +1806,12 @@ async function healDataDir() {
   let scanned = 0;
 
   const sweepFile = async (dir, name) => {
-    if (!TMP_PART_RE.test(name)) return;
+    const isPart = TMP_PART_RE.test(name);
+    const isCloseTmp = CLOSE_TMP_RE.test(name);
+    if (!isPart && !isCloseTmp) return;
     // 名字里的 pid 是本进程 = 我们自己正在写，绝不能删。
+    // .tmp-close 不带 pid，只能靠下面那条“够老”兜住正在写的进程——
+    // 关窗那一刻我们确实可能正在写它，而删掉它只是让这次尺寸没存上，不影响数据。
     const m = name.match(/^\.tmp-(\d+)-/);
     if (m && Number(m[1]) === process.pid) return;
     const full = path.join(dir, name);
