@@ -181,6 +181,8 @@ npm run test:workflow-index # 引用索引：谁在引用这个提示词、悬�
 npm run test:flow-graph # 工作流图：分层、成环、不可达步骤（裸 node，自带一组反向对照）
 npm run test:mcp          # 只读 MCP server：协议往返、只读边界、返回上限（裸 node，自带一组反向对照）
 npm run test:cache-budget # 正文缓存的两道闸与占用记账（裸 node，自带一组反向对照）
+npm run test:cli          # 命令行入口：只读子命令、退出码、路径边界（裸 node，自带一组反向对照）
+                          # npm run pfm -- list / search / get / refs / check 是它的日常用法
 npm run test:import-rollback # 真实 Electron 完整备份中途失败后整体撤回
 npm run test:ui-failure # 真实 Electron 配置写入失败时显示提示并恢复界面状态
 npm run test:includes     # 模板包含引擎（裸 node，自带一组反向对照）

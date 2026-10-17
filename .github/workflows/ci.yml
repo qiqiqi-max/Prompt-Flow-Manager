@@ -155,6 +155,10 @@ jobs:
       - name: 正文缓存预算
         run: npm run test:cache-budget
 
+      # 命令行入口：只读子命令、退出码与路径边界。自带反向对照。
+      - name: 命令行入口
+        run: npm run test:cli
+
       # 纯逻辑测试，不用起 Electron：从 renderer.js 里抠出 debounce 单独验语义。
       # 自带反向对照（旧版一行 debounce 必须失败），所以它不会变成永远绿的空壳。
       - name: debounce 语义
