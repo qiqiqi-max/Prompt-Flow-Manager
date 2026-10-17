@@ -654,6 +654,31 @@ section('预览区占位符');
     '填过就不再弹面板，直接用填好的正文');
 }
 
+section('原子写的 durability');
+// fsync 与重试都是**不可黑盒验证**的性质：断电之后文件在不在、rename 被短暂占用
+// 之后有没有自动过去，都测不出来（前者要真的断电，后者要真的杀毒软件占着文件）。
+// 所以这里静态卡住形状，行为由 test:fn / test:save-conflict / test:ui-failure
+// 那几套覆盖写入路径整体没坏。
+{
+  assert(/async function writeAndSync\(/.test(mainSrc) && /await handle\.sync\(\);/.test(mainSrc),
+    '原子写先 fsync 再 rename');
+  assert(/await writeAndSync\(tmp, data\);\s*await renameWithRetry\(tmp, fullPath\);/.test(mainSrc),
+    '写入走 writeAndSync + renameWithRetry');
+  // 重试必须是**有界**的，且只认会因为占用而失败的那几个错误码：
+  // 无界重试会把一次性失败变成卡住，而把 ENOENT 之类也重试会掩盖真问题。
+  const retryBody = (mainSrc.match(/async function renameWithRetry\(from, to\) \{([\s\S]*?)\n\}/) || [])[1] || '';
+  assert(/for \(let i = 0; i < 3; i\+\+\)/.test(retryBody), 'rename 重试有界（3 次）');
+  assert(/RENAME_RETRY_CODES\.has\(e && e\.code\)\) throw e;/.test(retryBody),
+    '只重试"被占用"这类错误码，其余立即抛出');
+  assert(/fs\.fsyncSync\(fd\);/.test(mainSrc), '关窗那次同步写也 fsync');
+  // 这一条是被实测逼出来的：把写入从 fsp.writeFile 换成 handle.writeFile 之后，
+  // 自检里那批故障注入桩（security regression 的"写索引失败""配置写盘失败"）
+  // 一次都命中不了——场景静默地不再被构造，而断言还在（test:fn 那次 5 条回滚
+  // 断言全红，报的却是"桩真的被调用到了 → 命中 0 次"）。
+  assert(/await fsp\.writeFile\(fullPath, data, 'utf8'\);/.test(mainSrc),
+    '写入仍走 fsp.writeFile（故障注入桩拦的是这一句）');
+}
+
 section('配置键闸门与 CSP');
 // 行为由 test:fn 覆盖，这里卡住"闸门还在"：撤掉它不会让任何现有测试立刻变红
 // （渲染进程从来没有写过危险键），所以只能静态盯住。
