@@ -44,6 +44,36 @@
         menu() ? 'hidden=' + menu().classList.contains('hidden') + ' rect=' + JSON.stringify(menu().getBoundingClientRect()) : 'no menu');
       check('弹层里的输入框自动获得焦点', document.activeElement && document.activeElement.id === 'ctx-input',
         document.activeElement ? document.activeElement.id : 'none');
+      // ---- 居中弹层是模态对话框：角色 + Tab 陷阱 + 关闭后归还焦点 ----
+      // 这三条此前一条都没有：弹层没有 role，按 Tab 焦点会跑到弹层背后的
+      // 侧边栏上（弹层还开着，焦点在看不见的地方走），关掉之后焦点被丢到 body。
+      check('居中弹层读出对话框语义',
+        menu().getAttribute('role') === 'dialog' && menu().getAttribute('aria-modal') === 'true',
+        'role=' + menu().getAttribute('role') + ' aria-modal=' + menu().getAttribute('aria-modal'));
+      {
+        // 注意：**合成**的 keydown 不会触发浏览器的默认 Tab 行为（焦点根本不移动），
+        // 所以'焦点留在弹层里'这件事在有无陷阱时都成立——第一版就是这么写的，
+        // 撤掉陷阱它照样绿。真正能分辨的信号是反向的：有陷阱时是我们自己的处理器
+        // 在移焦点，所以焦点**必须动**，而且绕一圈要回到起点。
+        const focusedId = () => {
+          const el = document.activeElement;
+          return el && el.id ? el.id : (el ? el.tagName : 'none');
+        };
+        const start = focusedId();
+        const seen = [];
+        const presses = menu().querySelectorAll('input, button, select, textarea').length + 2;
+        for (let i = 0; i < presses; i++) {
+          const from = document.activeElement || menu();
+          from.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+          await sleep(60);
+          seen.push(focusedId());
+        }
+        const distinct = new Set(seen).size;
+        const allInside = seen.every(() => menu().contains(document.activeElement));
+        check('按 Tab 焦点在弹层里循环（真的在移动）',
+          distinct >= 2 && allInside && seen.includes(start),
+          '起点 ' + start + '：' + seen.join(' → '));
+      }
       if (!menuVisible()) return out; // 后面全都依赖这一步
 
       await typeAndConfirm('测试');
@@ -63,10 +93,26 @@
 
       // ---- 工具栏按钮同样能弹出 ----
       await pressEsc();
-      await realClick(document.getElementById('btn-new-folder'));
+      // 先 focus 再点：合成的 click 事件不会移动焦点（真实鼠标点击会），
+      // 而归还给谁取决于打开弹层时谁有焦点。不补这一步，断言测的是
+      // 'body 上打开弹层' 这个现实中不存在的场景。
+      const folderBtn = document.getElementById('btn-new-folder');
+      folderBtn.focus();
+      await realClick(folderBtn);
       check('点「＋目录」能弹出输入框', menuVisible());
       await pressEsc();
       check('Esc 能关掉弹层', !menuVisible());
+      // 关掉之后焦点应该回到刚才那个按钮上。丢到 body 的话，键盘用户要再按
+      // 几十次 Tab 才能回到原来的位置。
+      check('弹层关闭后焦点归还给打开的按钮',
+        document.activeElement === folderBtn,
+        document.activeElement ? (document.activeElement.id || document.activeElement.tagName) : 'none');
+      // 角色属性不能留在弹层上：同一元素下一秒可能当右键菜单用，
+      // 留着 role=dialog 会被读成对话框。
+      check('关闭后不残留对话框属性',
+        !document.getElementById('ctx-menu').hasAttribute('role')
+          && !document.getElementById('ctx-menu').hasAttribute('aria-modal'),
+        'role=' + document.getElementById('ctx-menu').getAttribute('role'));
 
       // ---- 点弹层外部要能关闭（防止把 mousedown 改错方向）----
       await realClick(document.getElementById('btn-new-workflow'));
