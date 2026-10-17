@@ -21,3 +21,6 @@ Thumbs.db
 desktop.ini
 *.tmp
 .tmp-*
+
+# 自检用的 Chromium 配置目录（PFM_DATA_DIR 指向仓库时会产生）
+__chromium-profile/
