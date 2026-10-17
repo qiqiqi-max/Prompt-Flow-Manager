@@ -22,5 +22,8 @@ desktop.ini
 *.tmp
 .tmp-*
 
+# 关窗那次同步写的临时文件（正常路径下会被 rename 掉，被 kill 时会留下）
+*.tmp-close
+
 # 自检用的 Chromium 配置目录（PFM_DATA_DIR 指向仓库时会产生）
 __chromium-profile/
