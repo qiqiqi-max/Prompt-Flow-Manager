@@ -806,6 +806,25 @@ function renderMetaBar() {
   });
 }
 
+// 弹层里的 Tab 陷阱。不拦的话按 Tab 会跑到弹层背后的侧边栏/工具栏上——
+// 弹层还开着，焦点却在看不见的地方走。手写顺序而不是查 tabindex：
+// 这些弹层的可聚焦元素就是输入框和按钮，DOM 顺序即视觉顺序。
+{
+  const menu = $('ctx-menu');
+  menu.addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab') return;
+    const items = Array.from(menu.querySelectorAll('input, button, select, textarea'))
+      .filter(el => !el.disabled && el.offsetParent !== null);
+    if (!items.length) return;
+    const current = items.indexOf(document.activeElement);
+    const next = e.shiftKey
+      ? (current <= 0 ? items.length - 1 : current - 1)
+      : (current < 0 || current === items.length - 1 ? 0 : current + 1);
+    e.preventDefault();
+    items[next].focus();
+  });
+}
+
 // 引用关系查询的序号守卫（同 doSearch / updateComposerPreview）：切文件时
 // 上一个文件的查询可能后返回，不加守卫就会把它的引用列表盖到当前文件头上。
 let refsSeq = 0;
@@ -2118,6 +2137,7 @@ function showCtxMenu(x, y, node) {
     : `<div class="ctx-item ${it.danger ? 'danger' : ''}" data-i="${i}">${escapeHtml(it.label)}</div>`
   ).join('');
   menu.classList.remove('ctx-centered'); // 右键菜单按坐标定位，不居中
+  menu.setAttribute('role', 'menu');
   menu.classList.remove('hidden');
   menu.style.left = Math.min(x, window.innerWidth - 160) + 'px';
   menu.style.top = Math.min(y, window.innerHeight - 40) + 'px';
@@ -2164,6 +2184,13 @@ function hideCtxMenu() {
   const menu = $('ctx-menu');
   menu.classList.add('hidden');
   menu.classList.remove('ctx-centered');
+  // 角色属性跟着弹层的生命期走：留着它，下一次右键菜单会被屏幕阅读器读成对话框。
+  menu.removeAttribute('role');
+  menu.removeAttribute('aria-modal');
+  // 归还焦点。记录的那个元素可能已经被重渲染掉了（多步弹层里上一步的按钮），
+  // 所以先确认它还在文档里——否则 focus 的是个脱离的节点，等于没还。
+  if (menuReturnFocus && document.contains(menuReturnFocus)) menuReturnFocus.focus();
+  menuReturnFocus = null;
   // 关闭弹层必须同时结算 promptInput 的 Promise，否则 await 它的
   // 新建/重命名/复制/新建目录流程会永久挂起（界面看着空闲，实际回不来了）。
   // done() 会先把 pendingPromptDone 置空再调用这里，所以不会递归。
@@ -2172,8 +2199,18 @@ function hideCtxMenu() {
 
 // 居中显示弹层。showCtxMenu 会写内联 left/top，这里必须清掉，
 // 否则弹层会跑到上一次右键的位置去（.ctx-menu 的 CSS 本身没有 left/top）。
+// 打开弹层前的焦点。关闭时归还——键盘用户按 Esc 之后应该回到原来那个按钮，
+// 而不是被丢到 body 上（那样再按 Tab 得从整个界面开头重新走一遍）。
+let menuReturnFocus = null;
+
 function showCenteredMenu() {
   const menu = $('ctx-menu');
+  // 居中弹层是模态对话框：给它读出正确的角色，并把 Tab 圈在里面
+  // （陷阱见 #ctx-menu 上那个 keydown 委托）。右键菜单走 showCtxMenu，
+  // 那个是 role="menu"，不是对话框——两套语义不能混。
+  menuReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  menu.setAttribute('role', 'dialog');
+  menu.setAttribute('aria-modal', 'true');
   menu.style.left = '';
   menu.style.top = '';
   menu.classList.add('ctx-centered');
