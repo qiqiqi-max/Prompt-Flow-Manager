@@ -473,6 +473,49 @@ async function ensureDir(dir) {
 // .trash 里，UI 再也看不到。config.json 同理（主题/标签页/锁定/项目类型全丢）。
 // 写临时文件再 rename：rename 在同一卷上是原子的，读者只会看到旧的或新的完整内容。
 let atomicSeq = 0;
+// 写文件并 fsync。这是 durability 那道闸：rename 只保证"要么旧内容要么新内容"，
+// 而 fsync 保证"新内容真的到了盘上"。少了它，rename 可能先于数据落盘完成，
+// 断电之后目标文件是完整的旧内容或**空文件**——延迟分配的文件系统都给过这种结果，
+// 而用户看到的是"我明明保存了，文件是空的"。
+//
+// 只 sync 文件、不 sync 目录：Windows 上对目录句柄调 fsync 会失败，而本项目只出
+// Windows 包。代价是"新文件名本身"在极端断电下可能没落，那时文件还在但叫临时名
+// ——比一个空文件可控得多，而且启动自愈认得出这个形状（见 TMP_PART_RE）。
+async function writeAndSync(fullPath, data) {
+  // 两步而不是"开句柄写 + sync"：写入必须走 fsp.writeFile，因为自检里那批
+  // 故障注入桩（security regression 的"写索引失败"、"配置写盘失败"）拦的正是
+  // 这一句。换成 handle.writeFile 之后桩一次都命中不了，于是那些场景会静默地
+  // 不再被构造出来——断言还在，但测的是一个不会失败的写入（实测踩到过：
+  // test:fn 里 5 条回滚断言全红，报的是"桩真的被调用到了 → 命中 0 次"）。
+  await fsp.writeFile(fullPath, data, 'utf8');
+  const handle = await fsp.open(fullPath, 'r+');
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+// rename 在 Windows 上会被杀毒软件、索引器或资源管理器短暂占用，报 EPERM / EBUSY。
+// 这类失败重试一下往往就过去了，而后果是**用户可见的**：保存提示失败、改动没落盘。
+// 有界重试（3 次、递增间隔）——不重试等于白白丢一次保存，无限重试会把一次性失败
+// 变成"卡住"，而卡住比失败更难诊断。非这几类错误码立即抛出，不去掩盖真问题。
+const RENAME_RETRY_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+async function renameWithRetry(from, to) {
+  let lastErr = null;
+  for (let i = 0; i < 3; i++) {
+    try {
+      await fsp.rename(from, to);
+      return;
+    } catch (e) {
+      lastErr = e;
+      if (!RENAME_RETRY_CODES.has(e && e.code)) throw e;
+      await new Promise((r) => setTimeout(r, 40 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
 async function writeFileAtomic(fullPath, data) {
   const dir = path.dirname(fullPath);
   await ensureDir(dir);
@@ -483,8 +526,8 @@ async function writeFileAtomic(fullPath, data) {
   //   3. 带 pid + 计数器——同目录并发写不会用到同一个临时名。
   const tmp = path.join(dir, `.tmp-${process.pid}-${atomicSeq++}-${path.basename(fullPath)}.part`);
   try {
-    await fsp.writeFile(tmp, data, 'utf8');
-    await fsp.rename(tmp, fullPath);
+    await writeAndSync(tmp, data);
+    await renameWithRetry(tmp, fullPath);
   } catch (e) {
     // 失败时清掉临时文件，别在数据目录里留垃圾（清理本身失败就忽略）
     try { await fsp.unlink(tmp); } catch {}
@@ -2347,7 +2390,15 @@ async function createWindow() {
       // 同步版的原子写：临时文件 + rename。异步 writeFileAtomic 在 close
       // 回调里等不到，但截断风险是一样的——这里崩在半路，config.json 就废了。
       const tmp = CONFIG_PATH + '.tmp-close';
-      fs.writeFileSync(tmp, JSON.stringify(cur, null, 2), 'utf8');
+      // 同样是"写 → fsync → rename"。这里不重试：失败只丢这次的窗口尺寸，
+      // 而关窗路径上多等三次 40ms 是用户能感觉到的延迟。
+      const fd = fs.openSync(tmp, 'w');
+      try {
+        fs.writeSync(fd, JSON.stringify(cur, null, 2), null, 'utf8');
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
       fs.renameSync(tmp, CONFIG_PATH);
     } catch (e) { console.error('关窗保存尺寸失败:', e); }
   };
