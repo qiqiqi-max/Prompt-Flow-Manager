@@ -747,9 +747,13 @@ section('使用统计与收藏');
     '启动自愈扫描 usage.json 所在目录的顶层');
   // 改名后迁移、清空回收站后清理，而且都在各自的锁之外（usage 不嵌套占锁）
   {
-    const at = mainSrc.indexOf("ipcMain.handle('rename', async (e, oldRel, newRel) => {");
-    const body = at > 0 ? mainSrc.slice(at, at + 600) : '';
-    assert(/await renameLocked\(oldRel, newRel\);[\s\S]*await usageStore\.migrate\(/.test(body),
+    // 迁移在 renameEntry 里而不是 rename handler 里：批量移动也走 renameEntry，
+    // 放在 handler 里的话批量移动过的文件会丢掉统计和收藏。
+    assert(/ipcMain\.handle\('rename', async \(e, oldRel, newRel\) => renameEntry\(oldRel, newRel\)\)/.test(mainSrc),
+      'rename handler 走 renameEntry（与批量移动同一条路）');
+    const at = mainSrc.indexOf('async function renameEntry(oldRel, newRel) {');
+    const body = at > 0 ? mainSrc.slice(at, at + 900) : '';
+    assert(/await queueWriteMulti\([^\n]*renameEntryLocked\(oldRel, newRel\)\);[\s\S]*await usageStore\.migrate\(/.test(body),
       '改名成功后统计和收藏跟着迁移');
     const et = mainSrc.indexOf("ipcMain.handle('empty-trash'");
     const ebody = et > 0 ? mainSrc.slice(et, et + 1400) : '';
@@ -1671,11 +1675,14 @@ section('调试残留');
       const h = i > 0 ? mainSrc.slice(i, i + 200) : '';
       assert(/if \(!isQuickPanelSender\(e\)/.test(h), ch + ' 只认面板自己发来的请求');
     }
-    // 退出前注销。在 will-quit 处理体里查：unregisterAll 在 lib/quick-launch.js 里也有一处
+    // 退出前注销。在 will-quit 处理体里查：unregisterAll 在 lib/quick-launch.js 里也有一处。
+    // will-quit 可能挂了不止一个处理器（外部改动感知也在那里关 watcher），逐个查。
     {
-      const i = mainSrc.indexOf("app.on('will-quit'");
-      const h = i > 0 ? mainSrc.slice(i, i + 300) : '';
-      assert(/shortcutController\.unregisterAll\(\)/.test(h), '退出前（will-quit）注销全部全局快捷键');
+      const bodies = [];
+      for (let i = mainSrc.indexOf("app.on('will-quit'"); i >= 0; i = mainSrc.indexOf("app.on('will-quit'", i + 1)) {
+        bodies.push(mainSrc.slice(i, i + 300));
+      }
+      assert(bodies.some(h => /shortcutController\.unregisterAll\(\)/.test(h)), '退出前（will-quit）注销全部全局快捷键');
     }
     // 自检不注册真实快捷键：并行的测试进程会互相"占用"，还会抢开发机的按键
     assert(/const shortcutBackend = process\.env\.PFM_SELFTEST === '1'\s*\? quickLaunch\.createFakeGlobalShortcut/.test(mainSrc),
