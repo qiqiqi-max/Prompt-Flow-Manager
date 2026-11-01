@@ -106,6 +106,8 @@ npm run dist
 | 切换主题 | 工具栏主题按钮，`Ctrl+Shift+L` |
 | 调整界面字号 | 工具栏“设置”→“界面字号”，60% 到 125% 共七档，默认 90% |
 | 文件树导航 | 聚焦文件树后使用 `↑` / `↓` |
+| 多选文件 | 文件树里 `Ctrl+点击` 逐个选，`Shift+点击` 或 `Shift+↑/↓` 按屏幕上可见的顺序选一段（折叠和被筛掉的不算），`Esc` 清空 |
+| 批量移动、打标签、删除 | 选中 2 个及以上文件后，用树上方的批量操作条；移动时同名自动改名、被引用的工作流汇总后问一次是否同步，删除时锁定的文件跳过；结束后汇总成功、失败和跳过的文件及原因 |
 | 关闭抽屉或退出编辑 | `Esc` |
 
 ## 文件格式
@@ -332,6 +334,9 @@ npm run test:includes   # 模板片段引入与嵌套解析
 npm run test:quick-launch-logic # 全局快捷键校验、注册与回滚
 npm run test:quick-launch # 全局快捷键快速搜索面板（启动真实 Electron）
 npm run test:library-watch # 外部改动的事件合并与自写过滤
+npm run test:tree-selection # 文件树多选：Ctrl/Shift 选择只取可见行
+npm run test:tag-rewrite # 批量打标签只改 tags 字段，其余 frontmatter 原样
+npm run test:batch-ops  # 批量操作部分失败汇总、进行中拒绝重复触发、同名生成新名字
 npm run test:reverse    # 反向对照：版本检查的每个修复点撤掉都必须变红
 npm run test:reverse-split # 反向对照：自检模块拆分的每个修复点撤掉都必须变红
 npm run test:quick      # 日常快速检查，不启动 Electron

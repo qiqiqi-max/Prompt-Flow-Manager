@@ -240,7 +240,20 @@ child.on('exit', (code) => {
     /\[selftest:fn\] PASS 诊断报告里日志是启用状态/,
     /\[selftest:fn\] PASS 日志尾部里有启动自愈留下的记录/,
     /\[selftest:fn\] PASS 诊断包不含提示词正文/,
-    /\[selftest:fn\] PASS 导出诊断信息返回成功且带字节数/
+    /\[selftest:fn\] PASS 导出诊断信息返回成功且带字节数/,
+    // 文件树批量操作（第 15 节）。点名是因为 batchMove / batchTags / batchTrash 是新加的
+    // preload 方法——漏加就是 undefined，整段跳进 catch，只剩一条"执行中断"。
+    /\[selftest:fn\] PASS 批量打标签：多行列表保留多行写法、原有项不动、新项追加/,
+    /\[selftest:fn\] PASS 批量打标签：工作流的 flow 结构原样保留/,
+    /\[selftest:fn\] PASS 批量打标签：每个文件都留了快照且 version 自增/,
+    /\[selftest:fn\] PASS 批量删标签：行内和多行两种写法都只拿掉那几项/,
+    /\[selftest:fn\] PASS 批量进行中再发起一批被拒（E_BATCH_BUSY），且没有写进去/,
+    /\[selftest:fn\] PASS 批量移动：三个提示词成功，工作流和不存在的文件进失败清单（没有中途停下）/,
+    /\[selftest:fn\] PASS 批量移动：同名时生成新名字，目标目录里原有的文件不被覆盖/,
+    /\[selftest:fn\] PASS 批量移动：版本历史跟着文件走/,
+    /\[selftest:fn\] PASS 批量移动：锁跟着文件走（移走之后照样删不掉）/,
+    /\[selftest:fn\] PASS 批量删除：锁定的跳过（E_LOCKED），其余两个成功/,
+    /\[selftest:fn\] PASS 批量删除：锁定的文件还在原处/
   ];
   const missing = mustHave.filter(re => !re.test(out));
   if (missing.length) console.error('[test:fn] 缺少必需的检查项: ' + missing.map(String).join(', '));

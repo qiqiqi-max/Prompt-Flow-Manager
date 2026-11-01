@@ -43,6 +43,18 @@ fs.writeFileSync(path.join(dataDir, 'usage.json'), JSON.stringify({
   favorites: ['prompts/testing/外部已删除.md']
 }, null, 2), 'utf8');
 
+// 文件树批量操作会弹原生确认框，自动化里由对话框桩按队列应答（见 installSelfTestDialogStubs）。
+// 顺序必须与 src/selftest/ui.js 里的调用顺序一致：
+//   1. 批量移动后"是否同步工作流引用"——两个被移动的文件都被同一个工作流引用，只问一次
+//   2. 批量删除的确认（列出锁定和被引用的文件）
+// 引用同步要是按文件各问一次，第二问会吃掉删除那一项，删除被当成取消，
+// 后面的删除断言全红，退出时还会剩下"队列已空"的报错——这正是要它变红的地方。
+const dialogQueuePath = path.join(dataDir, '__dialogs.json');
+fs.writeFileSync(dialogQueuePath, JSON.stringify([
+  { kind: 'message', response: 1 },   // 批量移动：同步引用 → 确定
+  { kind: 'message', response: 1 }    // 批量删除：确定
+]), 'utf8');
+
 const child = spawn(electronBin, [root], {
   cwd: root,
   env: {
@@ -50,6 +62,7 @@ const child = spawn(electronBin, [root], {
     PFM_SELFTEST: '1',
     PFM_SELFTEST_READONLY: '1',
     PFM_SELFTEST_UI: '1',
+    PFM_SELFTEST_DIALOGS: dialogQueuePath,
     PFM_DATA_DIR: dataDir,
     ELECTRON_ENABLE_LOGGING: '1'
   },
@@ -75,6 +88,9 @@ const timeout = setTimeout(() => {
 
 child.on('exit', (code) => {
   clearTimeout(timeout);
+  // 清理前先读对话框队列：临时目录一删就没得看了
+  let queueLeft = -1;
+  try { queueLeft = JSON.parse(fs.readFileSync(dialogQueuePath, 'utf8')).length; } catch (_) { queueLeft = -1; }
   cleanup();
   // 这几条对应曾经真实坏掉过的功能，必须出现在输出里：
   // 1) 流程图解析整段失效（只解析出 1 个空步骤）
@@ -158,13 +174,36 @@ child.on('exit', (code) => {
     /\[selftest:ui\] PASS 改名后收藏和统计跟着文件走/,
     /\[selftest:ui\] PASS 删进回收站时保留收藏和统计/,
     /\[selftest:ui\] PASS 从回收站恢复后收藏和统计还在/,
-    /\[selftest:ui\] PASS 清空回收站后统计和收藏一起清掉/
+    /\[selftest:ui\] PASS 清空回收站后统计和收藏一起清掉/,
+    // 文件树多选与批量操作。前置条件（B 夹在 A、C 之间 / 筛选真的把 B 藏起来了）也点名：
+    // 前置不成立时"跳过看不见的行"那条在有没有修复时都可能是绿的。
+    /\[selftest:ui\] PASS 多选：普通单击仍然打开文件且不进入多选/,
+    /\[selftest:ui\] PASS 多选：单击 A 后 Ctrl\+点击 C，两个都选中并出现批量条/,
+    /\[selftest:ui\] PASS 多选：Esc 清空选择/,
+    /\[selftest:ui\] PASS 多选前置：树上 B 夹在 A 和 C 之间/,
+    /\[selftest:ui\] PASS 多选前置：标签筛选把 B 隐藏了而 A、C 可见/,
+    /\[selftest:ui\] PASS 多选：Shift\+点击跳过被筛掉、看不见的行/,
+    /\[selftest:ui\] PASS 多选：折叠目录后目录里的选中项被剔掉、批量条收起/,
+    /\[selftest:ui\] PASS 批量：进行中再次触发被拦下/,
+    /\[selftest:ui\] PASS 批量移动：两个文件都移到了目标目录，同名的生成新名字/,
+    /\[selftest:ui\] PASS 批量移动：已打开的标签页跟着改路径/,
+    /\[selftest:ui\] PASS 批量移动：确认一次后两个文件的工作流引用都更新了/,
+    /\[selftest:ui\] PASS 批量打标签：多行列表保留写法并追加/,
+    /\[selftest:ui\] PASS 批量打标签：当前打开的标签页重读了磁盘/,
+    /\[selftest:ui\] PASS 批量删除：结果汇总列出被跳过的锁定文件及原因/,
+    /\[selftest:ui\] PASS 批量删除：锁定的文件还在/,
+    /\[selftest:ui\] PASS 批量删除：被删文件的标签页关掉了，当前标签切到相邻的那个/
   ];
   const missing = mustHave.filter(re => !re.test(out));
   if (missing.length) console.error('[test:ui] 缺少必需的检查项: ' + missing.map(String).join(', '));
+  // 对话框队列必须刚好被吃完：剩下的说明有一次该弹的框没弹（比如引用同步被跳过），
+  // 不够用（桩打出"队列已空"）说明多弹了框（比如引用同步按文件各问了一次）。
+  const dialogsOk = queueLeft === 0 && !/对话框桩：message 队列已空/.test(out);
+  console.log('[test:ui] ' + (dialogsOk ? 'PASS' : 'FAIL') + ' 原生确认框弹出次数与预期一致（队列剩 ' + queueLeft + ' 项）');
   const passed = code === 0
     && /\[selftest\] 全部通过/.test(out)
     && missing.length === 0
+    && dialogsOk
     && !/FAIL/.test(out);
   console.log('\n[test:ui] ' + (passed ? '通过' : '失败（exit=' + code + '）'));
   process.exit(passed ? 0 : 1);

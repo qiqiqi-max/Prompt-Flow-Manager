@@ -742,6 +742,206 @@
         check('收藏/常用区的标签走 i18n', tabText === t('frequent'), tabText);
       }
 
+      // ---- 文件树多选与批量操作 ----
+      // 全程走真实事件：Ctrl/Shift+点击行、点批量条按钮、在弹层里输入并点确定。
+      // 原生确认框由 tests/ui-smoke.js 的对话框队列应答（顺序：批量移动的引用同步 → 批量删除）。
+      // 批量移动的"引用只问一次"就靠这个队列验：问了两次的话第二次会吃掉删除那一项，
+      // 删除被当成取消，下面删除那几条全红，ui-smoke 还会报"队列已空"。
+      {
+        const api = window.promptFlowApi;
+        const D = 'prompts/testing/UI批量';
+        const rA = D + 'A.md', rB = D + 'B.md', rC = D + 'C.md', rL = D + '锁定.md';
+        const wf = 'workflows/UI批量引用.md';
+        const L = I18N[(state.config && state.config.lang) || 'zh'] || I18N.zh;
+        await api.createFile(rA, '---\ntitle: UI批量A\nstage: testing\ntags: [丙]\n---\nA');
+        await api.createFile(rB, '---\ntitle: UI批量B\nstage: testing\ntags:\n  - 多行\n---\nB');
+        await api.createFile(rC, '---\ntitle: UI批量C\nstage: testing\ntags: [丙]\n---\nC');
+        await api.createFile(rL, '---\ntitle: UI批量锁定\nstage: testing\n---\n锁定正文');
+        await api.createFile('prompts/deployment/UI批量B.md', '---\ntitle: 目标目录里的同名文件\n---\n不能被覆盖');
+        await api.createFile(wf, '---\ntitle: UI批量引用\nflow:\n  - id: a\n    prompt: ' + rA + '\n  - id: b\n    prompt: ' + rB + '\n---\n');
+        state.expandedPaths.add('prompts').add('prompts/testing').add('prompts/deployment');
+        await refreshTree();
+        await sleep(200);
+        const rowOf = (rel) => Array.from(document.querySelectorAll('#tree .tree-row.file')).find(r => r.__rel === rel);
+        const clickRow = async (rel, mods) => {
+          const el = rowOf(rel);
+          if (!el) return false;
+          for (const type of ['mousedown', 'mouseup', 'click']) {
+            el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, ...(mods || {}) }));
+          }
+          await sleep(200);
+          return true;
+        };
+        const selected = () => [...state.treeSelection.selected].sort();
+        const barShown = () => !document.getElementById('batch-bar').classList.contains('hidden');
+        const waitFor = async (fn, ms) => {
+          const t0 = Date.now();
+          while (Date.now() - t0 < (ms || 4000)) { if (fn()) return true; await sleep(50); }
+          return false;
+        };
+        const confirmInput = async (value) => {
+          await waitFor(() => !!document.getElementById('ctx-input'), 2000);
+          const inp = document.getElementById('ctx-input');
+          if (!inp) return false;
+          inp.value = value;
+          await realClick(document.getElementById('ctx-ok'));
+          return true;
+        };
+
+        // 选择：普通单击照旧打开文件；Ctrl+点击切换选中、不打开文件
+        await clickRow(rA);
+        await sleep(200);
+        check('多选：普通单击仍然打开文件且不进入多选', state.currentRel === rA && selected().length === 0 && !barShown(),
+          'currentRel=' + state.currentRel + ' selected=' + selected().join(','));
+        await clickRow(rC, { ctrlKey: true });
+        check('多选：单击 A 后 Ctrl+点击 C，两个都选中并出现批量条',
+          selected().join() === [rA, rC].sort().join() && barShown() && state.currentRel === rA,
+          selected().join(',') + ' bar=' + barShown());
+        check('多选：选中行有可见的选中态',
+          rowOf(rA).classList.contains('multi-selected') && rowOf(rC).getAttribute('aria-selected') === 'true'
+          && !rowOf(rB).classList.contains('multi-selected'));
+        await clickRow(rC, { ctrlKey: true });
+        check('多选：再次 Ctrl+点击取消选中，只剩 1 个时批量条收起', selected().join() === rA && !barShown(), selected().join(','));
+
+        // Esc 清空
+        await clickRow(rB, { ctrlKey: true });
+        const beforeEsc = selected().length;
+        document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        await sleep(150);
+        check('多选：Esc 清空选择', beforeEsc === 2 && selected().length === 0 && !barShown(), 'before=' + beforeEsc + ' after=' + selected().length);
+
+        // Shift+点击：按可见顺序。先在无筛选时确认 B 夹在 A、C 之间，再筛掉 B
+        const order = Array.from(document.querySelectorAll('#tree .tree-row.file')).map(r => r.__rel);
+        check('多选前置：树上 B 夹在 A 和 C 之间', order.indexOf(rA) < order.indexOf(rB) && order.indexOf(rB) < order.indexOf(rC),
+          [rA, rB, rC].map(r => order.indexOf(r)).join(','));
+        await clickRow(rA);
+        await clickRow(rC, { shiftKey: true });
+        check('多选：Shift+点击选中锚点到这一行之间的所有可见行', selected().join() === [rA, rB, rC].sort().join(), selected().join(','));
+        document.getElementById('filter-tag').value = '丙';
+        applyFilter();
+        await sleep(100);
+        check('多选前置：标签筛选把 B 隐藏了而 A、C 可见',
+          rowOf(rB).offsetParent === null && rowOf(rA).offsetParent !== null && rowOf(rC).offsetParent !== null);
+        check('多选：筛选后看不见的行从选择里剔掉', selected().join() === [rA, rC].sort().join(), selected().join(','));
+        await clickRow(rA);
+        await clickRow(rC, { shiftKey: true });
+        check('多选：Shift+点击跳过被筛掉、看不见的行', selected().join() === [rA, rC].sort().join(), selected().join(','));
+        document.getElementById('filter-tag').value = '';
+        applyFilter();
+        await sleep(100);
+
+        // 折叠目录：目录里的选中项剔掉（折叠用的是 hidden 类，不是行内 display:none）
+        await clickRow(rA);
+        await clickRow(rC, { ctrlKey: true });
+        const testingDir = Array.from(document.querySelectorAll('#tree .tree-row.dir'))
+          .find(r => r.nextElementSibling && r.nextElementSibling.contains(rowOf(rA)) && !r.nextElementSibling.querySelector('.tree-row.dir'));
+        const beforeCollapse = selected().length;
+        if (testingDir) await realClick(testingDir);
+        check('多选：折叠目录后目录里的选中项被剔掉、批量条收起',
+          !!testingDir && beforeCollapse === 2 && selected().length === 0 && !barShown(),
+          'dir=' + !!testingDir + ' before=' + beforeCollapse + ' after=' + selected().length);
+        if (testingDir) await realClick(testingDir);
+
+        // Shift+方向键扩展选择
+        {
+          await clickRow(rA);
+          rowOf(rA).focus();
+          rowOf(rA).dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', shiftKey: true, bubbles: true }));
+          await sleep(100);
+          check('多选：Shift+↓ 把下一行并进选择', selected().join() === [rA, rB].sort().join(), selected().join(','));
+          clearTreeSelection();
+        }
+
+        // 批量移动：连点两下只弹一个选目录弹层；同名生成新名字；标签页路径跟着改；引用只问一次
+        await clickRow(rA);
+        await clickRow(rB, { ctrlKey: true });
+        const moveBtn = document.getElementById('btn-batch-move');
+        moveBtn.click();
+        await sleep(50);
+        const disabledWhileRunning = moveBtn.disabled;
+        const firstMenuInput = document.getElementById('ctx-input');
+        // 绕过按钮禁用直接再调一次入口：防的是"另一个入口同时触发"，按钮禁用拦不住那种
+        batchMoveSelected();
+        await sleep(100);
+        check('批量：进行中再次触发被拦下（按钮禁用 + 提示进行中，弹层还是原来那一个）',
+          disabledWhileRunning && document.getElementById('ctx-input') === firstMenuInput
+          && document.getElementById('toast').textContent === L.batchBusy,
+          'disabled=' + disabledWhileRunning + ' toast=' + document.getElementById('toast').textContent);
+        await confirmInput(L.stage_deployment || 'deployment');
+        await waitFor(() => !state.batchRunning, 6000);
+        const metaRels = (await api.getMetaList()).map(m => m.rel);
+        const newA = 'prompts/deployment/UI批量A.md', newB = 'prompts/deployment/UI批量B-1.md';
+        check('批量移动：两个文件都移到了目标目录，同名的生成新名字',
+          metaRels.includes(newA) && metaRels.includes(newB) && !metaRels.includes(rA) && !metaRels.includes(rB),
+          JSON.stringify(metaRels.filter(r => r.includes('UI批量'))));
+        check('批量移动：目标目录里原有的同名文件没有被覆盖',
+          (await api.readFile('prompts/deployment/UI批量B.md')).content.includes('不能被覆盖'));
+        check('批量移动：已打开的标签页跟着改路径',
+          state.tabs.some(tb => tb.rel === newA) && !state.tabs.some(tb => tb.rel === rA) && state.currentRel === newA,
+          'tabs=' + state.tabs.map(tb => tb.rel).join(',') + ' current=' + state.currentRel);
+        const wfAfter = (await api.readFile(wf)).content;
+        check('批量移动：确认一次后两个文件的工作流引用都更新了',
+          wfAfter.includes('prompt: ' + newA) && wfAfter.includes('prompt: ' + newB), wfAfter);
+        check('批量移动：移动后选择清空', selected().length === 0 && !barShown());
+
+        // 批量打标签：跨目录选择，行内 / 多行两种写法；当前打开的标签页重读
+        await clickRow(rC);
+        await clickRow(newA, { ctrlKey: true });
+        await clickRow(newB, { ctrlKey: true });
+        await realClick(document.getElementById('btn-batch-tags'));
+        await confirmInput('UI批量标签, 第二个');
+        await waitFor(() => !state.batchRunning, 6000);
+        const cAfter = await api.readFile(rC);
+        const bAfter = await api.readFile(newB);
+        check('批量打标签：行内数组追加两个标签', JSON.stringify(cAfter.meta.tags) === '["丙","UI批量标签","第二个"]', JSON.stringify(cAfter.meta.tags));
+        check('批量打标签：多行列表保留写法并追加',
+          bAfter.content.includes('tags:\n  - 多行\n  - "UI批量标签"\n  - "第二个"\n'), bAfter.content);
+        check('批量打标签：当前打开的标签页重读了磁盘（元信息栏出现新标签）',
+          state.currentRel === rC && state.currentContent.includes('UI批量标签')
+          && document.getElementById('meta-bar').textContent.includes('UI批量标签'),
+          document.getElementById('meta-bar').textContent);
+        check('批量打标签：每个文件留了一条快照', (await api.listVersions(rC)).length === 1);
+        check('批量打标签：完成后选择保留（便于接着操作这一批）', selected().length === 3, selected().join(','));
+        await realClick(document.getElementById('btn-batch-tags'));
+        await waitFor(() => !!document.getElementById('ctx-tags-remove'), 2000);
+        document.getElementById('ctx-input').value = '第二个';
+        await realClick(document.getElementById('ctx-tags-remove'));
+        await waitFor(() => !state.batchRunning, 6000);
+        check('批量删标签：只拿掉输入的那一个',
+          JSON.stringify((await api.readFile(rC)).meta.tags) === '["丙","UI批量标签"]'
+          && !(await api.readFile(newB)).content.includes('第二个'), (await api.readFile(newB)).content);
+
+        // 批量删除：锁定的被主进程跳过并在报告里列出；当前标签被删时切到相邻的那个
+        await api.setConfig({ lockedFiles: [rL] });
+        state.lockedFiles = new Set([rL]);
+        await openFile(rL);
+        await clickRow(rC);
+        await clickRow(rL, { ctrlKey: true });
+        await clickRow(newA, { ctrlKey: true });
+        await realClick(document.getElementById('btn-batch-delete'));
+        const reportShown = await waitFor(() => !!document.querySelector('#ctx-menu .batch-report-list'), 6000);
+        const items = Array.from(document.querySelectorAll('#ctx-menu .batch-report-item'))
+          .map(li => ({ rel: li.dataset.rel, code: li.dataset.code, kind: li.classList.contains('skipped') ? 'skipped' : 'failed' }));
+        check('批量删除：结果汇总列出被跳过的锁定文件及原因',
+          reportShown && items.length === 1 && items[0].rel === rL && items[0].code === 'E_LOCKED' && items[0].kind === 'skipped',
+          JSON.stringify(items));
+        const reportTitle = (document.getElementById('batch-report-title') || {}).textContent || '';
+        check('批量删除：汇总标题写明成功 2 个、跳过 1 个',
+          reportTitle === L.batchReportTitle.split('{action}').join(L.batchActionDelete).split('{ok}').join('2').split('{failed}').join('0').split('{skipped}').join('1'),
+          reportTitle);
+        if (document.getElementById('ctx-ok')) await realClick(document.getElementById('ctx-ok'));
+        await waitFor(() => !state.batchRunning, 4000);
+        const trashedRels = (await api.listTrash()).items.map(i => i.originalRel);
+        check('批量删除：未锁定的进了回收站', trashedRels.includes(rC) && trashedRels.includes(newA), JSON.stringify(trashedRels.slice(0, 6)));
+        check('批量删除：锁定的文件还在', (await api.readFile(rL)).content.includes('锁定正文'));
+        check('批量删除：被删文件的标签页关掉了，当前标签切到相邻的那个',
+          !state.tabs.some(tb => tb.rel === rC || tb.rel === newA) && state.currentRel === rL && state.activeTab === rL,
+          'tabs=' + state.tabs.map(tb => tb.rel).join(',') + ' current=' + state.currentRel);
+        await api.setConfig({ lockedFiles: [] });
+        state.lockedFiles = new Set();
+        clearTreeSelection();
+      }
+
       // ---- 右键菜单 ----
       const fileRow = document.querySelector('#tree .tree-row.file') || document.querySelector('#tree .tree-row');
       if (fileRow) {
