@@ -71,6 +71,8 @@ async function withStore(fn, rmImpl, writeImpl) {
     const left = (await store.readIndex()).items.map(i => i.id);
     ok(JSON.stringify(result.failedNames) === '["busy.md"]', '清空时报告删不掉的条目', JSON.stringify(result));
     ok(JSON.stringify(left) === '["busy"]', '只保留删不掉的条目，摘掉已删除和损坏条目', JSON.stringify(left));
+    // 调用方按 removed 清使用统计：删失败的 busy 不能出现在里面，否则它恢复回来时统计已经被清掉了
+    ok(JSON.stringify((result.removed || []).map(i => i.id)) === '["ok"]', '清空时报告真正删掉的条目（不含删失败的）', JSON.stringify(result.removed));
     ok(!fs.existsSync(path.join(trashDir, 'ok.md')) && fs.existsSync(path.join(trashDir, 'busy.md')), '只删除成功删除的文件');
   }, async (file, opts) => {
     if (path.basename(file) === 'busy.md') throw Object.assign(new Error('busy'), { code: 'EBUSY' });
@@ -198,6 +200,26 @@ async function withStore(fn, rmImpl, writeImpl) {
     const versionDir = store.storePath(added.versionStore);
     ok(fs.readFileSync(path.join(versionDir, '20260101-010203-004.md'), 'utf8') === 'old version', '导入回收站时带上版本历史');
     ok(JSON.stringify(JSON.parse(fs.readFileSync(path.join(versionDir, 'index.json'), 'utf8'))) === '{"pinned":{"20260101-010203-004.md":true}}', '导入回收站时过滤非法星标');
+  });
+
+  await withStore(async (store) => {
+    // 备份里回收站条目的版本说明要跟着回来。原先这里只重建 pinned，说明整份丢掉。
+    const sha = 'a'.repeat(64);
+    await store.importItems([{
+      originalRel: 'prompts/noted.md',
+      content: 'noted body',
+      versions: [{ file: '20260101-010203-004.md', content: 'old version' }],
+      versionIndex: {
+        pinned: {},
+        notes: { '20260101-010203-004.md': '回收站里的说明', '20260101-010203-999.md': '没有对应快照' },
+        current: { note: '回收站当前说明', sha256: sha }
+      }
+    }], { isAllowedRel: rel => rel.startsWith('prompts/') });
+    const added = (await store.readIndex()).items[0];
+    const vIndex = JSON.parse(fs.readFileSync(path.join(store.storePath(added.versionStore), 'index.json'), 'utf8'));
+    ok(vIndex.notes && vIndex.notes['20260101-010203-004.md'] === '回收站里的说明', '导入回收站时带上版本说明', JSON.stringify(vIndex));
+    ok(!('20260101-010203-999.md' in (vIndex.notes || {})), '导入回收站时不保留没有对应快照的说明', JSON.stringify(vIndex));
+    ok(vIndex.current && vIndex.current.note === '回收站当前说明' && vIndex.current.sha256 === sha, '导入回收站时保留当前内容的说明（正文按原字节写入，哈希仍然有效）', JSON.stringify(vIndex));
   });
 
   if (failures) process.exit(1);

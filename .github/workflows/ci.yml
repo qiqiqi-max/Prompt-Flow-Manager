@@ -102,6 +102,10 @@ jobs:
       - name: 回收站存储
         run: npm run test:trash-store
 
+      # 使用统计与收藏：计数、上限淘汰、改名迁移、常用排序、导入闸门。自带反向对照。
+      - name: 使用统计与收藏
+        run: npm run test:usage-store
+
       - name: 改名与版本历史迁移
         run: npm run test:file-move
 
@@ -146,6 +150,8 @@ jobs:
       # 工作流图语义：分层、成环、不可达步骤。自带反向对照。
       - name: 工作流图分析
         run: npm run test:flow-graph
+      - name: 工作流执行状态机
+        run: npm run test:flow-run
 
       # 只读 MCP server：协议往返、只读边界、返回上限。自带反向对照。
       - name: MCP server
@@ -155,9 +161,30 @@ jobs:
       - name: 正文缓存预算
         run: npm run test:cache-budget
 
+      # 外部改动感知：事件合并、自写过滤、路径过滤、导入期间暂停。自带三组反向对照。
+      # 最后一组用真的 fs.watch，所以必须在 Windows 上跑（recursive 的行为按平台不同）。
+      - name: 外部改动感知
+        run: npm run test:library-watch
+
       # 命令行入口：只读子命令、退出码与路径边界。自带反向对照。
       - name: 命令行入口
         run: npm run test:cli
+
+      # 全局快捷键的纯逻辑：快捷键校验、注册状态机、设置变更先注册后落盘与回滚、居中。
+      # 自带两组反向对照（朴素实现 / 先注册但不回滚的半修版本）。
+      - name: 全局快捷键判定
+        run: npm run test:quick-launch-logic
+
+      # 文件树多选与批量操作的纯逻辑：选择模型（可见性按渲染结果）、tags 文本级改写、
+      # 批量执行骨架（部分失败汇总、忙碌拒绝、同名生成新名字）。三者都自带反向对照。
+      - name: 文件树多选模型
+        run: npm run test:tree-selection
+
+      - name: 批量打标签的 tags 改写
+        run: npm run test:tag-rewrite
+
+      - name: 批量操作执行骨架
+        run: npm run test:batch-ops
 
       # 纯逻辑测试，不用起 Electron：从 renderer.js 里抠出 debounce 单独验语义。
       # 自带反向对照（旧版一行 debounce 必须失败），所以它不会变成永远绿的空壳。
@@ -203,11 +230,19 @@ jobs:
       - name: 意外退出后恢复草稿
         run: npm run test:draft-recovery
 
+      - name: 外部改动刷新界面
+        run: npm run test:external-change
+
       - name: 保存冲突检测
         run: npm run test:save-conflict
 
       - name: 最小窗口布局
         run: npm run test:layout-small
+
+      # 快速搜索面板：拉起两次 Electron。自检模式下不注册真实系统快捷键（内存替身），
+      # 所以不会和 runner 上别的程序抢键。会写一次真实剪贴板，跑完放回去。
+      - name: 全局快捷键快速搜索面板
+        run: npm run test:quick-launch
 
       # 启动自愈：故意构造一个坏数据目录（幽灵条目 / 孤立正文 / 越界 store /
       # 残留 .part），跑完从进程外读磁盘定论。自带反向对照——同一个坏目录再跑

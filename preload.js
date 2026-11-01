@@ -20,7 +20,18 @@ const api = {
   updateWorkflowRefs: (targets, oldRel, newRel) => ipcRenderer.invoke('update-workflow-refs', targets, oldRel, newRel),
   // 反方向：这个提示词被哪些工作流引用；顺带带上全库悬空引用体检
   workflowReferences: (rel) => ipcRenderer.invoke('workflow-references', rel),
+  // 使用统计与收藏（存在 usage.json，见 lib/usage-store.js）。三个都返回同一个形状：
+  // { favorites: [rel], frequent: [{ rel, count, lastUsedAt, score }] }（frequent 已按常用排好序），
+  // recordUsage 额外带 recorded（文件不存在时为 false，不记账）。
+  recordUsage: (rel) => ipcRenderer.invoke('record-usage', rel),
+  getUsage: () => ipcRenderer.invoke('get-usage'),
+  setFavorite: (rel, on) => ipcRenderer.invoke('set-favorite', rel, on),
   trash: (rel) => ipcRenderer.invoke('trash', rel),
+  // 文件树多选的批量操作。主进程逐项结算，返回 { ok, failed, skipped }，
+  // 部分失败不抛错；整批被拒（参数无效 / 另一批还在跑）才抛。
+  batchMove: (rels, dirRel) => ipcRenderer.invoke('batch-move', rels, dirRel),
+  batchTags: (rels, payload) => ipcRenderer.invoke('batch-tags', rels, payload),
+  batchTrash: (rels) => ipcRenderer.invoke('batch-trash', rels),
   listTrash: () => ipcRenderer.invoke('list-trash'),
   restore: (id) => ipcRenderer.invoke('restore', id),
   emptyTrash: () => ipcRenderer.invoke('empty-trash'),
@@ -28,6 +39,9 @@ const api = {
   readVersion: (rel, file) => ipcRenderer.invoke('read-version', rel, file),
   pinVersion: (rel, file, pinned) => ipcRenderer.invoke('pin-version', rel, file, pinned),
   rollbackVersion: (rel, file) => ipcRenderer.invoke('rollback-version', rel, file),
+  // 版本说明：读"当前内容"那一行的说明；改某个版本（file 为 null 时是当前内容）的说明
+  getCurrentNote: (rel) => ipcRenderer.invoke('get-current-note', rel),
+  setVersionNote: (rel, file, note) => ipcRenderer.invoke('set-version-note', rel, file, note),
   getMetaList: () => ipcRenderer.invoke('get-meta-list'),
   search: (q) => ipcRenderer.invoke('search', q),
   getConfig: () => ipcRenderer.invoke('get-config'),
@@ -38,7 +52,8 @@ const api = {
   confirmUnsaved: (opts) => ipcRenderer.invoke('confirm-unsaved', opts),
   exportZip: () => ipcRenderer.invoke('export-zip'),
   exportSingle: (rel) => ipcRenderer.invoke('export-single', rel),
-  // 一键将装配好的 AI 规则（CLAUDE.md / .cursorrules）导出到用户指定的项目根目录
+  // 一键将装配好的 AI 规则（CLAUDE.md / AGENTS.md / Copilot / Cursor 规则文件）导出到用户指定的项目根目录。
+  // 只传构建好的内容，写哪些相对路径由主进程的 RULE_EXPORT_ALLOWED 决定
   exportProjectRules: (payload) => ipcRenderer.invoke('export-project-rules', payload),
   getStages: () => ipcRenderer.invoke('get-stages'),
   addProjectType: (t) => ipcRenderer.invoke('add-project-type', t),
@@ -65,6 +80,10 @@ const api = {
   openReleasePage: () => ipcRenderer.invoke('open-release-page'),
   // 忽略某个版本（只对这一个版本生效，下一版照常提示）
   skipUpdateVersion: (version) => ipcRenderer.invoke('skip-update-version', version),
+  // 全局快捷键（快速搜索面板）。状态以主进程此刻真正注册着的为准，不是配置里的值；
+  // 设置走单独的通道而不是 setConfig：要先注册成功才落盘（见 lib/quick-launch.js）。
+  getQuickLaunchStatus: () => ipcRenderer.invoke('get-quick-launch-status'),
+  setQuickLaunch: (patch) => ipcRenderer.invoke('set-quick-launch', patch),
   onMenuAction: (cb) => {
     const handler = (e, action) => cb(action);
     ipcRenderer.on('menu-action', handler);
@@ -75,6 +94,13 @@ const api = {
     const handler = (e, info) => cb(info);
     ipcRenderer.on('update-available', handler);
     return () => ipcRenderer.removeListener('update-available', handler);
+  },
+  // 内容目录在应用之外被改了（CLI / MCP / git pull / 外部编辑器）。
+  // 只推 { changes: [{ rel, type }], truncated }，不带正文：渲染进程要哪个自己 readFile。
+  onLibraryChanged: (cb) => {
+    const handler = (e, info) => cb(info);
+    ipcRenderer.on('library-changed', handler);
+    return () => ipcRenderer.removeListener('library-changed', handler);
   }
 };
 

@@ -1,6 +1,6 @@
 // Prompt Flow Manager - Electron 主进程
 // 负责窗口、文件系统操作、版本管理、回收站、配置、导出
-const { app, BrowserWindow, ipcMain, dialog, Menu, shell, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, shell, screen, globalShortcut, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const fsp = require('fs/promises');
@@ -42,9 +42,18 @@ const WORKFLOW_REFS = require('./src/workflow-refs.js');
 const workflowIndex = require('./lib/workflow-index.js');
 const projectTypes = require('./lib/project-types');
 const ruleExport = require('./lib/rule-export');
-const { createVersionStore } = require('./lib/version-store');
+const { createVersionStore, normalizeVersionNote, sanitizeVersionIndex, contentHash } = require('./lib/version-store');
 const { createTrashStore } = require('./lib/trash-store');
 const { movePromptWithHistory } = require('./lib/file-move');
+// 全局快捷键快速搜索面板的纯逻辑（快捷键校验、注册状态机、设置变更的提交/回滚、居中）。
+// 不 require electron，globalShortcut 由这里传进去，所以能裸 node 单测。
+const quickLaunch = require('./lib/quick-launch');
+// 外部改动感知（CLI / MCP / git pull / 外部编辑器）。同样不 require electron，
+// 自写过滤和事件合并的说明在那个文件头。
+const { createLibraryWatcher } = require('./lib/library-watch');
+const { createUsageStore } = require('./lib/usage-store');
+const batchOps = require('./lib/batch-ops');
+const tagRewrite = require('./lib/tag-rewrite');
 // 滚动文件日志 + 诊断包。两个模块都刻意不 require('electron')：
 // 目录、版本号、两个根目录全部由这里传进去，DATA_ROOT / CODE_ROOT 的判断
 // 只允许存在下面那一份（见 123-133 行的说明）。
@@ -170,6 +179,10 @@ const LOGS_DIR = path.join(DATA_ROOT, 'logs');
 // 否则测试改语言/主题会写进用户真实配置。
 const CONFIG_PATH = path.join(process.env.PFM_DATA_DIR ? DATA_ROOT : app.getPath('userData'), 'config.json');
 const DRAFTS_DIR = path.join(path.dirname(CONFIG_PATH), 'drafts');
+// 使用统计与收藏（复制次数、最后使用时间、收藏列表）。和 config.json 放在一起而不是
+// DATA_ROOT：它和草稿一样是本机数据，开发模式下不该落进仓库根目录；打包后两处是同一个目录。
+// 为什么不并进 config.json 见 lib/usage-store.js 文件头。
+const USAGE_PATH = path.join(path.dirname(CONFIG_PATH), 'usage.json');
 
 // 打包后首次运行：从 asar 内拷出种子资源到 Data 目录。
 //
@@ -292,11 +305,21 @@ function safeJoin(relPath) {
 // 这里按顶层目录 + 扩展名双白名单卡死。
 const WRITABLE_TOPS = new Set(['prompts', 'workflows', 'templates']);
 // 导出项目规则的落盘白名单。用户会弹框选项目目录，但写进哪个文件必须由
-// 这个清单决定——渲染进程只传两份固定规则文件的构建内容，即便渲染进程被
-// 外部内容劫持，能覆盖的也只有这两个名字，写不了任意路径。
-// 这条只锁文件名，不锁目标目录（目录由用户每次弹框确认），语义和
+// 这个清单决定——渲染进程只传固定规则文件的构建内容，即便渲染进程被
+// 外部内容劫持，能覆盖的也只有这几个相对路径，写不了任意路径。
+// 这条只锁项目目录内的相对路径，不锁目标目录（目录由用户每次弹框确认），语义和
 // safeJoinWritable 的"数据目录白名单"互补。
-const RULE_EXPORT_ALLOWED = new Set(['CLAUDE.md', '.cursorrules']);
+// 必须在这里写死，不能从 src/rule-targets.js 取：那份清单渲染进程里也有一份，
+// 白名单要是跟着它走，就等于由被防的一方来定规矩。两边是否一致由 npm test 卡。
+// 带子目录的条目（.github/、.cursor/rules/）在 lib/rule-export.js 里逐级 lstat，
+// 任何一级是链接（含 junction）都整次拒绝。
+const RULE_EXPORT_ALLOWED = new Set([
+  'CLAUDE.md',
+  'AGENTS.md',
+  '.github/copilot-instructions.md',
+  '.cursor/rules/project-rules.mdc',
+  '.cursorrules'
+]);
 function contentPathAllowed(resolved, { allowGitkeep }) {
   const rel = path.relative(DATA_ROOT_NORM, resolved).replace(/\\/g, '/');
   const segs = rel.split('/');
@@ -619,7 +642,11 @@ async function loadConfig() {
     // 上次检查时刻 + 用户点过"忽略此版本"的那个版本号。两项都由主进程维护，
     // 渲染进程只读。updateSkipVersion 只对那一个版本生效，不是"永久别提醒"。
     updateLastCheckedAt: null,
-    updateSkipVersion: null
+    updateSkipVersion: null,
+    // 全局快捷键呼出快速搜索面板。默认关：全局快捷键会从所有程序手里抢走这个组合，
+    // 不能替用户做这个决定。默认组合键的取舍见 lib/quick-launch.js 的 DEFAULT_ACCELERATOR。
+    quickLaunchEnabled: false,
+    quickLaunchShortcut: quickLaunch.DEFAULT_ACCELERATOR
   };
   const cfg = await readConfigFile(CONFIG_PATH, { logError: (...a) => console.error(...a) });
   if (!cfg) return defaults;
@@ -696,6 +723,44 @@ function queueWriteMulti(keys, fn) {
   return acquire(0);
 }
 
+// ---------- 使用统计与收藏 ----------
+// 自己一条 'usage' 队列，不和 config 共用（理由见 lib/usage-store.js 文件头）。
+// queueWrite 内部套着写入闸门，所以完整备份导入期间统计写入同样排在导入之后。
+//
+// 'usage' 永远**单独**占，不嵌在别的 key 里面：rename / empty-trash 都是先放掉自己的
+// ver:* / trash，再调 usageStore。嵌套占锁在导入闸门面前有个坑——外层已经算进
+// writeGate 的 active，内层 shared() 却要排在已登记的 exclusive 后面，而 exclusive
+// 在等 active 归零，两边互等。不嵌套就构造不出来。
+const usageStore = createUsageStore({
+  file: USAGE_PATH,
+  writeFileAtomic,
+  queue: (fn) => queueWrite('usage', fn),
+  appError,
+  logError: (...a) => console.error(...a)
+});
+
+// rel 统一成正斜杠：渲染进程的树、标签页、锁列表都用正斜杠，键不统一的话
+// 同一个文件会在 usage.json 里出现两条。
+function usageRel(rel) {
+  return String(rel == null ? '' : rel).replace(/\\/g, '/');
+}
+
+// 只给库里真实存在的 .md 记账。走读取白名单：统计的对象只能是 prompts/workflows/templates
+// 下的内容文件，越界路径直接抛（和 read-file 同一套错误码）。
+// 越界路径也当成"不在"：清空回收站时 originalRel 来自索引，可能是手改过的坏值。
+async function usageFileIsLive(rel) {
+  try { return (await fsp.stat(safeJoinReadable(rel))).isFile(); } catch { return false; }
+}
+
+// 记一次使用。主进程侧的入口：渲染进程走 record-usage IPC 到这里；
+// 主进程里自己的复制入口（例如全局快速面板）直接调这个函数，不必绕回渲染进程。
+// 文件不存在时不记、不报错（返回 recorded:false）——外部刚删掉的文件不应该长出统计。
+async function recordPromptUsage(rel) {
+  const r = usageRel(rel);
+  safeJoinReadable(r);
+  return usageStore.record(r, { isLive: usageFileIsLive });
+}
+
 // ---------- 目录树 ----------
 // ---------- IPC ----------
 ipcMain.handle('get-root', () => DATA_ROOT);
@@ -757,20 +822,36 @@ async function readPrevContent(full) {
 // 用和 pin-version 相同的 key：saveVersion 里的 pruneVersions 要读版本索引判断
 // 星标，pin-version 要写这份索引，两者必须互斥，否则刚点的星标可能被裁掉。
 // 按 rel 分链，不同文件之间不互相阻塞。
+//
+// options.note 是可选的版本说明，描述的是**这次写进去的新内容**（不是这次生成的快照，
+// 快照装的是旧内容）。它先挂在 index.json 的 current 上，下一次保存或回滚把这份内容
+// 存成快照时才转到那条快照上，见 lib/version-store.js 文件头。
+// 说明在写盘之前校验：太长 / 类型不对时整次保存直接失败，不会出现"正文存了、说明没存"
+// 又报成功的情况。写盘之后记说明失败则不让保存失败（正文已经落盘），只在返回值里
+// 带上 noteError，由渲染进程单独提示。
 ipcMain.handle('save-file', async (e, rel, content, options) => queueWrite('ver:' + String(rel), async () => {
   const full = safeJoinWritable(rel);
   if (typeof content !== 'string') throw appError('E_CONTENT_NOT_STRING', typeof content);
-  const prev = await readPrevContent(full);
   const opts = options && typeof options === 'object' ? options : {};
+  const note = normalizeVersionNote(opts.note, appError);
+  const prev = await readPrevContent(full);
   if (typeof opts.expectedContent === 'string' && prev !== opts.expectedContent && opts.overwrite !== true) {
     throw appError('E_SAVE_CONFLICT', rel);
   }
-  if (prev != null && prev !== content) await saveVersion(rel, prev);
+  const snapshotTaken = prev != null && prev !== content;
+  if (snapshotTaken) await saveVersion(rel, prev);
   const toWrite = bumpAutoFields(content, prev);
   await ensureDir(path.dirname(full));
   await writeFileAtomic(full, toWrite);
   dropFromCache(full);
-  return { content: toWrite, meta: parseFrontmatter(toWrite).meta };
+  const result = { content: toWrite, meta: parseFrontmatter(toWrite).meta };
+  try {
+    await versionStore.recordCurrentNote(rel, toWrite, note, snapshotTaken ? null : prev);
+  } catch (err) {
+    logger.error('[versions] 记录版本说明失败（正文已保存）' + rel + '：' + (err && err.message));
+    result.noteError = String(err && err.message || err);
+  }
+  return result;
 }));
 
 async function createFileAt(rel, content) {
@@ -800,9 +881,25 @@ ipcMain.handle('clear-draft', async (e, rel) => queueWrite('draft:' + String(rel
 //     结果同一份内容在新旧两个路径各有一份，版本历史却只跟着其中一个。
 // 占两个 key 而不是一个：只占源的话，并发写目标的那条路照样插得进来。
 // 顺序由 queueWriteMulti 统一排序，不会和别处形成环。
-ipcMain.handle('rename', async (e, oldRel, newRel) => queueWriteMulti(
-  ['ver:' + String(oldRel), 'ver:' + String(newRel)],
-  async () => {
+ipcMain.handle('rename', async (e, oldRel, newRel) => renameEntry(oldRel, newRel));
+
+// 具名出来是为了让批量移动走同一条路（版本历史跟随、锁跟随、统计跟随、清缓存都在这里），
+// 而不是在 batch-move 里再抄一份四步磁盘操作。
+async function renameEntry(oldRel, newRel) {
+  await queueWriteMulti(['ver:' + String(oldRel), 'ver:' + String(newRel)], () => renameEntryLocked(oldRel, newRel));
+  // 使用统计和收藏跟着文件走（同锁定标记，"改名 → 删除 → 清空回收站"要清的是新路径）。
+  // 放在 ver:* 锁**之外**：'usage' 不嵌套占锁，见 usageStore 定义处的说明。
+  // 失败只记日志，理由和锁定标记那段一样：文件已经改名成功了。
+  try {
+    await usageStore.migrate(usageRel(oldRel), usageRel(newRel));
+  } catch (err) {
+    console.error('使用统计跟随改名失败（文件已改名）:', oldRel, '->', newRel, err.message);
+  }
+  return true;
+}
+
+// 调用方必须已经占住 ver:<oldRel> 和 ver:<newRel>。
+async function renameEntryLocked(oldRel, newRel) {
   // 两侧都过写入白名单：源要被移走（等于删），目标要被写入，
   // 任一侧落在 .versions/.trash/config.json 上都不行。
   const oldFull = safeJoinWritable(oldRel);
@@ -840,7 +937,7 @@ ipcMain.handle('rename', async (e, oldRel, newRel) => queueWriteMulti(
     console.error('锁定标记跟随改名失败（文件已改名）:', oldRel, '->', newRel, err.message);
   }
   return true;
-}));
+}
 
 // 工作流引用同步：`workflows/*.md` 的 flow[].prompt 指向 prompts/ 下的文件，
 // 改名/移动 prompt 后这些引用会变成死链，而流程图上没有任何报错——这个问题
@@ -910,7 +1007,49 @@ function dropWorkflowIndex() {
 function dropFromCache(fullPath) {
   dropFromContentCache(fullPath);
   dropWorkflowIndex();
+  // 自写登记也挂在这一行：调用它的地方正好就是"应用自己刚写完/移完/删完一个文件"，
+  // 外部改动的监视据此把写完后的指纹记进快照，这次写入引起的 fs.watch 事件就不会
+  // 被当成外部修改。外部改动自己走 dropForExternalChange，不经过这里。
+  if (libraryWatcher) libraryWatcher.noteSelfWrite(fullPath);
 }
+
+// ---------- 外部改动感知 ----------
+// 监视 prompts/ workflows/ templates/。比对和自写过滤在 lib/library-watch.js；
+// 这里只负责：作废缓存（与写路径同一个纪律）、通知渲染进程、导入期间暂停。
+let libraryWatcher = null;
+// 渲染进程按 rel 重读，单次推送的条目数要有上限：git checkout 一次能动上千个文件，
+// 全列出来只是白拷一份。超了就标 truncated，渲染进程改成重读全部已打开标签。
+const LIBRARY_CHANGE_MAX = 500;
+function dropForExternalChange(rel) {
+  try { dropFromContentCache(safeJoin(rel)); } catch {}
+}
+function startLibraryWatch() {
+  if (libraryWatcher) return;
+  libraryWatcher = createLibraryWatcher({
+    root: DATA_ROOT,
+    // 完整备份导入独占写入期间不比对：它会写入又可能整批回滚，
+    // 导入结束后一次比对，导入写的文件都已经登记成自写。
+    isPaused: () => writeGate.isExclusive(),
+    log: logger,
+    onChange: (changes) => {
+      for (const c of changes) dropForExternalChange(c.rel);
+      dropWorkflowIndex();
+      logger.info('[watch] 外部改动 ' + changes.length + ' 个文件');
+      if (!win || win.isDestroyed()) return;
+      const truncated = changes.length > LIBRARY_CHANGE_MAX;
+      win.webContents.send('library-changed', {
+        changes: truncated ? changes.slice(0, LIBRARY_CHANGE_MAX) : changes,
+        truncated
+      });
+    }
+  });
+  // start 自己兜住所有异常（目录不存在、EPERM 只记日志），这里不 await：
+  // 初始快照要遍历整库，不该拖慢窗口出来。
+  libraryWatcher.start();
+}
+app.on('will-quit', () => {
+  if (libraryWatcher) { libraryWatcher.close(); libraryWatcher = null; }
+});
 
 // rel 为空时不查单向引用，只做全库悬空体检。
 ipcMain.handle('workflow-references', async (e, rel) => {
@@ -995,7 +1134,14 @@ async function isLocked(rel) {
 // （Ctrl+S、切文件时的自动保存都会）会读到删除前的 prev、写回同一个路径，
 // 然后被这里的 fsp.rename 一起卷进 .trash：保存返回成功，内容却不在树里了。
 // 顺序由 queueWriteMulti 统一排（ver:* → trash），内部再占 config 也不成环。
-ipcMain.handle('trash', async (e, rel) => queueWriteMulti(['ver:' + String(rel), 'trash'], async () => {
+ipcMain.handle('trash', async (e, rel) => trashEntry(rel));
+
+// 具名出来给批量删除复用：锁定校验、目录拒绝、回收站索引都只有这一份。
+function trashEntry(rel) {
+  return queueWriteMulti(['ver:' + String(rel), 'trash'], () => trashEntryLocked(rel));
+}
+
+async function trashEntryLocked(rel) {
   // 删除同样是改动库内容：不加白名单就能把 config.json 移进回收站
   const full = safeJoinWritable(rel);
   if (await isLocked(rel)) throw appError('E_LOCKED', rel);
@@ -1029,7 +1175,80 @@ ipcMain.handle('trash', async (e, rel) => queueWriteMulti(['ver:' + String(rel),
     console.error('清理锁定标记失败（文件已移入回收站）:', rel, err.message);
   }
   return true;
-}));
+}
+
+// ---------- 文件树批量操作 ----------
+// 执行方式（主进程一次 IPC、逐项结算、不中途停）的理由写在 lib/batch-ops.js 文件头。
+// 三个 handler 共用一个 runner：任意一种批量在跑时，另一种也要拒绝（E_BATCH_BUSY）——
+// 批量移动和批量删除同时动同一批文件，结果取决于谁先抢到写链，用户没法预期。
+const batchRunner = batchOps.createBatchRunner();
+
+// 批量移动到 prompts/ 下的某个目录。每一项走 renameEntry 同一条路：版本历史跟随、
+// 锁跟随、清缓存。同名时生成新名字（-1、-2…），并且是在占住目标 key 之后再确认：
+// 先挑名字再排队的话，排队期间别处在这个名字上建了文件，movePromptWithHistory
+// 会拒绝（E_TARGET_EXISTS），那时重新挑一次，有上限。
+ipcMain.handle('batch-move', async (e, rels, dirRel) => {
+  const list = batchOps.normalizeRelList(rels);
+  const dir = String(dirRel == null ? '' : dirRel).replace(/\\/g, '/').replace(/\/+$/, '');
+  // 目标目录同样过写入白名单（拿一个虚拟文件名去校验，目录本身不是 .md）
+  safeJoinWritable(dir + '/__probe.md');
+  const exists = (r) => fs.existsSync(safeJoin(r));
+  return batchRunner.run(list, async (rel) => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const target = batchOps.pickMoveTarget(rel, dir, exists);
+      if (target == null) return { skip: 'E_BATCH_SAME_DIR' };
+      if (!fs.existsSync(safeJoinWritable(rel))) throw appError('E_BATCH_SOURCE_MISSING', rel);
+      try {
+        await renameEntry(rel, target);
+        return { newRel: target };
+      } catch (err) {
+        if (batchOps.errorCode(err).code !== 'E_TARGET_EXISTS') throw err;
+      }
+    }
+    throw appError('E_TARGET_EXISTS', rel);
+  });
+});
+
+// 批量添加 / 删除标签。只改 frontmatter 的 tags 那一段（lib/tag-rewrite.js），
+// 不整体重新序列化——工作流的 flow、多行列表都原样留着。
+// 每一项和 save-file 同款：排进 ver:<rel>、旧正文留快照、bump 自动字段、原子写、清缓存。
+ipcMain.handle('batch-tags', async (e, rels, payload) => {
+  const list = batchOps.normalizeRelList(rels);
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const add = tagRewrite.normalizeTagList(Array.isArray(p.add) ? p.add : []);
+  const remove = tagRewrite.normalizeTagList(Array.isArray(p.remove) ? p.remove : []);
+  if (!add.length && !remove.length) throw appError('E_INVALID_PAYLOAD');
+  return batchRunner.run(list, (rel) => queueWrite('ver:' + rel, async () => {
+    const full = safeJoinWritable(rel);
+    const prev = await readPrevContent(full);
+    if (prev == null) throw appError('E_BATCH_SOURCE_MISSING', rel);
+    const next = tagRewrite.rewriteTags(prev, { add, remove });
+    if (!next.changed) return { skip: 'E_BATCH_TAGS_UNCHANGED' };
+    await saveVersion(rel, prev);
+    const toWrite = bumpAutoFields(next.content, prev);
+    await writeFileAtomic(full, toWrite);
+    dropFromCache(full);
+    return { tags: next.after };
+  }));
+});
+
+// 批量删除：每一项走 trashEntry（锁由主进程在 config 队列里判，见 isLocked）。
+// 锁定的文件算"跳过"而不是"失败"：那是用户自己设的保护在起作用。
+// 文件已经不在了要单独报出来：单个删除把它当成功（幂等），但批量的汇总里
+// 说"成功 N 个"而其中一个根本不存在，是在虚报。
+ipcMain.handle('batch-trash', async (e, rels) => {
+  const list = batchOps.normalizeRelList(rels);
+  return batchRunner.run(list, async (rel) => {
+    if (!fs.existsSync(safeJoinWritable(rel))) throw appError('E_BATCH_SOURCE_MISSING', rel);
+    try {
+      await trashEntry(rel);
+    } catch (err) {
+      if (batchOps.errorCode(err).code === 'E_LOCKED') return { skip: 'E_LOCKED' };
+      throw err;
+    }
+    return null;
+  });
+});
 
 ipcMain.handle('list-trash', async () => readTrashIndex());
 
@@ -1120,11 +1339,36 @@ ipcMain.handle('restore', async (e, id) => queueWriteMulti(await restoreLockKeys
   return true;
 }));
 
-ipcMain.handle('empty-trash', async () => queueWrite('trash', async () => {
-  const { kept, failedNames } = await trashStore.empty();
+ipcMain.handle('empty-trash', async () => {
+  const { kept, removed, failedNames } = await queueWrite('trash', () => trashStore.empty());
+  // 彻底删除的文件，统计和收藏一起清掉。删进回收站时不清，是为了恢复后还在；
+  // 到这一步文件已经没有回来的路了，留着只会在 usage.json 里攒幽灵条目。
+  // 只清真删掉的那些（removed），删失败、还留在回收站里的不动；原路径上已经有了
+  // 新文件的也不动（isLive），那份统计属于新文件。
+  // 在 trash 锁之外调，理由同 rename。失败只记日志：回收站已经清完了。
+  const stillTrashed = new Set(kept.map(i => usageRel(i.originalRel)));
+  const gone = removed.map(i => usageRel(i.originalRel)).filter(r => !stillTrashed.has(r));
+  if (gone.length) {
+    try {
+      await usageStore.forget(gone, { isLive: usageFileIsLive });
+    } catch (err) {
+      console.error('清空回收站后清理使用统计失败:', err.message);
+    }
+  }
   if (kept.length) throw appError('E_TRASH_EMPTY_PARTIAL', failedNames.join(', '));
   return true;
-}));
+});
+
+// 使用统计与收藏。三个都只占 'usage'（读也排队，原因见 lib/usage-store.js 的 createUsageStore）。
+ipcMain.handle('record-usage', async (e, rel) => recordPromptUsage(rel));
+ipcMain.handle('get-usage', async () => usageStore.snapshot());
+ipcMain.handle('set-favorite', async (e, rel, on) => {
+  const r = usageRel(rel);
+  safeJoinReadable(r);
+  // 只允许收藏存在的文件；取消收藏不查（外部删掉的文件也要能从收藏里摘掉）。
+  if (on && !(await usageFileIsLive(r))) throw appError('E_FAVORITE_MISSING', r);
+  return usageStore.setFavorite(r, !!on);
+});
 
 ipcMain.handle('list-versions', async (e, rel) => versionStore.listVersions(rel));
 
@@ -1136,6 +1380,30 @@ ipcMain.handle('read-version', async (e, rel, file) => versionStore.readVersion(
 ipcMain.handle('pin-version', async (e, rel, file, pinned) => queueWrite('ver:' + String(rel), async () => (
   versionStore.pinVersion(rel, file, pinned)
 )));
+
+// "当前内容"那一行的说明。只读：按磁盘上的正文算哈希，对不上就当没有说明
+// （外部编辑器改过之后，那句说明描述的已经不是这份内容了）。
+// 读正文走 safeJoinReadable，和 read-file 同一道白名单。
+ipcMain.handle('get-current-note', async (e, rel) => {
+  const full = safeJoinReadable(rel);
+  const content = await readPrevContent(full);
+  if (content == null) return '';
+  return versionStore.getCurrentNote(rel, content);
+});
+
+// 事后编辑某个版本的说明。和 pin-version 同链：两者都是读改写同一份 index.json。
+// file 为 null 表示"当前内容"那一行；否则过 VERSION_FILE_RE，目录过 versionDirFor
+// 的越权校验（都在 versionStore.setVersionNote 里），且快照必须还在。
+// 编辑当前内容的说明要读正文算哈希，所以 rel 先过写入白名单：这是往库里写东西。
+ipcMain.handle('set-version-note', async (e, rel, file, note) => queueWrite('ver:' + String(rel), async () => {
+  if (file == null) {
+    const full = safeJoinWritable(rel);
+    const content = await readPrevContent(full);
+    if (content == null) throw appError('E_VERSION_NOT_FOUND', String(rel));
+    return versionStore.setVersionNote(rel, null, note, content);
+  }
+  return versionStore.setVersionNote(rel, String(file), note);
+}));
 
 // 和 save-file 同链同理由：读 prev → 存快照 → 按 prev 算 version → 写回。
 // 回滚和保存并发（点了回滚又按 Ctrl+S）时，不排队就会两边各写一次，
@@ -1149,14 +1417,23 @@ ipcMain.handle('rollback-version', async (e, rel, file) => queueWrite('ver:' + S
   // 回滚这条路径上更要紧——它的全部意义就是"当前内容先存为新版本，不丢失"，
   // 而 prev 被静默吞成 null 时恰好跳过那次 saveVersion，把要保住的内容直接覆盖掉。
   const prev = await readPrevContent(full);
-  // 当前内容先存为新版本（不丢失）
-  if (prev != null && prev !== versionContent) await saveVersion(rel, prev);
+  // 当前内容先存为新版本（不丢失）。它的说明（index.json 的 current）由 saveVersion
+  // 一起转给这条快照，所以回滚之后"回滚前那一版"在历史里仍带着原来的说明。
+  const snapshotTaken = prev != null && prev !== versionContent;
+  if (snapshotTaken) await saveVersion(rel, prev);
   // 回滚写入（作为新一次保存，bump 自动字段）
   const toWrite = bumpAutoFields(versionContent, prev);
   // save-file 有这句，这里原先漏了：目录被外部删掉后回滚会 ENOENT 失败
   await ensureDir(path.dirname(full));
   await writeFileAtomic(full, toWrite);
   dropFromCache(full);
+  // 回滚写进去的内容没有说明。不复制目标快照的说明：那句话描述的是"当初那次保存
+  // 改了什么"，安到这次回滚上会让人以为又做了一遍那个改动。
+  try {
+    await versionStore.recordCurrentNote(rel, toWrite, '', snapshotTaken ? null : prev);
+  } catch (err) {
+    logger.error('[versions] 回滚后整理版本说明失败（正文已回滚）' + rel + '：' + (err && err.message));
+  }
   return { content: toWrite, meta: parseFrontmatter(toWrite).meta };
 }));
 
@@ -1188,7 +1465,8 @@ ipcMain.handle('get-config', async () => loadConfig());
 const KNOWN_CONFIG_KEYS = new Set([
   'theme', 'lang', 'fontScale', 'windowBounds', 'projectTypes', 'lockedFiles',
   'expandedPaths', 'recent', 'fillMemory', 'sidebarWidth', 'tabs', 'activeTab',
-  'updateCheck', 'updateLastCheckedAt', 'updateSkipVersion'
+  'updateCheck', 'updateLastCheckedAt', 'updateSkipVersion', 'ruleExportTargets',
+  'quickLaunchEnabled', 'quickLaunchShortcut'
 ]);
 // 原型链上的键。JSON.parse 出来的对象里它们是**自有属性**（不是原型），
 // 展开进配置对象之后会跟着 saveConfig 落盘。
@@ -1214,6 +1492,13 @@ ipcMain.handle('set-config', async (e, cfg) => {
   const next = await updateConfig(cfg);
   // 语言改了就重建原生菜单（buildMenu 只在启动时调一次，不管这里就永远停在旧语言）
   syncMenuLang(next.lang);
+  // 设置面板改快捷键走的是 set-quick-launch（先注册、成功才落盘）。这里兜的是
+  // 有人直接 setConfig 写了这两个键：不跟着同步的话，磁盘上关了、快捷键还注册着，
+  // 要等重启才对得上。
+  if (cfg && (Object.prototype.hasOwnProperty.call(cfg, 'quickLaunchEnabled')
+    || Object.prototype.hasOwnProperty.call(cfg, 'quickLaunchShortcut'))) {
+    await syncQuickLaunch(next);
+  }
   return next;
 });
 
@@ -1359,8 +1644,9 @@ ipcMain.handle('export-project-rules', async (e, payload) => {
     return { ok: false, canceled: true };
   }
   const targetDir = res.filePaths[0];
-  // 文件名只接受固定白名单，目录由用户选择。已有文件必须由用户决定是否覆盖。
-  const plan = await ruleExport.plan(targetDir, payload.files, RULE_EXPORT_ALLOWED);
+  // 相对路径只接受固定白名单，目录由用户选择。已有文件必须由用户决定是否覆盖。
+  // 路径上有链接时 plan 直接抛 E_RULE_EXPORT_UNSAFE，一个文件都不写。
+  const plan = await ruleExport.plan(targetDir, payload.files, RULE_EXPORT_ALLOWED, { appError });
   let mode = 'overwrite';
   if (plan.existing.length) {
     const answer = await dialog.showMessageBox(win, {
@@ -1557,14 +1843,26 @@ ipcMain.handle('import-zip', async () => writeGate.exclusive(async () => {
           throw new Error('selftest import failure');
         }
         if (info.file === 'index.json') {
+          // 索引是重建的，不是原样拷贝：外来 JSON 只留 pinned / notes / current 三个
+          // 认得的字段。原先这里只重建 pinned，备份里的版本说明在导入时被整份丢掉。
           const parsed = JSON.parse(entry.content);
-          const pinned = {};
-          for (const [file, value] of Object.entries(parsed && parsed.pinned || {})) {
-            if (value === true && backupVersionForEntry('.versions/' + info.rel + '/' + file)) pinned[file] = true;
+          const index = sanitizeVersionIndex(parsed, file => !!backupVersionForEntry('.versions/' + info.rel + '/' + file));
+          // current 的哈希对应的是备份里那份正文；导入走 createFileAt 会重新 bump
+          // version/updatedAt/createdAt，磁盘上的正文和备份里的不再逐字节相同。
+          // 只有备份里的正文确实就是 current 描述的那份时，才把哈希换成导入后的正文；
+          // 否则丢弃，免得把说明安到别的内容上。
+          if (index.current) {
+            const bodyEntry = contentEntries.find(c => backupRelForEntry(c.path) === info.rel);
+            const written = bodyEntry ? await readPrevContent(safeJoin(targetRel)) : null;
+            if (written != null && contentHash(bodyEntry.content) === index.current.sha256) {
+              index.current = { note: index.current.note, sha256: contentHash(written) };
+            } else {
+              delete index.current;
+            }
           }
           const indexPath = path.join(dir, 'index.json');
           await transaction.snapshot(indexPath);
-          await writeFileAtomic(indexPath, JSON.stringify({ pinned }, null, 2));
+          await writeFileAtomic(indexPath, JSON.stringify(index, null, 2));
         } else {
           const versionPath = path.join(dir, info.file);
           await writeFileExclusive(versionPath, entry.content, targetRel);
@@ -1574,6 +1872,11 @@ ipcMain.handle('import-zip', async () => writeGate.exclusive(async () => {
       } catch (err) {
         await failImport(entry.path, err);
       }
+    }
+    // 第二个注入点：版本快照和索引（含版本说明）都已写完之后才失败。
+    // 上面那个点在写第一条版本之前就抛，覆盖不到"索引已经写进去了，回滚要把它撤掉"。
+    if (process.env.PFM_SELFTEST === '1' && process.env.PFM_SELFTEST_IMPORT_FAIL_AFTER_VERSIONS === '1') {
+      await failImport('.versions', new Error('selftest import failure after versions'));
     }
   }
   if (isAppBackup && configEntry) {
@@ -1854,6 +2157,8 @@ async function healDataDir() {
   //
   // 写入点对照（grep writeFileAtomic 的调用方）：
   //   config.json        → DATA_ROOT 顶层，不需要递归
+  //   usage.json         → CONFIG_PATH 所在目录顶层（打包/测试时就是 DATA_ROOT；
+  //                        开发模式下是 userData，和 DATA_ROOT 不是同一个，要单独扫）
   //   .trash/index.json  → TRASH_DIR 一层
   //   版本快照和索引      → .versions/** 递归
   //   正文               → prompts / workflows / templates 递归
@@ -1901,6 +2206,9 @@ async function healDataDir() {
   };
 
   await walk(DATA_ROOT, false);
+  // 不递归：开发模式下这里是 userData，里面是 Chromium 自己的缓存目录，
+  // 那里不可能有本程序的临时文件。顶层文件名由 TMP_PART_RE 严格匹配，误删不到别的东西。
+  if (path.resolve(path.dirname(USAGE_PATH)) !== path.resolve(DATA_ROOT)) await walk(path.dirname(USAGE_PATH), false);
   for (const d of [TRASH_DIR, VERSIONS_DIR, PROMPTS_DIR, WORKFLOWS_DIR, TEMPLATES_DIR]) {
     await walk(d, true);
   }
@@ -2400,7 +2708,10 @@ async function createWindow() {
   attachSandboxProbe(win);
   const selfTest = process.env.PFM_SELFTEST === '1' ? selftest.attachSelfTest(win) : null;
   win.loadFile(path.join(CODE_ROOT, 'src', 'index.html'));
-  if (selfTest) selfTest.run();
+  // 快速搜索面板的自检要模拟按快捷键、读剪贴板、比对两个窗口的 webPreferences，
+  // 这些只有主进程做得到，所以它是一条独立的流程，自己负责退出（见 lib/quick-launch-selftest.js）。
+  if (selfTest && process.env.PFM_SELFTEST_QUICK_LAUNCH) runQuickLaunchSelfTest(win);
+  else if (selfTest) selfTest.run();
 
   // resize / move 会以每秒几十次的频率触发。不防抖会疯狂读写 config.json。
   // 走 updateConfig 而不是自己 loadConfig→saveConfig：后者是一次独立的
@@ -2551,6 +2862,15 @@ async function createWindow() {
   // macOS 下关窗后应用还活着、菜单仍可点，Cmd+N 会打到已销毁对象上
   // 抛 "Object has been destroyed"。
   win.on('closed', () => { win = null; });
+  // 面板是隐藏而不销毁的。主窗口没了它还活着的话，window-all-closed 永远等不到
+  // "零个窗口"，Windows 上关掉主窗口进程却不退。就地降级重建主窗口时也会走到这里，
+  // 那正好：面板下次呼出时按新的 sandboxActive 重建，和主窗口保持同一个沙箱判定。
+  win.on('closed', () => {
+    destroyQuickPanel();
+    // 就地降级时 sandboxActive 已经翻成 false，按新判定把预建的面板补回来；
+    // 否则第一次呼出又要等页面加载（预建的意义就没了）
+    if (sandboxRuntime.rebuilding && shortcutController.current()) ensureQuickPanel();
+  });
 
   // 上次是最大化状态：先按还原尺寸建窗，再最大化，这样"取消最大化"能回到合理尺寸
   if (config.windowBounds && config.windowBounds.maximized) win.maximize();
@@ -2615,6 +2935,249 @@ function syncMenuLang(lang) {
   buildMenu();
 }
 
+// ---------- 全局快捷键：快速搜索面板 ----------
+// 按下快捷键弹出一个小搜索框（当前显示器居中、置顶、无边框），输入即搜，
+// ↑↓ 选、Enter 复制，Esc / 失焦收起。主窗口最小化时也能用。
+//
+// 纯逻辑（快捷键校验、注册状态机、设置变更的提交顺序、居中）在 lib/quick-launch.js，
+// 这里只放窗口和 Electron API。
+//
+// 面板的安全配置必须和主窗口一致——它显示的也是库里的内容（标题、正文片段），
+// 外部导入的 .md 同样在里面：
+//   contextIsolation / nodeIntegration 同主窗口；
+//   sandbox 取同一个 sandboxActive（沙箱两个半边的判定只有一份，见文件开头）；
+//   CSP 与 index.html 逐字一致；禁止 window.open、只允许停在自己那一页。
+// tests/quick-launch.test.js 会把两个窗口的 webPreferences 逐项比对，多一项少一项都红。
+// 唯一允许不同的是 preload：面板用最小白名单 quick-launch-preload.js（理由见那个文件头）。
+const QUICK_PANEL_URL = pathToFileURL(path.join(CODE_ROOT, 'src', 'quick-launch.html')).href;
+const QUICK_PANEL_SIZE = { width: 640, height: 420 };
+let quickPanel = null;
+let quickPanelReady = null;
+
+// 自检进程不注册真实的全局快捷键：测试会在开发机上并行拉起好几个 Electron，
+// 真注册的话第一个进程抢到键、后面的全部"被占用"；测试跑着的时候开发者按一下
+// Ctrl+Alt+Space 还会呼出测试进程的面板。所以自检换成同形的内存替身，
+// 注册 / 换键 / 回滚的代码路径一行不少，只是不碰系统。
+// PFM_SELFTEST_SHORTCUT_TAKEN 让替身假装某些键已被别的程序占用，走注册失败那条路。
+const shortcutBackend = process.env.PFM_SELFTEST === '1'
+  ? quickLaunch.createFakeGlobalShortcut({
+    taken: String(process.env.PFM_SELFTEST_SHORTCUT_TAKEN || '').split(',').filter(Boolean)
+  })
+  : globalShortcut;
+const shortcutController = quickLaunch.createShortcutController({
+  globalShortcut: shortcutBackend,
+  onTrigger: () => {
+    toggleQuickPanel().catch(e => logger.error('[quick-launch] 呼出面板失败: ' + (e && e.stack ? e.stack : e)));
+  }
+});
+
+// 按配置让注册状态对上。启动时、以及有人直接 setConfig 写了这两个键时调用。
+// 注册失败（被别的程序占用）必须记日志：这是"按了没反应"唯一能查到原因的地方。
+// 用户那边由渲染进程启动时查一次状态、失败就 toast（见 renderer.js 的 checkQuickLaunchAtStartup）。
+async function syncQuickLaunch(cfg) {
+  const s = quickLaunch.resolveSettings(cfg || await loadConfig());
+  if (s.enabled && s.invalid) {
+    shortcutController.apply({ enabled: false, accelerator: null });
+    logger.error('[quick-launch] 配置里的快捷键不合法，未注册: ' + s.raw);
+    return;
+  }
+  const res = shortcutController.apply({ enabled: s.enabled, accelerator: s.accelerator });
+  if (s.enabled && !res.registered) {
+    // 新键注册失败时旧键还留着（状态机的约定），而配置已经不是它了，留着只会让
+    // "按旧键还能呼出"和设置面板里的"未生效"互相矛盾
+    shortcutController.apply({ enabled: false, accelerator: null });
+    logger.error('[quick-launch] 全局快捷键注册失败（可能已被其他程序占用）: ' + s.accelerator
+      + (res.thrown ? '，' + res.thrown : ''));
+  } else if (res.registered) {
+    logger.info('[quick-launch] 已注册全局快捷键 ' + res.accelerator);
+  }
+}
+
+function createQuickPanel() {
+  const panel = new BrowserWindow({
+    ...QUICK_PANEL_SIZE,
+    show: false,
+    frame: false,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    title: 'Prompt Flow Manager',
+    webPreferences: {
+      preload: path.join(CODE_ROOT, 'quick-launch-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: sandboxActive,
+      webgl: false
+    }
+  });
+  // 去掉应用菜单：菜单加速键跟着焦点窗口走，不去掉的话面板里按 Ctrl+R 会触发
+  // 主窗口那套"重新加载"，Ctrl+N 会去主窗口新建提示词。
+  panel.setMenu(null);
+  // 导航：面板只有一页，结果用 textContent 渲染、没有任何链接，所以不像主窗口那样
+  // 把 http(s) 转交系统浏览器——这里出现导航只可能是异常，一律拒绝，不出网。
+  panel.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  panel.webContents.on('will-navigate', (e, url) => {
+    const bare = String(url == null ? '' : url).split('#')[0].split('?')[0];
+    if (bare.toLowerCase() === QUICK_PANEL_URL.toLowerCase()) return;
+    e.preventDefault();
+    console.log('[quick-launch] 已拦截面板内导航: ' + url);
+  });
+  // 失焦即收起。置顶的窗口不收起的话，会一直盖在用户切过去的程序上面。
+  panel.on('blur', () => { if (quickPanel === panel) hideQuickPanel(); });
+  // 渲染进程没了就整个扔掉，下次呼出重建。留着一个死掉的窗口，下次 show 出来是白板。
+  // 只扔自己：沙箱下起不来时主窗口会就地降级并顺手重建面板，这个回调可能晚到，
+  // 用 destroyQuickPanel() 的话会把刚按新判定建好的那个也扔掉。
+  panel.webContents.on('render-process-gone', (e, details) => {
+    logger.error('[quick-launch] 面板渲染进程退出: ' + (details && details.reason));
+    setTimeout(() => {
+      if (quickPanel === panel) destroyQuickPanel();
+      else if (!panel.isDestroyed()) panel.destroy();
+    }, 0);
+  });
+  panel.on('closed', () => {
+    if (quickPanel === panel) { quickPanel = null; quickPanelReady = null; }
+  });
+  quickPanelReady = new Promise((resolve) => {
+    panel.webContents.once('did-finish-load', () => resolve(true));
+    panel.webContents.once('did-fail-load', (e, code, desc) => {
+      logger.error('[quick-launch] 面板页面加载失败: ' + code + ' ' + desc);
+      resolve(false);
+    });
+  });
+  panel.loadFile(path.join(CODE_ROOT, 'src', 'quick-launch.html'));
+  quickPanel = panel;
+  return panel;
+}
+
+function destroyQuickPanel() {
+  const p = quickPanel;
+  quickPanel = null;
+  quickPanelReady = null;
+  if (p && !p.isDestroyed()) p.destroy();
+}
+
+// 面板只建一次，之后隐藏 / 显示复用同一个实例：建窗口 + 加载页面要几百毫秒，
+// 每次按快捷键都等这一下，"快速"就名不副实了。
+function ensureQuickPanel() {
+  if (!quickPanel || quickPanel.isDestroyed()) createQuickPanel();
+  return quickPanel;
+}
+
+async function showQuickPanel() {
+  const panel = ensureQuickPanel();
+  const ready = await quickPanelReady;
+  if (!ready || panel.isDestroyed()) { destroyQuickPanel(); return false; }
+  // 居中到鼠标所在的显示器：这是用户此刻在看的那块屏幕，不是主窗口所在的那块。
+  let workArea = null;
+  try { workArea = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea; } catch {}
+  panel.setBounds(quickLaunch.centerBounds(workArea, QUICK_PANEL_SIZE));
+  // 语言、主题、字号每次都现取：用户可能刚在主窗口里切过。
+  const cfg = await loadConfig();
+  if (panel.isDestroyed()) return false;
+  panel.webContents.send('quick-launch-show', {
+    lang: cfg.lang === 'en' ? 'en' : 'zh',
+    theme: cfg.theme === 'dark' ? 'dark' : 'light',
+    fontScale: cfg.fontScale,
+    fillMemory: cfg.fillMemory && typeof cfg.fillMemory === 'object' && !Array.isArray(cfg.fillMemory) ? cfg.fillMemory : {}
+  });
+  // 置顶级别取 screen-saver：普通 alwaysOnTop 在全屏程序上面盖不住
+  panel.setAlwaysOnTop(true, 'screen-saver');
+  panel.show();
+  panel.focus();
+  return true;
+}
+
+function hideQuickPanel() {
+  if (quickPanel && !quickPanel.isDestroyed() && quickPanel.isVisible()) quickPanel.hide();
+}
+
+// 同一个快捷键再按一次就收起，和系统启动器的习惯一致。
+async function toggleQuickPanel() {
+  if (quickPanel && !quickPanel.isDestroyed() && quickPanel.isVisible() && quickPanel.isFocused()) {
+    hideQuickPanel();
+    return false;
+  }
+  return showQuickPanel();
+}
+
+// 启动时的注册由 bootstrap 发起；渲染进程可能比它先来问状态，所以这里等它跑完。
+let quickLaunchBoot = Promise.resolve();
+ipcMain.handle('get-quick-launch-status', async () => {
+  await quickLaunchBoot;
+  return quickLaunch.statusOf(shortcutController, await loadConfig());
+});
+
+// 设置面板的开关 / 改组合键。连点开关时两次请求必须排队：
+// 各自"注册 → 落盘"交错执行的话，磁盘上留下的和真正注册着的可能是不同的两次。
+let quickLaunchChain = Promise.resolve();
+ipcMain.handle('set-quick-launch', (e, patch) => {
+  const run = quickLaunchChain.then(() => setQuickLaunch(patch));
+  quickLaunchChain = run.then(() => {}, () => {});
+  return run;
+});
+async function setQuickLaunch(patch) {
+  try {
+    const status = await quickLaunch.applySettingsChange(
+      { controller: shortcutController, loadConfig, updateConfig, appError }, patch);
+    logger.info('[quick-launch] 设置已更新: ' + (status.enabled ? '开启 ' + status.shortcut : '关闭'));
+    // 刚打开就预先建好面板，第一次按快捷键不用等页面加载
+    if (status.registered) ensureQuickPanel();
+    else hideQuickPanel();
+    return status;
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    if (/E_SHORTCUT_TAKEN/.test(msg)) logger.error('[quick-launch] 全局快捷键注册失败（可能已被其他程序占用）: ' + msg);
+    throw err;
+  }
+}
+
+// 只认面板自己发来的。preload 白名单已经只把这两个方法给了面板，
+// 但 IPC 通道是全局的，主窗口的页面照样能 invoke 同名通道——复制到剪贴板
+// 加隐藏面板这两件事只对面板有意义，别的来源一律拒绝。
+function isQuickPanelSender(e) {
+  return !!(quickPanel && !quickPanel.isDestroyed() && e && e.sender === quickPanel.webContents);
+}
+
+// 复制成功的唯一出口：写剪贴板、收起面板。将来要在"复制成功"处加统计之类的，
+// 接在这里（rel 是被复制的那个文件），面板页面里不再有第二条复制成功的路径。
+ipcMain.handle('quick-launch-copy', (e, text, _rel) => {
+  if (!isQuickPanelSender(e) || typeof text !== 'string') throw appError('E_QUICK_LAUNCH_SENDER');
+  clipboard.writeText(text);
+  hideQuickPanel();
+  return true;
+});
+ipcMain.handle('quick-launch-hide', (e) => {
+  if (!isQuickPanelSender(e)) throw appError('E_QUICK_LAUNCH_SENDER');
+  hideQuickPanel();
+  return true;
+});
+
+// 退出前注销全部全局快捷键。进程退出时系统也会回收，但 Electron 文档要求在
+// will-quit 里显式注销；不注销的话退出流程卡住的那几秒里键还被占着，
+// 用户按下去既没有面板、别的程序也收不到。
+// 判 isReady：单实例锁没抢到时 app.quit() 发生在 ready 之前，这时调 globalShortcut 会抛。
+app.on('will-quit', () => {
+  if (!app.isReady()) return;
+  shortcutController.unregisterAll();
+  logger.info('[quick-launch] 已注销全部全局快捷键');
+});
+
+// 自检入口：PFM_SELFTEST_QUICK_LAUNCH。步骤和断言在 lib/quick-launch-selftest.js，
+// 这里只把它要用的东西传进去（和 selftest.init 同一个思路：模块不自己 require electron）。
+function runQuickLaunchSelfTest(targetWin) {
+  require('./lib/quick-launch-selftest').run({
+    app, screen, clipboard, ipcMain, fs, DATA_ROOT, CONFIG_PATH,
+    mainWin: targetWin,
+    backend: shortcutBackend,
+    showQuickPanel,
+    getQuickPanel: () => (quickPanel && !quickPanel.isDestroyed() ? quickPanel : null),
+    searchAll
+  });
+}
+
 // ---------- 单实例 ----------
 // 两个实例操作同一份数据目录时，config.json 是全量读改写，
 // windowBounds / lockedFiles / tabs 会互相覆盖；.versions 的裁剪也可能打架。
@@ -2675,10 +3238,18 @@ app.whenReady().then(async () => {
     // 那时索引应该已经是修好的，否则用户先看到一屏幽灵条目再看到它们消失。
     await runStartupHeal();
     await createWindow();
+    // 放在建窗口之后：渲染进程起来之后的改动才需要推送，之前的改动它首次
+    // listTreeAndMeta 自然会读到。
+    startLibraryWatch();
     // 升级检查故意**不 await**：它要出网，最坏情况是等满 8 秒超时，
     // await 就等于让窗口晚 8 秒出来。runUpdateCheck 内部自己兜住所有异常，
     // 所以这里既不会有未捕获 rejection，也不会把启动失败的锅甩给它。
     runUpdateCheck();
+    // 全局快捷键同样不挡窗口。get-quick-launch-status 会等 quickLaunchBoot，
+    // 渲染进程先来问也拿得到注册之后的真实状态。开着的话顺手把面板预先建好。
+    quickLaunchBoot = syncQuickLaunch().then(() => {
+      if (shortcutController.current()) ensureQuickPanel();
+    }).catch(e => logger.error('[quick-launch] 启动时注册失败: ' + (e && e.stack ? e.stack : e)));
   } catch (e) {
     logger.error('[bootstrap] 启动失败:', e && e.stack ? e.stack : e);
     // 至少让用户知道是哪里出了问题、数据目录在哪，而不是对着一个不存在的窗口。

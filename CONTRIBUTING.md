@@ -150,6 +150,7 @@ npm run test:close    # 关窗落盘握手
 npm run test:close-unsaved # 关窗前询问未保存草稿：取消留窗，保存落盘
 npm run test:draft-recovery # 未保存就退出后，再次打开时恢复草稿
 npm run test:save-conflict # 编辑期间文件被修改时，保存前必须确认
+npm run test:external-change # 应用之外改了内容目录：树和标签页跟上、编辑中挂提示条、自己的写入不算
 npm run test:layout-small # 800x500 最小窗口下覆盖中英文、浅深色和 125%/150% 缩放
 npm run test:render   # markdown 渲染成本上限
 npm run test:heal     # 启动自愈修坏数据目录（自带反向对照）
@@ -158,13 +159,14 @@ npm run test:sandbox  # 沙箱降级状态机（裸 node，自带两组反向对
 npm run test:sandbox-required # 强制沙箱启动，禁止降级（CI 跑；本机环境不支持沙箱时会红）
 npm run test:update   # 升级检查：版本比较 + 出网约束（裸 node，自带三组反向对照）
 npm run test:contrast # 配色对比度与焦点可见性（裸 node，自带一组反向对照）
-npm run test:placeholders # 占位符提取与填充（裸 node，自带一组反向对照）
+npm run test:placeholders # 占位符提取与填充、选项 / 默认值语法（裸 node，自带两组反向对照：朴素实现 + 逐条变异）
 npm run test:frontmatter # frontmatter 安全生成：用户输入不能改写其他字段（裸 node）
 npm run test:project-types # 项目类型新增、删除和最少保留规则（裸 node）
-npm run test:rule-export # 规则文件导出时保护已有文件（裸 node）
+npm run test:rule-export # 规则文件导出：相对路径白名单、symlink/junction 拒绝、保护已有文件（裸 node，自带反向对照）
 npm run test:composer-meta # 装配器根据技术栈生成项目类型和标签（裸 node）
-npm run test:version-store # 版本列表、星标、裁剪和路径校验（裸 node）
+npm run test:version-store # 版本列表、星标、版本说明、裁剪和路径校验（裸 node）
 npm run test:trash-store # 回收站索引、存放名校验和部分清空（裸 node）
+npm run test:usage-store # 使用统计与收藏：计数、上限淘汰、改名迁移、常用排序、导入闸门（裸 node，自带七组反向对照）
 npm run test:file-move # 改名时正文和版本历史一起移动，失败时回滚（裸 node）
 npm run test:workflow-refs # 只精确改写 flow 中的 prompt 引用（裸 node）
 npm run test:backup-import # 完整备份按 prompts/workflows/templates 原目录恢复（裸 node）
@@ -179,13 +181,20 @@ npm run test:draft-store # 草稿按文件独立保存、清除和处理损坏�
 npm run test:config-file # config.json 损坏时改名留档而不是被默认值覆盖（裸 node，自带一组反向对照）
 npm run test:workflow-index # 引用索引：谁在引用这个提示词、悬空引用体检（裸 node，自带一组反向对照）
 npm run test:flow-graph # 工作流图：分层、成环、不可达步骤（裸 node，自带一组反向对照）
-npm run test:mcp          # 只读 MCP server：协议往返、只读边界、返回上限（裸 node，自带一组反向对照）
+npm run test:flow-run    # 工作流执行：分支选择、汇合点结算、进度持久化（裸 node，自带一组反向对照）
+npm run test:mcp          # 只读 MCP server：协议往返、只读边界、返回上限、prompts 斜杠命令（裸 node，自带反向对照）
 npm run test:cache-budget # 正文缓存的两道闸与占用记账（裸 node，自带一组反向对照）
 npm run test:cli          # 命令行入口：只读子命令、退出码、路径边界（裸 node，自带一组反向对照）
                           # npm run pfm -- list / search / get / refs / check 是它的日常用法
-npm run test:import-rollback # 真实 Electron 完整备份中途失败后整体撤回
+npm run test:library-watch # 外部改动感知：事件合并、自写过滤、路径过滤、导入期间暂停（裸 node，自带三组反向对照）
+npm run test:import-rollback # 真实 Electron 完整备份中途失败后整体撤回（两个失败点，含版本说明）
 npm run test:ui-failure # 真实 Electron 配置写入失败时显示提示并恢复界面状态
 npm run test:includes     # 模板包含引擎（裸 node，自带一组反向对照）
+npm run test:quick-launch-logic # 全局快捷键：校验、注册状态机、先注册后落盘与回滚（裸 node，自带两组反向对照）
+npm run test:quick-launch # 真实 Electron 快速搜索面板：呼出、搜索、复制、隐藏、安全配置与主窗口一致
+npm run test:tree-selection # 文件树多选模型：范围选择只取可见行（裸 node，自带一组反向对照）
+npm run test:tag-rewrite  # 批量打标签的 tags 文本级改写（裸 node，自带一组反向对照：整体重新序列化必须红）
+npm run test:batch-ops    # 批量操作骨架：部分失败汇总、忙碌拒绝、同名改名（裸 node，自带三组反向对照）
 npm run test:reverse  # 把第一节那套流程自动化：逐条改坏源码，验证目标断言真的变红
 npm run test:reverse-split # 同上，针对「自检模块拆分」那一节的注入契约
 npm run test:quick    # 日常快速检查：lint + 静态检查 + 裸 node 单测
@@ -264,7 +273,7 @@ postinstall，二进制改成惰性下载，所以干净环境里 `npm ci` 之�
 
 | 环境变量 | 作用 | 要求 |
 |----------|------|------|
-| `PFM_SELFTEST=1` | 页面加载完跑启动自检并退出 | |
+| `PFM_SELFTEST=1` | 页面加载完跑启动自检并退出。同时让全局快捷键改用内存替身，不注册真实的系统快捷键 | |
 | `PFM_DATA_DIR=<目录>` | 把 DATA_ROOT 指向临时目录 | 下面几项的前置 |
 | `PFM_SELFTEST_FUNCTIONAL=1` | 端到端功能自检 | 必须配 `PFM_DATA_DIR` |
 | `PFM_SELFTEST_UI=1` | 真实事件序列点界面 | 必须配 `PFM_DATA_DIR` |
@@ -272,10 +281,13 @@ postinstall，二进制改成惰性下载，所以干净环境里 `npm ci` 之�
 | `PFM_SANDBOX_REQUIRED=1` | 沙箱启动失败时直接退出，不降级 | 只给 `test:sandbox-required` 使用 |
 | `PFM_SELFTEST_EVAL=<脚本>` | 页面加载后执行一段自检脚本 | 必须配 `PFM_DATA_DIR` |
 | `PFM_SELFTEST_IMPORT_FAIL_AFTER_FILES=1` | 完整备份写入正文后注入失败 | 只在 `PFM_SELFTEST=1` 时生效 |
+| `PFM_SELFTEST_IMPORT_FAIL_AFTER_VERSIONS=1` | 完整备份写完版本快照和索引（含版本说明）后注入失败 | 只在 `PFM_SELFTEST=1` 时生效 |
 | `PFM_SELFTEST_CONFIG_WRITE_FAIL=1` | 让配置写入失败 | 只在 `PFM_SELFTEST=1` 时生效 |
 | `PFM_SELFTEST_ZOOM=<倍数>` | 自检前设置页面缩放，范围 0.5 到 3 | 只给布局测试使用 |
 | `PFM_SELFTEST_CLOSE_UNSAVED=1` | 自定义脚本执行后触发关窗，验证未保存草稿保护 | 必须配 `PFM_DATA_DIR` |
 | `PFM_SELFTEST_CLOSE=<模式>` | 关窗落盘握手 | 必须配 `PFM_DATA_DIR` |
+| `PFM_SELFTEST_QUICK_LAUNCH=full\|startup-taken` | 快速搜索面板自检：模拟按快捷键呼出、搜索、复制、隐藏，比对两个窗口的安全配置；自己负责退出 | 必须配 `PFM_DATA_DIR` |
+| `PFM_SELFTEST_SHORTCUT_TAKEN=<键,键>` | 让自检用的快捷键替身假装这些键已被别的程序占用 | 只在 `PFM_SELFTEST=1` 时生效 |
 | `PFM_SELFTEST_READONLY=1` | 只读体检：每个文件能否读取/解析/渲染 | 只读，不写 |
 | `PFM_SELFTEST_DIALOGS=<json>` | 用队列文件替换系统对话框 | 顺序必须与调用顺序一致 |
 | `PFM_SELFTEST_OPEN=<相对路径>` | 启动后先打开指定文件 | |

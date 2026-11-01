@@ -34,6 +34,26 @@ for (const d of ['prompts', 'workflows', 'templates']) {
   const src = path.join(root, d);
   if (fs.existsSync(src)) copyDir(src, path.join(dataDir, d));
 }
+// 一个外部已删除文件的收藏和高频统计：usage.json 里有，库里没有。
+// 收藏区和常用列表必须把它过滤掉，否则用户点上去只会得到"打开失败"。
+// 次数给得很高、时间是现在，保证不过滤时它一定排进常用第一（否则这条断言分辨不出过滤有没有生效）。
+fs.writeFileSync(path.join(dataDir, 'usage.json'), JSON.stringify({
+  schema: 1,
+  items: { 'prompts/testing/外部已删除.md': { count: 50, lastUsedAt: Date.now() } },
+  favorites: ['prompts/testing/外部已删除.md']
+}, null, 2), 'utf8');
+
+// 文件树批量操作会弹原生确认框，自动化里由对话框桩按队列应答（见 installSelfTestDialogStubs）。
+// 顺序必须与 src/selftest/ui.js 里的调用顺序一致：
+//   1. 批量移动后"是否同步工作流引用"——两个被移动的文件都被同一个工作流引用，只问一次
+//   2. 批量删除的确认（列出锁定和被引用的文件）
+// 引用同步要是按文件各问一次，第二问会吃掉删除那一项，删除被当成取消，
+// 后面的删除断言全红，退出时还会剩下"队列已空"的报错——这正是要它变红的地方。
+const dialogQueuePath = path.join(dataDir, '__dialogs.json');
+fs.writeFileSync(dialogQueuePath, JSON.stringify([
+  { kind: 'message', response: 1 },   // 批量移动：同步引用 → 确定
+  { kind: 'message', response: 1 }    // 批量删除：确定
+]), 'utf8');
 
 const child = spawn(electronBin, [root], {
   cwd: root,
@@ -42,6 +62,7 @@ const child = spawn(electronBin, [root], {
     PFM_SELFTEST: '1',
     PFM_SELFTEST_READONLY: '1',
     PFM_SELFTEST_UI: '1',
+    PFM_SELFTEST_DIALOGS: dialogQueuePath,
     PFM_DATA_DIR: dataDir,
     ELECTRON_ENABLE_LOGGING: '1'
   },
@@ -67,6 +88,9 @@ const timeout = setTimeout(() => {
 
 child.on('exit', (code) => {
   clearTimeout(timeout);
+  // 清理前先读对话框队列：临时目录一删就没得看了
+  let queueLeft = -1;
+  try { queueLeft = JSON.parse(fs.readFileSync(dialogQueuePath, 'utf8')).length; } catch (_) { queueLeft = -1; }
   cleanup();
   // 这几条对应曾经真实坏掉过的功能，必须出现在输出里：
   // 1) 流程图解析整段失效（只解析出 1 个空步骤）
@@ -110,6 +134,10 @@ child.on('exit', (code) => {
     /\[selftest:ui\] PASS 按 Tab 焦点在弹层里循环（真的在移动）/,
     /\[selftest:ui\] PASS 弹层关闭后焦点归还给打开的按钮/,
     /\[selftest:ui\] PASS 关闭后不残留对话框属性/,
+    // 版本说明：从编辑区填写到历史抽屉显示的整条路径，以及说明随内容进入历史的语义。
+    /\[selftest:ui\] PASS 带说明保存后历史抽屉里能看到说明/,
+    /\[selftest:ui\] PASS Ctrl\+Shift\+S 聚焦说明框且不触发保存/,
+    /\[selftest:ui\] PASS 说明框里 Enter 保存，上一句说明随它描述的内容进入历史/,
     // 预览区就地填占位符。这几条要显式点名：整段包在 if (marks().length) 里，
     // 种子内容改了导致标记不上时，段里一条都不会输出，而"没有 FAIL"照样是绿的。
     /\[selftest:ui\] PASS 预览区把 \[占位符\] 标成了可点的 chip/,
@@ -117,13 +145,65 @@ child.on('exit', (code) => {
     /\[selftest:ui\] PASS 点 chip 会弹出就地填写框/,
     /\[selftest:ui\] PASS 填过的 chip 显示填进去的值/,
     /\[selftest:ui\] PASS 复制用的是填好的正文/,
-    /\[selftest:ui\] PASS 复制不会改动磁盘上的文件/
+    /\[selftest:ui\] PASS 复制不会改动磁盘上的文件/,
+    // 占位符的选项与默认值（种子 部署检查.md）。同样要点名，理由同上。
+    /\[selftest:ui\] PASS 有选项的 chip 带上了"可选"标记/,
+    /\[selftest:ui\] PASS 有默认值的 chip 显示默认值并带上"默认"标记/,
+    /\[selftest:ui\] PASS 就地填写有选项的占位符时出现下拉框，列出全部选项/,
+    /\[selftest:ui\] PASS 在下拉框里选一项会写进填写框/,
+    /\[selftest:ui\] PASS 就地填写框里 Shift\+Enter 不提交/,
+    /\[selftest:ui\] PASS 就地填写框里 Enter 提交，chip 显示选中的值/,
+    /\[selftest:ui\] PASS 复制时没改过的默认值按默认值填入/,
+    /\[selftest:ui\] PASS 复制面板里有默认值的框预填默认值，有选项的带下拉框/,
+    /\[selftest:ui\] PASS 复制面板里上次填过的值优先于默认值/,
+    // 装配器导出目标：默认值保证老用户行为不变，勾选落盘并在重开时恢复。
+    /\[selftest:ui\] PASS 装配器列出全部导出目标/,
+    /\[selftest:ui\] PASS 没存过勾选状态时默认只勾 CLAUDE\.md 和 \.cursorrules/,
+    /\[selftest:ui\] PASS 勾选导出目标后写进配置/,
+    /\[selftest:ui\] PASS 重新打开装配器时导出目标按配置恢复/,
+    // 收藏 / 常用 / 跟随文件。整段都依赖"右键菜单里找得到收藏"，找不到时后面的
+    // 检查虽然会 FAIL，但逐条点名才能保证改动之后它们一条都没被静静跳过。
+    /\[selftest:ui\] PASS 前置：usage\.json 里确实有外部已删除文件的收藏和统计/,
+    /\[selftest:ui\] PASS 右键菜单里有「收藏」/,
+    /\[selftest:ui\] PASS 收藏后侧边栏显示收藏区且列出这个文件/,
+    /\[selftest:ui\] PASS 收藏区不显示外部已删除的文件（不留幽灵条目）/,
+    /\[selftest:ui\] PASS 点收藏条目能打开对应文件/,
+    /\[selftest:ui\] PASS 复制成功记了次数和最后使用时间/,
+    /\[selftest:ui\] PASS 常用列表按使用排序且不显示外部已删除的文件/,
+    /\[selftest:ui\] PASS 取消复制不计入使用次数/,
+    /\[selftest:ui\] PASS 改名后收藏和统计跟着文件走/,
+    /\[selftest:ui\] PASS 删进回收站时保留收藏和统计/,
+    /\[selftest:ui\] PASS 从回收站恢复后收藏和统计还在/,
+    /\[selftest:ui\] PASS 清空回收站后统计和收藏一起清掉/,
+    // 文件树多选与批量操作。前置条件（B 夹在 A、C 之间 / 筛选真的把 B 藏起来了）也点名：
+    // 前置不成立时"跳过看不见的行"那条在有没有修复时都可能是绿的。
+    /\[selftest:ui\] PASS 多选：普通单击仍然打开文件且不进入多选/,
+    /\[selftest:ui\] PASS 多选：单击 A 后 Ctrl\+点击 C，两个都选中并出现批量条/,
+    /\[selftest:ui\] PASS 多选：Esc 清空选择/,
+    /\[selftest:ui\] PASS 多选前置：树上 B 夹在 A 和 C 之间/,
+    /\[selftest:ui\] PASS 多选前置：标签筛选把 B 隐藏了而 A、C 可见/,
+    /\[selftest:ui\] PASS 多选：Shift\+点击跳过被筛掉、看不见的行/,
+    /\[selftest:ui\] PASS 多选：折叠目录后目录里的选中项被剔掉、批量条收起/,
+    /\[selftest:ui\] PASS 批量：进行中再次触发被拦下/,
+    /\[selftest:ui\] PASS 批量移动：两个文件都移到了目标目录，同名的生成新名字/,
+    /\[selftest:ui\] PASS 批量移动：已打开的标签页跟着改路径/,
+    /\[selftest:ui\] PASS 批量移动：确认一次后两个文件的工作流引用都更新了/,
+    /\[selftest:ui\] PASS 批量打标签：多行列表保留写法并追加/,
+    /\[selftest:ui\] PASS 批量打标签：当前打开的标签页重读了磁盘/,
+    /\[selftest:ui\] PASS 批量删除：结果汇总列出被跳过的锁定文件及原因/,
+    /\[selftest:ui\] PASS 批量删除：锁定的文件还在/,
+    /\[selftest:ui\] PASS 批量删除：被删文件的标签页关掉了，当前标签切到相邻的那个/
   ];
   const missing = mustHave.filter(re => !re.test(out));
   if (missing.length) console.error('[test:ui] 缺少必需的检查项: ' + missing.map(String).join(', '));
+  // 对话框队列必须刚好被吃完：剩下的说明有一次该弹的框没弹（比如引用同步被跳过），
+  // 不够用（桩打出"队列已空"）说明多弹了框（比如引用同步按文件各问了一次）。
+  const dialogsOk = queueLeft === 0 && !/对话框桩：message 队列已空/.test(out);
+  console.log('[test:ui] ' + (dialogsOk ? 'PASS' : 'FAIL') + ' 原生确认框弹出次数与预期一致（队列剩 ' + queueLeft + ' 项）');
   const passed = code === 0
     && /\[selftest\] 全部通过/.test(out)
     && missing.length === 0
+    && dialogsOk
     && !/FAIL/.test(out);
   console.log('\n[test:ui] ' + (passed ? '通过' : '失败（exit=' + code + '）'));
   process.exit(passed ? 0 : 1);

@@ -44,6 +44,10 @@ html { font-size: calc(16px * var(--font-scale)); }
   --hover: #eef1f4;
   --ctx-hover: #e3e8ee;
   --selection: #dbeafe;
+  /* 文件树多选：底色和左侧色条分开两个 token。底色要和 --selection（当前打开的文件）
+     分得开，色条是不靠颜色深浅也能认出"被选中"的形状信号，对侧边栏底色要 3:1。 */
+  --multi-select-bg: #e0e7ff;
+  --multi-select-mark: #4338ca;
   --flow-edge: #2563eb;
   --diff-add-bg: #dcfce7;
   --diff-add-text: #166534;
@@ -77,6 +81,8 @@ html { font-size: calc(16px * var(--font-scale)); }
   --hover: #2a2d2e;
   --ctx-hover: #2d3134;
   --selection: #264f78;
+  --multi-select-bg: #3b2f63;
+  --multi-select-mark: #b4a7f5;
   --flow-edge: #6ba4f8;
   --diff-add-bg: #1a3a2a;
   --diff-add-text: #86efac;
@@ -201,6 +207,10 @@ body {
 .tree-row.focused,
 .tree-row:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .tree-row.locked .name { color: var(--text-muted); }
+/* 多选态写在 .active 之后：一行既是当前打开的文件又被选中时，选中态的底色和色条都要看得见。
+   色条用 inset box-shadow 画在行内，不占布局，也不会和焦点环（outline）互相盖住。 */
+.tree-row.multi-selected,
+.tree-row.multi-selected:hover { background: var(--multi-select-bg); box-shadow: inset 3px 0 0 var(--multi-select-mark); }
 .tree-row.drop-target { background: var(--selection); outline: 2px dashed var(--focus-ring); outline-offset: -2px; }
 .tree-row.file[draggable="true"]:active { cursor: grabbing; }
 .tree-row.file[draggable="true"] { cursor: grab; }
@@ -213,7 +223,55 @@ body {
 .tree-row.file .name { color: var(--text); }
 .tree-row.dir .name { color: var(--text); font-weight: 500; }
 
+/* 批量操作条：选中 2 个及以上文件时出现在树的上方。按钮允许换行，
+   侧边栏最窄 180px 时四个按钮一行放不下。 */
+.batch-bar {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 6px 8px; background: var(--bg-alt); border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.batch-count { font-size: 0.75rem; color: var(--text); }
+.batch-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.batch-actions button { padding: 3px 8px; font-size: 0.75rem; }
+.batch-actions button:disabled { opacity: .6; cursor: default; }
+.batch-tags-hint { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 6px; white-space: normal; }
+.batch-report-list { list-style: none; max-height: 40vh; overflow-y: auto; margin: 6px 0; }
+.batch-report-item { display: flex; flex-wrap: wrap; gap: 6px; padding: 3px 0; font-size: 0.75rem; color: var(--text); }
+.batch-report-item.failed .batch-report-kind { color: var(--danger-text); font-weight: 600; }
+.batch-report-item.skipped .batch-report-kind { color: var(--text-muted); font-weight: 600; }
+.batch-report-reason { color: var(--text-muted); flex-basis: 100%; white-space: normal; }
+
 .search-results { padding: 4px 8px; }
+
+/* ===== 侧边栏：收藏 / 常用 ===== */
+/* 高度封顶 + 自己滚动：收藏攒多了也不能把文件树挤没。800x500 最小窗口下
+   侧边栏只有三百来像素高，不封顶的话十几条收藏就把树压成 0 高（.tree 是 flex: 1，
+   min-height 为 0 时会被让到一点不剩），layout-small 盯着这一条。 */
+.usage-panel {
+  flex-shrink: 0; max-height: 35%; display: flex; flex-direction: column;
+  border-bottom: 1px solid var(--border); min-height: 0;
+}
+.usage-tabs { display: flex; gap: 2px; padding: 4px 6px 0; flex-shrink: 0; }
+.usage-tab {
+  flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-muted);
+  font-size: 0.75rem; padding: 3px 4px; cursor: pointer;
+}
+.usage-tab:hover { color: var(--text); }
+.usage-tab.active { color: var(--text); border-bottom-color: var(--primary); font-weight: 500; }
+.usage-tab:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.usage-list { overflow-y: auto; padding: 2px 0 4px; min-height: 0; }
+.usage-item {
+  display: flex; align-items: center; gap: 4px; width: 100%;
+  padding: 3px 8px; background: none; border: none; border-radius: 4px;
+  font-size: 0.8125rem; color: var(--text); text-align: left; cursor: pointer; white-space: nowrap;
+}
+.usage-item:hover { background: var(--hover); }
+.usage-item:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.usage-item .us-icon { width: 16px; text-align: center; flex-shrink: 0; }
+.usage-item .us-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.usage-item .us-count { flex-shrink: 0; font-size: 0.6875rem; color: var(--text-muted); }
+.usage-empty { padding: 4px 10px; font-size: 0.75rem; color: var(--text-muted); white-space: normal; }
 .search-item {
   padding: 6px 8px; border-radius: 4px; cursor: pointer; margin-bottom: 2px;
 }
@@ -336,6 +394,17 @@ body {
 .preview-wrap { flex: 1; overflow-y: auto; padding: 20px 28px; min-height: 0; }
 .preview { max-width: 780px; }
 
+/* 外部改动提示条。不用弹窗：用户可能正打着字，提示不该抢焦点或挡住编辑器。
+   配色沿用 meta-bar 的 bg-alt + text，靠左侧的 danger 色边区分出来。 */
+.external-notice {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px;
+  padding: 6px 14px; flex-shrink: 0; font-size: 0.8125rem;
+  background: var(--bg-alt); color: var(--text);
+  border-bottom: 1px solid var(--border); border-left: 4px solid var(--danger);
+}
+.external-notice-text { flex: 1; min-width: 0; }
+.external-notice-actions { display: flex; gap: 4px; }
+
 /* 占位符提示行。它和正文一起滚动，不吸顶：吸顶会挤掉正文的可视高度，
    而这条提示只在"有占位符且还没填完"时出现，本来就是过渡状态。 */
 .fill-hint-bar {
@@ -358,6 +427,19 @@ body {
 @media (prefers-color-scheme: dark) {
   .preview mark.ph-filled { background: color-mix(in srgb, var(--primary) 26%, transparent); }
 }
+/* 填进去的值可能是多行（粘贴的报错 / 代码），不保留换行的话预览里会挤成一行。 */
+.preview mark.ph-filled { white-space: pre-wrap; }
+/* 有默认值 / 有选项的 chip 带一个小角标。文字来自 data-badge（走 i18n），
+   放在伪元素里而不是 DOM 里：自检按 textContent 比对 chip 显示的值。
+   "/ ''" 是伪元素的替代文本：读屏软件不重复念角标，含义已经写在 title 里。 */
+.preview mark.ph[data-badge]::after {
+  content: attr(data-badge) / '';
+  margin-left: 3px; padding: 0 4px; border-radius: 3px; vertical-align: 1px;
+  font-size: 0.6875rem; line-height: 1.4;
+  background: var(--bg-alt); border: 1px solid var(--border); color: var(--text-muted);
+}
+/* 没填、显示的是默认值：用斜体和"已填"的实底色区分开，一眼看得出不是用户填的。 */
+.preview mark.ph-default:not(.ph-filled) { font-style: italic; }
 .editor-wrap { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 12px 14px; }
 .editor {
   flex: 1; width: 100%; resize: none; border: 1px solid var(--border); border-radius: 6px;
@@ -367,6 +449,13 @@ body {
 }
 .editor:focus { border-color: var(--focus-ring); box-shadow: 0 0 0 2px var(--focus-ring); }
 .editor-actions { display: flex; gap: 8px; justify-content: flex-end; padding-top: 10px; flex-shrink: 0; }
+/* 版本说明输入框占掉按钮左侧的剩余宽度；min-width: 0 让窄窗口下它先缩，按钮不被挤出去。 */
+.version-note-input {
+  flex: 1 1 auto; min-width: 0; max-width: 420px; padding: 5px 8px;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg); color: var(--text); font-size: 0.8125rem; outline: none;
+}
+.version-note-input:focus { border-color: var(--focus-ring); box-shadow: 0 0 0 2px var(--focus-ring); }
 
 /* ===== Markdown 渲染 ===== */
 .markdown-body { line-height: 1.7; user-select: text; -webkit-user-select: text; }
@@ -508,6 +597,14 @@ mark {
 .version-item .vi-time { flex: 1; font-size: 0.8125rem; }
 .version-item .vi-time small { display: block; color: var(--text-muted); font-size: 0.6875rem; margin-top: 2px; }
 .version-item .vi-actions { display: flex; gap: 4px; }
+/* 版本说明按单行省略显示，全文放在 title 里；min-width: 0 才能让 flex 子项真的省略。 */
+.version-item .vi-time { min-width: 0; }
+.version-item .vi-note {
+  display: block; margin-top: 3px; font-size: 0.75rem; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.version-item.current { border-color: var(--border); }
+.version-note-hint { padding: 4px 12px 8px; font-size: 0.6875rem; color: var(--text-muted); }
 /* 回滚是破坏性操作，要红色警示。同样不能用内联 style（见 .ctx-prompt-actions.stacked）。 */
 .btn-link.danger { color: var(--danger-text); }
 .pin-btn { cursor: pointer; font-size: 1rem; opacity: .85; border: none; background: none; }
@@ -569,6 +666,8 @@ mark {
 }
 .settings-toggle input { cursor: pointer; }
 .settings-hint { font-size: 0.6875rem; color: var(--text-muted); margin: 8px 0 0; }
+/* 全局快捷键注册失败（被别的程序占用）时状态行变红：这条必须一眼看得出来 */
+.settings-hint.error { color: var(--danger-text); }
 .types-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
 .type-tag {
   display: flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 10px;
@@ -590,6 +689,16 @@ mark {
   background: var(--bg); color: var(--text); font-size: 0.8125rem; outline: none;
 }
 .ctx-prompt-input:focus { border-color: var(--focus-ring); box-shadow: 0 0 0 2px var(--focus-ring); }
+/* 占位符填写框是 textarea（理由见 renderer.js 的 placeholderFieldHtml）。
+   field-sizing: content 让它随内容自动增高，单行时和 <input> 一样高；
+   max-height 防止粘进一大段日志把弹层顶出视口，超出后框内滚动。 */
+.fill-input {
+  display: block; resize: none; field-sizing: content;
+  min-height: calc(1.5em + 12px); max-height: 40vh; overflow-y: auto;
+  font-family: inherit; line-height: 1.5;
+}
+.fill-select { display: block; margin-bottom: 4px; }
+.fill-keys { margin-top: 6px; font-size: 0.6875rem; color: var(--text-muted); }
 .ctx-prompt-actions {
   display: flex; gap: 6px; justify-content: flex-end; margin-top: 8px;
 }
@@ -658,6 +767,8 @@ mark {
 }
 .comp-choice:hover { background: var(--hover); }
 .comp-choice input { cursor: pointer; }
+.comp-target-path { font-family: var(--mono); font-size: 0.75rem; }
+.comp-target-hint { color: var(--text-muted); font-size: 0.71875rem; margin-left: auto; text-align: right; }
 .composer-preview-header { margin-bottom: 6px; }
 .composer-preview-header label { font-size: 0.75rem; font-weight: 600; color: var(--text); }
 .composer-preview {

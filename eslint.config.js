@@ -28,8 +28,12 @@ const rendererGlobals = {
   PLACEHOLDERS: 'readonly',
   INCLUDES: 'readonly',
   COMPOSER_META: 'readonly',
+  // src/rule-targets.js：规则导出目标清单与内容生成
+  RULE_TARGETS: 'readonly',
   // src/flow-graph.js 声明的常量（renderer.js 里只读）
-  FLOW_GRAPH: 'readonly'
+  FLOW_GRAPH: 'readonly',
+  // src/tree-selection.js 声明的文件树多选模型
+  TREE_SELECTION: 'readonly'
 };
 
 // src/selftest/*.js 是由主进程读成文本、丢进页面上下文执行的，所以 renderer.js
@@ -60,6 +64,16 @@ const selftestRendererGlobals = {
   toast: 'readonly',
   refreshReferences: 'readonly',
   copyContent: 'readonly',
+  // 占位符扩展语法的自检要直接打开复制面板看预填值（就地填过之后 copyContent
+  // 不会再弹面板），以及从当前正文取 token 列表。
+  promptFillPlaceholders: 'readonly',
+  parseFrontmatter: 'readonly',
+  // 收藏 / 常用区：自检要在改名、删除、恢复之后重画并读回 DOM
+  renderUsage: 'readonly',
+  t: 'readonly',               // 按当前语言取文案，断言菜单项/标签文字时用
+  // 文件树多选：自检要能清空选择、绕过按钮禁用直接再触发一次批量入口（验证忙碌拦截）
+  clearTreeSelection: 'readonly',
+  batchMoveSelected: 'readonly',
   // 自检要能取消当前弹层（fillPlaceholderInline 弹的输入框没人点就会挂住），
   // 这是 renderer.js 里"当前弹层的 resolve 入口"，自检通过它收尾。
   pendingPromptDone: 'writable'
@@ -142,7 +156,7 @@ module.exports = [
   },
   {
     // 主进程、测试、构建脚本：Node CommonJS
-    files: ['electron-main.js', 'preload.js', 'lib/**/*.js', 'tests/**/*.js', 'scripts/**/*.js', 'eslint.config.js'],
+    files: ['electron-main.js', 'preload.js', 'quick-launch-preload.js', 'lib/**/*.js', 'tests/**/*.js', 'scripts/**/*.js', 'eslint.config.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'commonjs',
@@ -155,6 +169,18 @@ module.exports = [
     // sourceType 必须是 script 而不是 module —— 这几个文件是靠 <script> 标签
     // 加载的，顶层的 const 就是全局声明，不是模块作用域。
     files: ['src/renderer.js'],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'script',
+      globals: { ...globals.browser, ...rendererGlobals }
+    },
+    rules: correctnessRules
+  },
+  {
+    // 快速搜索面板的页面脚本：和 renderer.js 一样是浏览器 + script，依赖同一批
+    // <script> 全局。单独一段而不是并进 renderer.js 那段：smoke 测试按
+    // files: ['src/renderer.js'] 这个字面量定位 renderer 的配置块。
+    files: ['src/quick-launch.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',
@@ -183,7 +209,7 @@ module.exports = [
   {
     // 双用模块：浏览器里当 <script>，主进程里被 require。
     // 两套 global 都要给，否则结尾那句 typeof module !== 'undefined' 会报 no-undef。
-    files: ['src/i18n.js', 'src/frontmatter.js', 'src/placeholders.js', 'src/includes.js', 'src/composer-meta.js', 'src/workflow-refs.js', 'src/flow-graph.js'],
+    files: ['src/i18n.js', 'src/frontmatter.js', 'src/placeholders.js', 'src/includes.js', 'src/composer-meta.js', 'src/rule-targets.js', 'src/workflow-refs.js', 'src/flow-graph.js', 'src/tree-selection.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',

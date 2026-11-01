@@ -23,6 +23,17 @@ function makeDataDir(c) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pfm-layout-small-'));
   fs.mkdirSync(path.join(dir, 'prompts', 'testing'), { recursive: true });
   fs.writeFileSync(path.join(dir, rel), '---\ntitle: Small Layout With A Very Long Prompt Title For Overflow Checks\n---\nbody', 'utf8');
+  // 侧边栏收藏区塞满：15 条收藏、每条都有统计。收藏区没封顶的话，800x500 下
+  // 它会把文件树挤到 0 高（.tree 是 flex: 1，会被让到一点不剩）。
+  const favs = [];
+  const items = {};
+  for (let i = 0; i < 15; i++) {
+    const r = 'prompts/testing/favorite-with-a-fairly-long-name-' + i + '.md';
+    fs.writeFileSync(path.join(dir, r), '---\ntitle: Favorite With A Fairly Long Name ' + i + '\n---\nbody', 'utf8');
+    favs.push(r);
+    items[r] = { count: 15 - i, lastUsedAt: Date.now() };
+  }
+  fs.writeFileSync(path.join(dir, 'usage.json'), JSON.stringify({ schema: 1, items, favorites: favs }), 'utf8');
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ lang: c.lang, theme: c.theme, windowBounds: { width: 800, height: 500 } }), 'utf8');
   return dir;
 }
@@ -66,10 +77,22 @@ function scriptFor(c) {
     const overflowX = document.documentElement.scrollWidth > innerWidth;
     const editorHeight = $('editor').getBoundingClientRect().height;
     const unnamed = [...responsiveIds, 'btn-filter-toggle'].filter(id => !($(id).getAttribute('aria-label') || $(id).textContent.trim()));
+    // 侧边栏：收藏区真的显示出来了（前提，否则下面几条在空面板上恒真），
+    // 文件树仍留着至少几行的高度，收藏区和两个标签都在侧边栏里、没溢出窗口。
+    const usage = $('usage-panel').getBoundingClientRect();
+    const sidebar = document.querySelector('.sidebar').getBoundingClientRect();
+    const tree = $('tree').getBoundingClientRect();
+    const usageShown = !$('usage-panel').classList.contains('hidden') && document.querySelectorAll('#usage-list .usage-item').length >= 10;
+    const tabsInside = Array.from(document.querySelectorAll('#usage-panel .usage-tab')).every(el => {
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.left >= sidebar.left - 1 && r.right <= sidebar.right + 1;
+    });
+    const sidebarOk = usageShown && tabsInside && tree.height >= 80
+      && usage.bottom <= tree.top + 1 && usage.right <= sidebar.right + 1 && sidebar.bottom <= innerHeight + 1;
     const ok = (innerWidth > 680 || menuItems === 4) && hidden.length === 0 && wrappedText.length === 0 && unnamed.length === 0 && editorHeight >= ${c.zoom > 1.3 ? 70 : c.zoom > 1 ? 100 : 140}
-      && save.bottom <= status.top && cancel.bottom <= status.top && !overflowX;
+      && save.bottom <= status.top && cancel.bottom <= status.top && !overflowX && sidebarOk;
     console.log(ok ? '[layout-small] PASS 最小窗口下主要按钮都可见'
-      : '[layout-small] FAIL ' + JSON.stringify({ zoom: ${c.zoom}, size: [innerWidth, innerHeight], actions: [actions.left, actions.right], hidden, menuItems, wrappedText, unnamed, editorHeight, save: save.bottom, status: status.top, overflowX }));
+      : '[layout-small] FAIL ' + JSON.stringify({ zoom: ${c.zoom}, size: [innerWidth, innerHeight], actions: [actions.left, actions.right], hidden, menuItems, wrappedText, unnamed, editorHeight, save: save.bottom, status: status.top, overflowX, sidebar: { usageShown, tabsInside, tree: tree.height, usage: [usage.top, usage.bottom], sidebar: [sidebar.top, sidebar.bottom] } }));
   })()`;
 }
 

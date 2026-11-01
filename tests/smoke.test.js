@@ -391,10 +391,28 @@ section('ZIP 真实往返（压缩 → 解压）');
   // 一个不落在 safeJoinWritable 白名单内的落盘点。目录由用户弹框确认，
   // 但"写哪个文件名"必须由白名单收紧——否则渲染进程被外部内容劫持后，
   // 这套入口能把它变成任意文件写入器（basename 只能挡 ../，挡不了这个）。
-  assert(/const RULE_EXPORT_ALLOWED = new Set\(\['CLAUDE\.md', '\.cursorrules'\]\)/.test(mainSrc),
-    '导出规则有文件名白名单常量（CLAUDE.md / .cursorrules）');
+  //
+  // 白名单现在是一组带子目录的固定相对路径。这里按**相等**比，不按"包含"比：
+  // 只查"里面有 CLAUDE.md"的话，往集合里多塞一条 '../x' 或 'C:/x' 照样全绿。
+  // 期望值取自 src/rule-targets.js（渲染进程实际会发的路径），所以两个方向都卡：
+  // 渲染进程多了一个目标而白名单没跟上（导出时被静默丢掉），或白名单多出一条
+  // 没人用的路径（多出来的就是给被劫持的渲染进程准备的写入口）。
+  // 集合体里只允许出现单引号字符串，防止有人改成从别的模块展开进来。
+  {
+    const m = mainSrc.match(/const RULE_EXPORT_ALLOWED = new Set\(\[([\s\S]*?)\]\);/);
+    const body = m ? m[1] : '';
+    const literal = /^(\s*'[^'\n]*'\s*,?)*\s*$/.test(body);
+    const allowedPaths = [...body.matchAll(/'([^'\n]*)'/g)].map(x => x[1]).sort();
+    const RULE_TARGETS = require('../src/rule-targets.js');
+    const targetPaths = RULE_TARGETS.list.map(t => t.path).sort();
+    assert(!!m && literal && allowedPaths.length > 0,
+      '导出规则有相对路径白名单常量，且只由字符串字面量组成');
+    const same = JSON.stringify(allowedPaths) === JSON.stringify(targetPaths);
+    assert(same, '导出规则白名单与 src/rule-targets.js 的目标路径完全一致' +
+      (same ? '' : '：main=' + JSON.stringify(allowedPaths) + ' targets=' + JSON.stringify(targetPaths)));
+  }
   const ruleExportSrc = fs.readFileSync(path.join(root, 'lib/rule-export.js'), 'utf8');
-  assert(/ruleExport\.plan\(targetDir, payload\.files, RULE_EXPORT_ALLOWED\)/.test(mainSrc)
+  assert(/ruleExport\.plan\(targetDir, payload\.files, RULE_EXPORT_ALLOWED, \{ appError \}\)/.test(mainSrc)
     && /allowed\.has\(name\)/.test(ruleExportSrc),
   '导出规则 handler 真的校验白名单');
 
@@ -650,8 +668,11 @@ section('预览区占位符');
   assert(/state\.previewFills\[/.test(rendererSrc), '就地填写的值有独立存放处');
   assert(/const inline = state\.previewFills\[state\.currentRel\] \|\| \{\};/.test(rendererSrc),
     'copyContent 读就地填写的值');
-  assert(/if \(inlineCount\) \{[\s\S]{0,200}?writeClipboard\(PLACEHOLDERS\.fill\(body, inline\)\)/.test(rendererSrc),
-    '填过就不再弹面板，直接用填好的正文');
+  // 就地填过的值先并上默认值（没点过的默认值 chip 按默认值复制），再填进正文。
+  // 两步要锚在同一个 merged 上：只查 withDefaults 出现过的话，算完不用、
+  // 照旧 fill(body, inline) 也能通过。
+  assert(/if \(inlineCount\) \{\s*const merged = PLACEHOLDERS\.withDefaults\(body, inline\);\s*await writeClipboard\(PLACEHOLDERS\.fill\(body, merged\)\)/.test(rendererSrc),
+    '填过就不再弹面板，直接用填好的正文（没填的按默认值）');
 }
 
 section('原子写的 durability');
@@ -707,6 +728,55 @@ section('工作流引用索引');
     'meta-bar 上的引用 chip 绑了点击');
   assert(/const seq = \+\+refsSeq;/.test(rendererSrc) && /if \(seq !== refsSeq \|\| state\.currentRel !== rel\) return;/.test(rendererSrc),
     '引用查询有切文件守卫');
+}
+
+section('使用统计与收藏');
+// 纯逻辑（计数、淘汰、迁移、排序、闸门）由 test:usage-store 带反向对照验；
+// 点击路径、跟随改名/回收站由 test:ui 验。这里只盯那几处"接错了也不会立刻有测试红"的接线。
+{
+  // 写入必须过 'usage' 队列：queueWrite 里套着导入闸门，传一个直接执行的 queue
+  // 进去，导入期间的统计写入就会插进导入中间（被它的回滚卷走或覆盖）。
+  assert(/createUsageStore\(\{[\s\S]{0,200}?queue: \(fn\) => queueWrite\('usage', fn\)/.test(mainSrc),
+    '统计写入走 usage 队列（因而受导入闸门约束）');
+  // 本机数据，跟 config.json 放一起；放 DATA_ROOT 的话开发模式下会写进仓库根目录
+  assert(/const USAGE_PATH = path\.join\(path\.dirname\(CONFIG_PATH\), 'usage\.json'\)/.test(mainSrc),
+    'usage.json 和 config.json 在同一目录');
+  // 自愈要扫到它的临时文件。开发模式下这个目录不是 DATA_ROOT，test:heal 构造不出那种分叉
+  // （PFM_DATA_DIR 一设两者就重合），所以只能静态卡住。
+  assert(/await walk\(path\.dirname\(USAGE_PATH\), false\)/.test(mainSrc),
+    '启动自愈扫描 usage.json 所在目录的顶层');
+  // 改名后迁移、清空回收站后清理，而且都在各自的锁之外（usage 不嵌套占锁）
+  {
+    // 迁移在 renameEntry 里而不是 rename handler 里：批量移动也走 renameEntry，
+    // 放在 handler 里的话批量移动过的文件会丢掉统计和收藏。
+    assert(/ipcMain\.handle\('rename', async \(e, oldRel, newRel\) => renameEntry\(oldRel, newRel\)\)/.test(mainSrc),
+      'rename handler 走 renameEntry（与批量移动同一条路）');
+    const at = mainSrc.indexOf('async function renameEntry(oldRel, newRel) {');
+    const body = at > 0 ? mainSrc.slice(at, at + 900) : '';
+    assert(/await queueWriteMulti\([^\n]*renameEntryLocked\(oldRel, newRel\)\);[\s\S]*await usageStore\.migrate\(/.test(body),
+      '改名成功后统计和收藏跟着迁移');
+    const et = mainSrc.indexOf("ipcMain.handle('empty-trash'");
+    const ebody = et > 0 ? mainSrc.slice(et, et + 1400) : '';
+    assert(/await queueWrite\('trash', \(\) => trashStore\.empty\(\)\)/.test(ebody)
+      && /removed\.map\(/.test(ebody) && /await usageStore\.forget\(/.test(ebody),
+    '清空回收站后按真正删掉的条目清理统计（在 trash 锁之外）');
+  }
+  for (const k of ['recordUsage', 'getUsage', 'setFavorite']) {
+    assert(new RegExp('\\b' + k + ': ').test(preloadSrc), 'preload 暴露 ' + k);
+  }
+  // copyContent 里每次写剪贴板之后紧跟着记账，且记账只出现在这些位置——
+  // 取消填充面板（return false）那条路上不能有。
+  {
+    const at = rendererSrc.indexOf('async function copyContent()');
+    const end = at > 0 ? rendererSrc.indexOf('\n}\n', at) : -1;
+    const body = end > at ? rendererSrc.slice(at, end) : '';
+    const writes = (body.match(/await writeClipboard\([^;]*\);/g) || []).length;
+    const paired = (body.match(/await writeClipboard\([^;]*\);\s*recordUsage\(rel\);/g) || []).length;
+    const calls = (body.match(/recordUsage\(/g) || []).length;
+    assert(writes >= 3 && paired === writes && calls === writes,
+      'copyContent 每次复制成功都记一次使用，别处不记（' + paired + '/' + writes + '，共 ' + calls + ' 处）');
+    assert(/if \(values === null\) return false;/.test(body), '复制取消仍然返回 false（不记账的那条路还在）');
+  }
 }
 
 section('界面字号缩放');
@@ -1554,6 +1624,73 @@ section('调试残留');
       assert(/userAgent: o\.userAgent \|\| 'Prompt-Flow-Manager'/.test(updCode),
         'User-Agent 是固定常量（不拼接任何本机信息）');
     }
+  }
+
+  section('全局快捷键快速搜索面板');
+  // 行为（呼出、搜索、复制、隐藏、两个窗口的 webPreferences 逐项一致）由 test:quick-launch
+  // 在真实 Electron 里验。这里卡的是那边结构上看不到的几条：
+  {
+    const qlSrc = fs.readFileSync(path.join(root, 'src/quick-launch.js'), 'utf8');
+    const qlHtml = fs.readFileSync(path.join(root, 'src/quick-launch.html'), 'utf8');
+    const qlPreload = fs.readFileSync(path.join(root, 'quick-launch-preload.js'), 'utf8');
+    const I18NQ = require('../src/i18n.js');
+    // 面板文案同样走 i18n。renderer.js 那条检查只扫 renderer.js，新文件不会自动进来。
+    const bad = collectUnexemptedCjk('src/quick-launch.js');
+    assert(bad.length === 0, 'quick-launch.js 无未标注豁免的硬编码中文' + (bad.length ? '，违规行：\n      ' + bad.join('\n      ') : ''));
+    const used = new Set();
+    for (const m of qlSrc.matchAll(/\bt\('([^']+)'/g)) used.add(m[1]);
+    for (const m of qlHtml.matchAll(/data-i18n(?:-[a-z]+)?="([^"]+)"/g)) used.add(m[1]);
+    const missing = [...used].filter(k => !(k in I18NQ.zh) || !(k in I18NQ.en));
+    assert(used.size >= 8 && missing.length === 0,
+      '面板用到的 i18n 键中英都存在（' + used.size + ' 个）' + (missing.length ? '，缺失：' + missing.join(', ') : ''));
+    // 不留顶层声明：面板页面和 i18n.js / placeholders.js 等共享一个全局词法作用域，
+    // 顶层 const 撞名会让整段脚本不执行（踩过的坑第 2 条）。整个文件必须是一个 IIFE。
+    const code = qlSrc.split(/\r?\n/).filter(l => !/^\s*\/\//.test(l)).join('\n').trim();
+    assert(/^\(function \(\) \{[\s\S]*\}\)\(\);$/.test(code) && !/^(const|let|var|function|class)\s/m.test(qlSrc),
+      'quick-launch.js 整个包在 IIFE 里，没有顶层声明');
+    // CSP 逐字一致。运行时也会比一次，但那次只在面板真的被建出来之后才跑得到
+    const csp = (s) => (s.match(/http-equiv="Content-Security-Policy" content="([^"]+)"/) || [])[1];
+    assert(!!csp(qlHtml) && csp(qlHtml) === csp(htmlSrc), '面板页面的 CSP 与 index.html 逐字一致');
+    // 依赖脚本要在 quick-launch.js 之前加载（它在 IIFE 顶部就取用这些全局）
+    const order = ['i18n.js', 'frontmatter.js', 'placeholders.js', 'includes.js', 'quick-launch.js']
+      .map(f => qlHtml.indexOf('src="' + f + '"'));
+    assert(order.every((v, i) => v > 0 && (i === 0 || v > order[i - 1])), '面板按顺序加载 i18n / frontmatter / placeholders / includes / quick-launch.js');
+    // 面板窗口的创建参数。只在 createQuickPanel 的函数体里查：主窗口那段也写着
+    // contextIsolation: true / sandbox: sandboxActive，全文匹配等于恒真。
+    const at = mainSrc.indexOf('function createQuickPanel()');
+    const end = at > 0 ? mainSrc.indexOf('\n}\n', at) : -1;
+    const body = at > 0 && end > at ? mainSrc.slice(at, end) : '';
+    assert(body.length > 200, '取到了 createQuickPanel 的函数体');
+    assert(/sandbox: sandboxActive/.test(body) && !/sandbox: (true|false)/.test(body),
+      '面板的沙箱取主窗口同一个 sandboxActive（不写死，两个半边的判定只有一份）');
+    assert(/contextIsolation: true/.test(body) && /nodeIntegration: false/.test(body), '面板 contextIsolation 开、nodeIntegration 关');
+    assert(/preload: path\.join\(CODE_ROOT, 'quick-launch-preload\.js'\)/.test(body), '面板 preload 从 CODE_ROOT 加载（打包后在 asar 内）');
+    assert(/loadFile\(path\.join\(CODE_ROOT, 'src', 'quick-launch\.html'\)\)/.test(body), '面板页面从 CODE_ROOT 加载');
+    assert(/setWindowOpenHandler\(\(\) => \(\{ action: 'deny' \}\)\)/.test(body), '面板禁止 window.open');
+    assert(/on\('will-navigate'[\s\S]*?e\.preventDefault\(\)/.test(body), '面板拦截页内导航');
+    assert((pkg.build.files || []).includes('quick-launch-preload.js'), 'build.files 打包了 quick-launch-preload.js（不在 src/ 下，不被 src/**/* 覆盖）');
+    // 面板专用通道核对发送方。preload 白名单只把它们给了面板，但 IPC 通道是全局的。
+    for (const ch of ['quick-launch-copy', 'quick-launch-hide']) {
+      const i = mainSrc.indexOf("ipcMain.handle('" + ch + "'");
+      const h = i > 0 ? mainSrc.slice(i, i + 200) : '';
+      assert(/if \(!isQuickPanelSender\(e\)/.test(h), ch + ' 只认面板自己发来的请求');
+    }
+    // 退出前注销。在 will-quit 处理体里查：unregisterAll 在 lib/quick-launch.js 里也有一处。
+    // will-quit 可能挂了不止一个处理器（外部改动感知也在那里关 watcher），逐个查。
+    {
+      const bodies = [];
+      for (let i = mainSrc.indexOf("app.on('will-quit'"); i >= 0; i = mainSrc.indexOf("app.on('will-quit'", i + 1)) {
+        bodies.push(mainSrc.slice(i, i + 300));
+      }
+      assert(bodies.some(h => /shortcutController\.unregisterAll\(\)/.test(h)), '退出前（will-quit）注销全部全局快捷键');
+    }
+    // 自检不注册真实快捷键：并行的测试进程会互相"占用"，还会抢开发机的按键
+    assert(/const shortcutBackend = process\.env\.PFM_SELFTEST === '1'\s*\? quickLaunch\.createFakeGlobalShortcut/.test(mainSrc),
+      '自检模式下用内存替身代替真实的 globalShortcut');
+    assert(/'quickLaunchEnabled', 'quickLaunchShortcut'/.test(mainSrc), '已知配置键清单含 quickLaunchEnabled / quickLaunchShortcut');
+    assert(/quickLaunchEnabled: false/.test(mainSrc), '全局快捷键默认关闭');
+    assert(/exposeInMainWorld\('quickLaunchApi'/.test(qlPreload) && !/ipcRenderer\.invoke\('(save-file|trash|export-zip|import-zip|set-config)'/.test(qlPreload),
+      '面板 preload 是最小白名单（没有写操作）');
   }
 
   section('i18n 键完整性');

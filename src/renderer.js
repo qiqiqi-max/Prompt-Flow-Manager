@@ -92,9 +92,16 @@ const state = {
   tabs: [],                   // 多标签页：[{rel, content, meta, scroll}]
   activeTab: null,            // 当前激活标签的 rel
   fillMemory: {},             // 占位符填充记忆：token 原文 -> 上次填的值（见 rememberFillValues）
+  quickLaunch: null,          // 全局快捷键状态（主进程给的 { enabled, shortcut, registered, error }）
   currentRefs: [],            // 当前文件的被引用列表（工作流 rel），见 refreshReferences
   danglingCount: 0,           // 全库悬空引用条数：工作流引用的文件已经不在了
-  previewFills: {}            // 预览区就地填过的占位符：rel -> { token: 值 }，见 enhancePreviewPlaceholders
+  previewFills: {},           // 预览区就地填过的占位符：rel -> { token: 值 }，见 enhancePreviewPlaceholders
+  // 使用统计与收藏的快照，主进程 usage.json 的视图（见 lib/usage-store.js）。
+  // frequent 已按"常用"综合分排好序；这里不重排，只按 metaByRel 过滤掉已不在库里的条目。
+  usage: { favorites: [], frequent: [] },
+  usagePanelTab: null,        // 侧边栏收藏/常用区当前显示哪一栏；null = 自动挑有内容的那栏
+  treeSelection: TREE_SELECTION.empty(), // 文件树多选：{ selected: Set<rel>, anchor }，见 syncTreeSelection
+  batchRunning: false         // 批量操作进行中（禁止重复触发，见 runBatch）
 };
 
 // ===== 工具 =====
@@ -325,6 +332,11 @@ async function refreshTree() {
   updateStatusCounts();
   renderStats();
   renderRecent();
+  // 先用手上的快照按新的 metaByRel 重画一遍（刚删进回收站的文件立刻从收藏区消失），
+  // 再去主进程取一次新的：改名/清空回收站之后统计是主进程那边迁过去的，渲染进程不重算。
+  // 不 await：统计只影响侧边栏一块区域，不该拖慢树的刷新。
+  renderUsage();
+  refreshUsage();
   // 元数据变了，引用关系和悬空体检也要跟着刷新：删除/改名一个提示词之后，
   // 打开着的工作流那一页的引用列表不能还停在旧结果上。
   refreshReferences();
@@ -394,6 +406,15 @@ function renderTree() {
       if (e.key === 'ArrowDown') idx = idx + 1 >= rows.length ? 0 : idx + 1;
       else idx = idx - 1 < 0 ? rows.length - 1 : idx - 1;
       rows[idx].focus();
+      // Shift+方向键扩展选择：起点是按键前所在的文件行（还没有锚点时）。
+      // 只在落到文件行上时扩展，目录行不参与选择。
+      if (e.shiftKey && rows[idx].__rel) {
+        if (state.treeSelection.anchor == null && current && current.__rel) {
+          state.treeSelection = TREE_SELECTION.focusAnchor(current.__rel);
+        }
+        state.treeSelection = TREE_SELECTION.range(state.treeSelection, rows[idx].__rel, treeFileRows(), false);
+        syncTreeSelection();
+      }
     } else if (e.key === 'Enter' || e.key === ' ') {
       const row = document.activeElement && document.activeElement.closest
         ? document.activeElement.closest('.tree-row') : null;
@@ -447,6 +468,9 @@ function buildTreeNode(node, depth) {
         children.classList.remove('hidden');
         caret.textContent = '▼';
       }
+      // 折叠之后，目录里被选中的文件已经看不见了，要从选择里剔掉：
+      // 批量删除不能删掉用户此刻在屏幕上看不到的文件。
+      syncTreeSelection();
       // 同步到 config（节流）
       saveExpandedPathsDebounced();
     });
@@ -484,7 +508,7 @@ function buildTreeNode(node, depth) {
       if (m.meta.description) tipParts.push(m.meta.description);
     }
     row.title = tipParts.join('\n');
-    row.addEventListener('click', () => openFile(node.rel));
+    row.addEventListener('click', (e) => onTreeFileClick(e, node.rel));
     row.tabIndex = -1; // 允许聚焦但不参与 tab 导航
     if (state.currentRel === node.rel) row.classList.add('active');
     // 拖拽：文件可拖
@@ -524,6 +548,67 @@ function labelForDir(node) {
     'deployment': dirLabel('deployment')
   };
   return map[node.name] || node.name;
+}
+
+// ===== 文件树多选 =====
+// 选择模型本身在 src/tree-selection.js（纯函数，裸 node 可测），这里只负责把 DOM
+// 折成 { rel, visible } 交给它，再把结果画回去。
+//
+// 可见性一律按渲染结果判（offsetParent !== null），不去匹配 style 字符串：
+// 筛选写行内 display:none，折叠用 .tree-children 的 hidden 类，搜索把整棵树
+// 加 hidden——三种方式 offsetParent 都会是 null（CLAUDE.md 踩过的坑第 12 条）。
+function treeFileRows() {
+  return Array.from(document.querySelectorAll('#tree .tree-row.file'))
+    .map(r => ({ rel: r.__rel, visible: r.offsetParent !== null, el: r }));
+}
+
+// 筛选、折叠、搜索、重建树之后都调它：剔掉已经看不见或不存在的条目，
+// 再把选中态画到行上、刷新批量操作条。
+function syncTreeSelection() {
+  const rows = treeFileRows();
+  state.treeSelection = TREE_SELECTION.prune(state.treeSelection, rows);
+  const sel = state.treeSelection.selected;
+  for (const r of rows) {
+    const on = sel.has(r.rel);
+    r.el.classList.toggle('multi-selected', on);
+    r.el.setAttribute('aria-selected', on ? 'true' : 'false');
+  }
+  renderBatchBar();
+}
+
+function renderBatchBar() {
+  const bar = $('batch-bar');
+  if (!bar) return;
+  const count = state.treeSelection.selected.size;
+  // 选中 1 个时不显示：单个文件已经有内容区按钮和右键菜单，批量条出现只会挤占树的高度。
+  bar.classList.toggle('hidden', count < 2);
+  $('batch-count').textContent = t('batchSelected', { count });
+  for (const id of ['btn-batch-move', 'btn-batch-tags', 'btn-batch-delete']) $(id).disabled = state.batchRunning;
+}
+
+function clearTreeSelection() {
+  state.treeSelection = TREE_SELECTION.empty();
+  syncTreeSelection();
+}
+
+// 文件行的点击。普通单击仍然是打开文件（行为不变），顺带把锚点放在这一行；
+// Ctrl+点击切换选中，Shift+点击按当前可见顺序选一段，两者都不打开文件。
+function onTreeFileClick(e, rel) {
+  if (e && (e.shiftKey || e.ctrlKey || e.metaKey)) {
+    // 还没有锚点时（比如文件是从搜索结果或标签栏打开的），以当前打开的文件为起点
+    if (state.treeSelection.anchor == null && state.currentRel) {
+      state.treeSelection = { selected: new Set(state.treeSelection.selected), anchor: state.currentRel };
+    }
+    const rows = treeFileRows();
+    state.treeSelection = e.shiftKey
+      ? TREE_SELECTION.range(state.treeSelection, rel, rows, e.ctrlKey || e.metaKey)
+      : TREE_SELECTION.toggle(state.treeSelection, rel, rows);
+    syncTreeSelection();
+    return;
+  }
+  state.treeSelection = TREE_SELECTION.focusAnchor(rel);
+  syncTreeSelection();
+  openFile(rel);
 }
 
 // ===== 打开文件 =====
@@ -589,6 +674,9 @@ const saveTabsDebounced = debounce(async () => {
   } catch (e) { reportBackgroundSaveError(e); }
 }, 500);
 function renderTabs() {
+  // 外部改动提示条跟着"当前是哪个标签"走。切标签、开/关文件、保存、切语言
+  // 全都会经过 renderTabs，挂在这里就不用在每条路径上各记一次。
+  renderExternalNotice();
   const bar = $('tabs-bar');
   if (!bar) return;
   if (!state.tabs.length) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
@@ -716,6 +804,113 @@ function renderRecent() {
   list.querySelectorAll('.recent-item').forEach(el => {
     el.onclick = () => openFile(el.dataset.rel);
   });
+}
+
+// ===== 使用统计、收藏与常用 =====
+// 统计存在主进程的 usage.json（见 lib/usage-store.js），渲染进程只持有一份快照。
+// 所有接口都返回同一个形状 { favorites, frequent }，拿到就整份替换、重画。
+//
+// 乱序守卫：刷新（refreshTree 触发）和记账（复制成功触发）可能几乎同时在飞。
+// 主进程里两者排在同一条 'usage' 队列上，按发出顺序执行，所以**最后发出**的那个
+// 结果一定包含前面所有写入；只采纳最后发出的那次，界面上的计数就不会倒退。
+const MAX_FREQUENT_SHOWN = 8;
+let usageSeq = 0;
+function applyUsage(seq, view) {
+  if (seq !== usageSeq || !view) return;
+  state.usage = {
+    favorites: Array.isArray(view.favorites) ? view.favorites : [],
+    frequent: Array.isArray(view.frequent) ? view.frequent : []
+  };
+  renderUsage();
+}
+async function refreshUsage() {
+  const seq = ++usageSeq;
+  try { applyUsage(seq, await api.getUsage()); }
+  catch (e) { console.error('读取使用统计失败:', e); } // i18n-exempt: 开发日志
+}
+
+// 记一次使用。复制**真的成功**之后调（copyContent 返回 true 的每条路径上都调了；
+// 取消填充面板、写剪贴板抛错时不调）。其他复制入口照这个约定接：
+//   recordUsage(rel)   rel 是库内相对路径（prompts/... .md，正斜杠）
+//   - 不需要 await，也不会 reject：失败只记控制台。复制已经成功了，统计写失败
+//     不该再弹一条错误盖掉"已复制"。
+//   - 文件不存在时主进程不记账（recorded:false），不会凭空长出幽灵条目。
+//   - 记完会刷新侧边栏的「常用」列表。
+function recordUsage(rel) {
+  if (!rel) return Promise.resolve();
+  const seq = ++usageSeq;
+  return api.recordUsage(rel)
+    .then(view => applyUsage(seq, view))
+    .catch(e => { console.error('记录使用统计失败:', e); }); // i18n-exempt: 开发日志
+}
+
+// 收藏和常用列表都按 metaByRel 过滤：外部删掉的、删进回收站的文件在这里自然消失，
+// 不会留下点了报"打开失败"的幽灵条目。统计本身保留（恢复后还在），只是不显示。
+function usageEntries(tab) {
+  if (tab === 'favorites') {
+    return state.usage.favorites.map(rel => ({ rel, m: state.metaByRel.get(rel) })).filter(x => x.m);
+  }
+  return state.usage.frequent
+    .map(it => ({ rel: it.rel, it, m: state.metaByRel.get(it.rel) }))
+    .filter(x => x.m && x.it.count > 0)
+    .slice(0, MAX_FREQUENT_SHOWN);
+}
+
+function renderUsage() {
+  const panel = $('usage-panel');
+  if (!panel) return;
+  const favs = usageEntries('favorites');
+  const freq = usageEntries('frequent');
+  // 两栏都空就整块藏起来：新用户的侧边栏不该被一块空白占掉，最小窗口下树要的就是这点高度。
+  if (!favs.length && !freq.length) { panel.classList.add('hidden'); return; }
+  panel.classList.remove('hidden');
+  let tab = state.usagePanelTab;
+  if (tab !== 'favorites' && tab !== 'frequent') tab = favs.length ? 'favorites' : 'frequent';
+  panel.querySelectorAll('.usage-tab').forEach(b => {
+    const on = b.dataset.tab === tab;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  const list = $('usage-list');
+  list.dataset.tab = tab;
+  const rows = tab === 'favorites' ? favs : freq;
+  if (!rows.length) {
+    list.innerHTML = `<div class="usage-empty">${escapeHtml(t(tab === 'favorites' ? 'favoritesEmpty' : 'frequentEmpty'))}</div>`;
+    return;
+  }
+  list.innerHTML = rows.map(({ rel, it, m }) => {
+    const icon = rel.startsWith('workflows') ? '🔀' : (rel.startsWith('templates') ? '📋' : '📄');
+    const name = m.meta.title || fileNameNoExt(m.name);
+    let tip = rel;
+    if (it) {
+      let at = '';
+      try { at = new Date(it.lastUsedAt).toLocaleString(); } catch { /* 显示不了就不显示 */ }
+      tip += '\n' + t('usageTooltip', { count: it.count, at });
+    }
+    return `<button type="button" class="usage-item" data-rel="${escapeHtml(rel)}" title="${escapeHtml(tip)}">
+      <span class="us-icon">${icon}</span>
+      <span class="us-name">${escapeHtml(name)}</span>
+      ${it ? `<span class="us-count">${escapeHtml(t('usageCount', { count: it.count }))}</span>` : ''}
+    </button>`;
+  }).join('');
+  list.querySelectorAll('.usage-item').forEach(el => {
+    el.onclick = () => openFile(el.dataset.rel);
+  });
+}
+
+// 收藏 / 取消收藏。由用户主动触发，所以成败都要给反馈（和锁定一样）。
+async function toggleFavorite(rel) {
+  const on = !state.usage.favorites.includes(rel);
+  const seq = ++usageSeq;
+  try {
+    const view = await api.setFavorite(rel, on);
+    // 刚收藏的要立刻看得见：切到收藏栏。
+    if (on) state.usagePanelTab = 'favorites';
+    applyUsage(seq, view);
+    toast(t(on ? 'favorited' : 'unfavorited'), 'success');
+  } catch (e) {
+    toast(tErr('favoriteFailed', e), 'error');
+  }
 }
 
 function renderBreadcrumb() {
@@ -914,7 +1109,10 @@ function enhancePreviewPlaceholders(container) {
   const { body } = parseFrontmatter(state.currentContent);
   // 只标记 extract 认得的 token（它已经排除了链接、行内代码、围栏块、任务列表
   // 勾选框这些同形但不相干的 [..]）。片段外的一律不动。
-  const tokens = PLACEHOLDERS.extract(body).map(it => it.token);
+  const items = PLACEHOLDERS.extract(body);
+  const tokens = items.map(it => it.token);
+  // token -> { options, default }：chip 上要标出"有选项 / 有默认值"，点开时也要用到。
+  const metaOf = new Map(items.map(it => [it.token, it]));
   const values = state.previewFills[rel] || {};
   const wanted = new Map(tokens.map(tok => [tok, tok]));
   if (!tokens.length) return;
@@ -953,13 +1151,32 @@ function enhancePreviewPlaceholders(container) {
         mark.setAttribute('role', 'button');
         if (!values[tok]) mark.title = t('fillInlineTitle');
         const filled = values[tok];
+        const meta = metaOf.get(tok) || {};
+        // 有选项 / 有默认值的 chip 带上类名，样式上加一个角标（见 styles.css 的
+        // mark.ph-opts / mark.ph-default）。角标文字走 data-badge + CSS attr()，
+        // 不进 textContent：自检和"填过的 chip 显示值"都按 textContent 比对。
+        const hasOpts = Array.isArray(meta.options) && meta.options.length > 0;
+        const hasDefault = meta.default != null;
+        if (hasOpts) mark.classList.add('ph-opts');
+        if (hasDefault) mark.classList.add('ph-default');
         if (filled) {
           // 填过的直接显示值，并且标出"这是填的、不是原文"
           mark.classList.add('ph-filled');
           mark.textContent = filled;
           mark.title = tok;
+        } else if (hasDefault) {
+          // 没填但有默认值：显示默认值本身。复制时没改就按默认值填（见 copyContent），
+          // 预览显示的就是复制出去的样子。title 里留着原文和"这是默认值"的说明。
+          mark.textContent = meta.default;
+          mark.dataset.badge = t('phBadgeDefault');
+          mark.title = t('phTitleDefault', { token: tok, value: meta.default })
+            + (hasOpts ? '\n' + t('phTitleOptions', { options: meta.options.join(' / ') }) : '');
         } else {
           mark.textContent = tok;
+          if (hasOpts) {
+            mark.dataset.badge = t('phBadgeOptions');
+            mark.title = t('fillInlineTitle') + '\n' + t('phTitleOptions', { options: meta.options.join(' / ') });
+          }
         }
         frag.appendChild(mark);
       }
@@ -983,18 +1200,28 @@ function renderFillHint() {
   const done = Array.from(document.querySelectorAll('#preview ' + PLACEHOLDER_MARK))
     .filter(el => filled[el.dataset.token]).length;
   bar.classList.remove('hidden');
-  bar.textContent = done
+  // 没填但有默认值的处数要单独说：复制时它们会按默认值填进去，不提的话
+  // 用户看到"已填 1/3"会以为另外两处会原样带着方括号出去。
+  const defaulted = Array.from(document.querySelectorAll('#preview ' + PLACEHOLDER_MARK + '.ph-default'))
+    .filter(el => !filled[el.dataset.token]).length;
+  bar.textContent = (done
     ? t('fillHintProgress', { done, total })
-    : t('fillHintClick', { total });
+    : t('fillHintClick', { total }))
+    + (defaulted ? t('sep') + t('fillHintDefaults', { count: defaulted }) : '');
 }
 
 // 点 chip 就地填。返回是否改动了填充记录（供调用方决定要不要重刷提示行）。
+//
+// 预填：这次就地填过的值 > 默认值。不读 fillMemory —— 就地填一直没有接记忆，
+// 这里只是把默认值补进来，不顺手改别的行为。
 async function fillPlaceholderInline(token) {
   const rel = state.currentRel;
   if (!rel) return false;
   const values = state.previewFills[rel] || {};
-  const current = values[token] || '';
-  const next = await promptInput(t('fillInlineTitle'), token, current);
+  const meta = PLACEHOLDERS.extract(parseFrontmatter(state.currentContent).body)
+    .find(it => it.token === token) || { token, hint: token, options: [], default: null };
+  const current = values[token] || meta.default || '';
+  const next = await promptPlaceholderValue(meta, current);
   if (next === null) return false;                 // 取消
   if (!state.previewFills[rel]) state.previewFills[rel] = {};
   if (next === '') delete state.previewFills[rel][token];
@@ -1259,6 +1486,9 @@ async function enterEditMode() {
   $('editor-wrap').classList.remove('hidden');
   $('editor').value = state.currentContent;
   state.editBaseline = state.currentContent; // 脏判断的基准
+  // 说明属于"这一次编辑要保存的内容"，上一轮编辑没用掉的说明不能带进来：
+  // 丢弃退出后再进编辑，残留的那句话会被安到一份完全不同的改动上。
+  $('version-note-input').value = '';
   $('editor').focus();
   $('btn-edit').textContent = t('editing');
 }
@@ -1285,6 +1515,13 @@ async function exitEditMode(save, opts) {
     $('btn-edit').textContent = t('edit');
     renderContent();
     await clearDraft(discardedRel);
+    // 编辑期间文件在外部被改过（提示条点过"保留我的版本"，或者没理它）：
+    // 丢弃自己的改动之后，该看到的是磁盘上的最新内容，而不是进编辑那一刻的旧内容。
+    const tab = activeTabObj();
+    if (tab && tab.externalStale) {
+      try { await reloadActiveFromDisk(); } catch (e) { toast(tErr('openFailed', e), 'error'); }
+    }
+    renderExternalNotice();
     return true;
   }
   state.editMode = false;
@@ -1292,6 +1529,7 @@ async function exitEditMode(save, opts) {
   $('preview-wrap').classList.remove('hidden');
   $('editor-wrap').classList.add('hidden');
   $('btn-edit').textContent = t('edit');
+  renderExternalNotice();
   return true;
 }
 
@@ -1334,13 +1572,20 @@ async function requestReload() {
   await api.reloadWindow();
 }
 
+// 版本说明来自编辑区的可选输入框，空着就是普通保存。Ctrl+S、保存按钮、切文件时
+// 选"保存"、关窗前保存都走这里，所以无论从哪条路保存，填了的说明都不会丢。
+// 说明描述的是这次写进去的内容，主进程先挂在"当前内容"上，下次保存时随这份内容
+// 一起转进历史（见 lib/version-store.js 文件头）。保存成功后清空输入框，
+// 免得下一次 Ctrl+S 把同一句话又记一遍。
 async function saveCurrent() {
   if (!state.currentRel) return false;
   const content = $('editor').value;
+  const noteInput = $('version-note-input');
+  const note = noteInput.value.trim();
   try {
     let result;
     try {
-      result = await api.saveFile(state.currentRel, content, { expectedContent: state.currentContent });
+      result = await api.saveFile(state.currentRel, content, { expectedContent: state.currentContent, note });
     } catch (e) {
       if (!String(e && e.message || e).includes('E_SAVE_CONFLICT')) throw e;
       const latestForDiff = await api.readFile(state.currentRel);
@@ -1350,7 +1595,7 @@ async function saveCurrent() {
         state.currentContent = latest.content;
         state.currentMeta = latest.meta;
         const tab = state.tabs.find(t => t.rel === state.currentRel);
-        if (tab) { tab.content = latest.content; tab.meta = latest.meta; tab.loaded = true; }
+        if (tab) { tab.content = latest.content; tab.meta = latest.meta; tab.loaded = true; clearExternalFlags(tab); }
         await clearDraft(state.currentRel);
         state.editMode = false;
         state.editBaseline = '';
@@ -1364,7 +1609,7 @@ async function saveCurrent() {
         return true;
       }
       if (choice !== 'save') return false;
-      result = await api.saveFile(state.currentRel, content, { expectedContent: state.currentContent, overwrite: true });
+      result = await api.saveFile(state.currentRel, content, { expectedContent: state.currentContent, overwrite: true, note });
     }
     const { content: saved, meta } = result;
     state.currentContent = saved;
@@ -1373,11 +1618,15 @@ async function saveCurrent() {
     // 主进程会回写 version/updatedAt，saved 和输入框内容天生不同，
     // 拿 saved 当基准会让保存后立刻又显示未保存。
     state.editBaseline = content;
+    noteInput.value = '';
     await clearDraft(state.currentRel);
-    // 同步到标签
+    // 同步到标签。存盘成功说明磁盘上就是我们的版本了，外部改动的标记一并清掉
+    // （提示条里点了"保留我的版本"、再在冲突框里选覆盖，就走到这里）。
     const tab = state.tabs.find(t => t.rel === state.currentRel);
-    if (tab) { tab.content = saved; tab.meta = meta; tab.loaded = true; }
-    toast(t('saved'), 'success');
+    if (tab) { tab.content = saved; tab.meta = meta; tab.loaded = true; clearExternalFlags(tab); }
+    // 说明没记上不算保存失败（正文已经落盘），但要让用户知道，否则他以为历史里有那句话。
+    if (result.noteError) toast(tErr('savedButNoteFailed', new Error(result.noteError)), 'error');
+    else toast(t('saved'), 'success');
     setMetaList(await api.getMetaList());
     renderBreadcrumb();
     renderMetaBar();
@@ -1398,6 +1647,167 @@ async function saveCurrent() {
     toast(tErr('saveFailed', e), 'error');
     return false;
   }
+}
+
+// ===== 外部改动 =====
+// 主进程监视三个内容目录（lib/library-watch.js），应用之外的改动合并后推过来，
+// 应用自己的写入在那边已经滤掉了。这里决定每个标签怎么处理：
+//   - 没有未保存改动：静默重载正文（正在编辑但没改动的，编辑框一起更新）
+//   - 正在编辑且有未保存改动：不动编辑框，挂非阻塞提示条，让用户选
+//     "重新加载（丢弃我的改动）"或"保留我的版本"；保存时 E_SAVE_CONFLICT 照旧兜底
+//   - 文件被删除或改名：标签不关（里面可能有用户还要的内容），挂提示条说明
+// 标签上的四个标记：
+//   externalStale            编辑期间磁盘内容变了，编辑基准已经过期
+//   externalStaleDismissed   用户点了"保留我的版本"，在下次外部改动之前不再提示
+//   externalMissing          文件已不在库里
+//   externalMissingDismissed 用户点了"知道了"
+function activeTabObj() {
+  return state.activeTab ? state.tabs.find(tb => tb.rel === state.activeTab) || null : null;
+}
+
+function clearExternalFlags(tab) {
+  if (!tab) return;
+  tab.externalStale = false;
+  tab.externalStaleDismissed = false;
+  tab.externalMissing = false;
+  tab.externalMissingDismissed = false;
+}
+
+function renderExternalNotice() {
+  const bar = $('external-notice');
+  if (!bar) return;
+  const tab = activeTabObj();
+  let mode = null;
+  if (tab && tab.externalMissing && !tab.externalMissingDismissed) mode = 'missing';
+  else if (tab && state.editMode && tab.externalStale && !tab.externalStaleDismissed) mode = 'stale';
+  bar.dataset.mode = mode || '';
+  if (!mode) { bar.classList.add('hidden'); return; }
+  const primary = $('btn-external-primary');
+  const secondary = $('btn-external-secondary');
+  $('external-notice-text').textContent = t(mode === 'missing' ? 'externalRemoved' : 'externalModified');
+  primary.textContent = t(mode === 'missing' ? 'externalCloseTab' : 'externalReload');
+  secondary.textContent = t(mode === 'missing' ? 'externalDismiss' : 'externalKeepMine');
+  const rel = tab.rel;
+  primary.onclick = async () => {
+    if (state.activeTab !== rel) return;
+    if (mode === 'missing') {
+      await closeTab(rel);
+      return;
+    }
+    try { await reloadActiveFromDisk(); } catch (e) { toast(tErr('openFailed', e), 'error'); }
+  };
+  secondary.onclick = () => {
+    const cur = activeTabObj();
+    if (!cur || cur.rel !== rel) return;
+    if (mode === 'missing') cur.externalMissingDismissed = true;
+    else cur.externalStaleDismissed = true;
+    renderExternalNotice();
+  };
+  bar.classList.remove('hidden');
+}
+
+// 丢弃编辑、按磁盘重新载入当前文件。和冲突框里"放弃并载入最新内容"同一个结果：
+// 退出编辑、清草稿、正文换成磁盘上的。
+async function reloadActiveFromDisk() {
+  const rel = state.currentRel;
+  if (!rel) return;
+  const latest = await api.readFile(rel);
+  if (state.currentRel !== rel) return;
+  state.currentContent = latest.content;
+  state.currentMeta = latest.meta;
+  const tab = state.tabs.find(tb => tb.rel === rel);
+  if (tab) { tab.content = latest.content; tab.meta = latest.meta; tab.loaded = true; clearExternalFlags(tab); }
+  if (state.editMode) {
+    state.editMode = false;
+    state.editBaseline = '';
+    $('preview-wrap').classList.remove('hidden');
+    $('editor-wrap').classList.add('hidden');
+    $('btn-edit').textContent = t('edit');
+    await clearDraft(rel);
+  }
+  renderBreadcrumb();
+  renderMetaBar();
+  renderContent();
+  renderTabs();
+}
+
+// 串行处理：两批推送交叉的话，后一批的 readFile 可能先回来，被前一批的旧结果盖掉。
+let externalChain = Promise.resolve();
+function onLibraryChanged(info) {
+  externalChain = externalChain.then(() => applyExternalChanges(info)).catch((e) => {
+    console.error('处理外部改动失败:', e); // i18n-exempt: 开发日志
+  });
+  return externalChain;
+}
+
+async function applyExternalChanges(info) {
+  const changes = (info && Array.isArray(info.changes)) ? info.changes : [];
+  const truncated = !!(info && info.truncated);
+  const touched = new Set(changes.map(c => c.rel));
+  // 重建文件树。refreshTree 本身保留展开状态（按 state.expandedPaths 建）、筛选
+  // （重建后 filterTreeRows 按 state.filter 再过一遍）和选中行（按 currentRel 标 active）。
+  // 它不管的是滚动位置和键盘焦点：用户在树里按方向键走着，外部一改，焦点不能丢。
+  const treeEl = $('tree');
+  const scrollTop = treeEl ? treeEl.scrollTop : 0;
+  const focusedRow = document.activeElement && document.activeElement.closest
+    ? document.activeElement.closest('#tree .tree-row') : null;
+  const focusedRel = focusedRow ? focusedRow.__rel : null;
+  await refreshTree();
+  if (treeEl) treeEl.scrollTop = scrollTop;
+  if (focusedRel) {
+    const row = Array.from(document.querySelectorAll('#tree .tree-row.file')).find(r => r.__rel === focusedRel);
+    if (row) row.focus();
+  }
+
+  let currentReloaded = false;
+  for (const tab of state.tabs) {
+    const exists = state.metaByRel.has(tab.rel);
+    if (!exists) {
+      // 被删或被改名（改名在这一侧就是"旧路径没了"）。标签保留，内容不动。
+      if (!tab.externalMissing) { tab.externalMissing = true; tab.externalMissingDismissed = false; }
+      continue;
+    }
+    const wasMissing = tab.externalMissing;
+    tab.externalMissing = false;
+    tab.externalMissingDismissed = false;
+    // 恢复出来还没读过正文的占位标签：切过去时自然会读最新的
+    if (!tab.loaded) continue;
+    if (!truncated && !touched.has(tab.rel) && !wasMissing) continue;
+    let latest;
+    try { latest = await api.readFile(tab.rel); } catch { continue; }
+    const isCurrent = tab.rel === state.currentRel;
+    // 读盘期间用户可能还在打字，脏判断必须放在 await 之后
+    if (isCurrent && isDirty()) {
+      // 和编辑基准（进编辑那一刻的内容）不同才算外部改了。基准不动：
+      // 保存时 expectedContent 仍是旧内容，E_SAVE_CONFLICT 照旧会拦下来。
+      if (latest.content !== state.currentContent) {
+        tab.externalStale = true;
+        tab.externalStaleDismissed = false;
+      }
+      continue;
+    }
+    if (latest.content === tab.content) continue;
+    tab.content = latest.content;
+    tab.meta = latest.meta;
+    clearExternalFlags(tab);
+    if (isCurrent) {
+      state.currentContent = latest.content;
+      state.currentMeta = latest.meta;
+      if (state.editMode) {
+        // 在编辑但没改动：编辑框和脏判断基准一起换成新内容，否则下一个字就算"脏"，
+        // 而且保存会把外部的改动当成冲突
+        $('editor').value = latest.content;
+        state.editBaseline = latest.content;
+      }
+      currentReloaded = true;
+    }
+  }
+  if (currentReloaded && state.currentRel) {
+    renderBreadcrumb();
+    renderMetaBar();
+    if (!state.editMode) renderContent();
+  }
+  renderTabs();
 }
 
 // ===== 复制 =====
@@ -1431,6 +1841,9 @@ async function writeClipboard(text) {
 // 取消也闪一下"已复制"的话，那句反馈就是假的。
 async function copyContent() {
   if (!state.currentRel) return false;
+  // 记账用的 rel 在第一个 await 之前取：填占位符面板开着的时候 currentRel 理论上不会变，
+  // 但统计记到哪个文件上不该依赖这一点。
+  const rel = state.currentRel;
   let { body } = parseFrontmatter(state.currentContent);
   if (INCLUDES.hasInclude(body)) {
     body = await INCLUDES.resolveAsync(body, async (r) => {
@@ -1446,18 +1859,25 @@ async function copyContent() {
   // 没有占位符就保持原来的一步到位。为此多弹一个空面板只是多一次点击。
   if (!tokens.length) {
     await writeClipboard(body);
+    recordUsage(rel);
     toast(t('copySuccess'), 'success');
     return true;
   }
   // 预览区已经点着填过的，直接用填好的结果，不再弹面板：用户刚刚就在正文里
   // 逐处填过，再让他面对一张列着同一批 token 的表，等于把同一件事做两遍。
   // 想改的话回预览里点那个 chip（点上就是改）。
+  //
+  // 没点过的 chip 若有默认值，按默认值填（README「文件格式」写明的行为）：
+  // 预览里没填的默认值 chip 显示的就是默认值，复制出去的应当和看到的一致。
   const inline = state.previewFills[state.currentRel] || {};
   const inlineCount = tokens.filter(it => String(inline[it.token] == null ? '' : inline[it.token]).trim()).length;
   if (inlineCount) {
-    await writeClipboard(PLACEHOLDERS.fill(body, inline));
-    const missing = tokens.length - inlineCount;
-    toast(missing ? t('fillDonePartial', { count: inlineCount, missing }) : t('fillDone', { count: inlineCount }), 'success');
+    const merged = PLACEHOLDERS.withDefaults(body, inline);
+    await writeClipboard(PLACEHOLDERS.fill(body, merged));
+    recordUsage(rel);
+    const count = tokens.filter(it => String(merged[it.token] == null ? '' : merged[it.token]).trim()).length;
+    const missing = tokens.length - count;
+    toast(missing ? t('fillDonePartial', { count, missing }) : t('fillDone', { count }), 'success');
     return true;
   }
   const values = await promptFillPlaceholders(tokens);
@@ -1466,6 +1886,7 @@ async function copyContent() {
   rememberFillValues(values);
   const count = tokens.filter(it => String(values[it.token] == null ? '' : values[it.token]).trim()).length;
   await writeClipboard(filled);
+  recordUsage(rel);
   toast(count ? t('fillDone', { count }) : t('copySuccess'), 'success');
   return true;
 }
@@ -1480,17 +1901,28 @@ async function copyContent() {
 // 必须登记 pendingPromptDone。三条外部关闭路径（点弹层外面、Esc、hideCtxMenu）
 // 都只负责把弹层藏起来，不登记的话这个 await 永远等不到结算，整个复制流程卡死
 // （见 settlePendingPrompt 上方的说明，promptInput 当年就是踩了这个）。
+//
+// 每一行是一个自动增高的 textarea（多行输入的理由见 placeholderFieldHtml），
+// 有选项的再加一个下拉框。键位：Enter 跳到下一项（最后一项跳到"填好并复制"按钮，
+// 再按一次 Enter 就是按按钮），Shift+Enter 换行，Ctrl/⌘+Enter 直接提交。
+//
+// 预填优先级：上次填过的值（fillMemory）> 默认值 > 空。上次填过的是用户自己的
+// 明确选择，默认值只是作者的猜测；而默认值写在 token 原文里，作者改了默认值
+// token 原文就变了，旧记忆自然不再命中，不会出现"改了默认值却一直预填旧值"。
+// 预填进框里的默认值被用户清空的话，就按"留空原样保留"处理 —— 面板上看得见的
+// 就是会生效的，不在背后再套一次默认值。
 function promptFillPlaceholders(tokens) {
   return new Promise(resolve => {
     const menu = $('ctx-menu');
+    const initial = tokens.map(it =>
+      (state.fillMemory && state.fillMemory[it.token]) || (it.default != null ? it.default : ''));
     const rows = tokens.map((it, i) => {
-      // 上次填过的值预填。hint 为空（`[]` 之类）时退回显示 token 本身，
+      // hint 为空（`[]` 之类）时退回显示 token 本身，
       // 否则标签是一片空白，用户不知道这一行对应正文里的哪处。
-      const memo = (state.fillMemory && state.fillMemory[it.token]) || '';
       return `
         <div class="fill-row">
           <label class="fill-label" for="fill-in-${i}">${escapeHtml(it.hint || it.token)}</label>
-          <input id="fill-in-${i}" class="ctx-prompt-input" data-token="${escapeHtml(it.token)}" value="${escapeHtml(memo)}" placeholder="${escapeHtml(it.token)}">
+          ${placeholderFieldHtml(it, 'fill-in-' + i, true)}
         </div>`;
     }).join('');
     menu.innerHTML = `
@@ -1498,6 +1930,7 @@ function promptFillPlaceholders(tokens) {
         <div class="ctx-prompt-title">${escapeHtml(t('fillTitle'))}</div>
         <div class="fill-hint">${escapeHtml(t('fillHint'))}</div>
         <div class="fill-list">${rows}</div>
+        <div class="fill-keys">${escapeHtml(t('fillKeysPanel'))}</div>
         <div class="ctx-prompt-actions">
           <button class="btn-link" id="fill-raw">${escapeHtml(t('fillCopyRaw'))}</button>
           <button class="btn-primary" id="fill-ok">${escapeHtml(t('fillAndCopy'))}</button>
@@ -1511,7 +1944,8 @@ function promptFillPlaceholders(tokens) {
       resolve(v);
     };
     pendingPromptDone = done;
-    const inputs = Array.from(menu.querySelectorAll('[data-token]'));
+    const inputs = Array.from(menu.querySelectorAll('textarea[data-token]'));
+    inputs.forEach((inp, i) => { inp.value = initial[i]; });
     const collect = () => {
       const values = {};
       for (const inp of inputs) values[inp.dataset.token] = inp.value;
@@ -1519,15 +1953,112 @@ function promptFillPlaceholders(tokens) {
     };
     $('fill-ok').onclick = () => done(collect());
     $('fill-raw').onclick = () => done({});
-    for (const inp of inputs) {
+    inputs.forEach((inp, i) => {
+      wirePlaceholderField(inp, () => done(null));
       inp.onkeydown = (e) => {
+        if (e.isComposing) return;   // 输入法选词时的 Enter 是确认候选，不是我们的键
         // 提交用 Ctrl+Enter 而不是 Enter：这里通常有好几个输入框，
         // 裸 Enter 更像"下一项"，拿它提交会让人填到一半就被送出去。
-        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); done(collect()); }
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); done(collect()); return; }
+        // Shift+Enter 不拦，走 textarea 默认的换行。
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          (inputs[i + 1] || $('fill-ok')).focus();
+          return;
+        }
         if (e.key === 'Escape') done(null);
       };
-    }
+    });
     if (inputs.length) { inputs[0].focus(); inputs[0].select(); }
+  });
+}
+
+// 一个占位符的填写控件：有选项时一个下拉框 + 一个 textarea，没有时只有 textarea。
+// promptFillPlaceholders 和就地填写（promptPlaceholderValue）共用。
+//
+// 为什么所有填写框都是 textarea，而不是另加一种"多行占位符"语法：
+// 要粘大段报错 / 代码的是**填的人**，写提示词的人事先不知道哪一格会被粘多行。
+// 用语法标记的话，作者没标的格子粘进去换行全被 <input> 吃掉（input 会把换行
+// 静默删掉，粘完看着也像是成功了），这正是要解决的问题本身。改成 textarea 之后
+// 单行内容的外观不变（自动增高，初始一行高），只多出"能换行"这一种能力。
+// 自动增高用 CSS 的 field-sizing: content，不用 JS 量 scrollHeight。
+//
+// 下拉框和 textarea 是同一个值的两个入口：选一项就把它写进 textarea；
+// 在 textarea 里手打，下拉框跟着显示对应项，打的不是任何一项就显示"自定义"。
+// 值永远以 textarea 为准 —— 允许自定义值是需求的一部分。
+// 值不写进 HTML：textarea 的内容若以换行开头会被 HTML 解析器吃掉一个，
+// 调用方在插入 DOM 之后用 .value 赋值。
+function placeholderFieldHtml(it, id, withToken) {
+  const opts = Array.isArray(it.options) ? it.options : [];
+  const select = opts.length
+    ? `<select class="ctx-prompt-input fill-select" aria-label="${escapeHtml(t('fillOptionsLabel'))}">
+        <option value="">${escapeHtml(t('fillCustomOption'))}</option>
+        ${opts.map(o => `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join('')}
+      </select>`
+    : '';
+  return select + `<textarea id="${escapeHtml(id)}" class="ctx-prompt-input fill-input" rows="1"`
+    + (withToken ? ` data-token="${escapeHtml(it.token)}"` : '')
+    + ` placeholder="${escapeHtml(it.token)}"></textarea>`;
+}
+
+// 接上下拉框和 textarea 的双向同步。下拉框是 textarea 紧前面的兄弟元素。
+// onEscape：下拉框聚焦时按 Esc 也要能关弹层（textarea 的 Esc 由调用方处理）。
+function wirePlaceholderField(input, onEscape) {
+  const select = input.previousElementSibling;
+  if (!select || select.tagName !== 'SELECT') return;
+  const sync = () => {
+    const v = input.value.trim();
+    select.value = Array.from(select.options).some(o => o.value && o.value === v) ? v : '';
+  };
+  // 选了"自定义"不清空 textarea：用户可能只是想在当前值上改几个字。
+  // 也不把焦点挪回 textarea：键盘用户在关着的下拉框上按方向键会连续触发 change，
+  // 每次都抢走焦点就没法往下翻了。
+  select.onchange = () => { if (select.value) input.value = select.value; };
+  select.onkeydown = (e) => { if (e.key === 'Escape') onEscape(); };
+  input.addEventListener('input', sync);
+  sync();
+}
+
+// 就地填写一个占位符的弹层。和 promptInput 同一套结构与 id（ctx-input / ctx-ok /
+// ctx-cancel，自检和焦点管理都认这几个 id），区别是输入框换成 textarea、有选项时
+// 多一个下拉框。不直接改 promptInput：新建 / 改名那些弹层要的就是单行。
+//
+// 键位：Enter 确定（和原来的单行框一致，UI 自检里有这条路径），Shift+Enter 换行。
+// 这里只有一个框，不存在"Enter 应该是下一项"的问题，所以和面板的键位不同。
+function promptPlaceholderValue(meta, initial) {
+  return new Promise(resolve => {
+    const menu = $('ctx-menu');
+    menu.innerHTML = `
+      <div class="ctx-prompt-wrap">
+        <div class="ctx-prompt-title">${escapeHtml(t('fillInlineTitle'))}</div>
+        ${meta.hint && meta.hint !== meta.token ? `<div class="fill-label">${escapeHtml(meta.hint)}</div>` : ''}
+        ${placeholderFieldHtml(meta, 'ctx-input', false)}
+        <div class="fill-keys">${escapeHtml(t('fillKeysInline'))}</div>
+        <div class="ctx-prompt-actions">
+          <button class="btn-link" id="ctx-cancel">${escapeHtml(t('cancel_'))}</button>
+          <button class="btn-primary" id="ctx-ok">${escapeHtml(t('ok'))}</button>
+        </div>
+      </div>`;
+    showCenteredMenu();
+    const inp = $('ctx-input');
+    inp.value = initial == null ? '' : String(initial);
+    const done = (v) => {
+      pendingPromptDone = null;
+      hideCtxMenu();
+      menu.innerHTML = '';
+      resolve(v);
+    };
+    pendingPromptDone = done;
+    wirePlaceholderField(inp, () => done(null));
+    inp.focus();
+    inp.select();
+    $('ctx-ok').onclick = () => done(inp.value.trim());
+    $('ctx-cancel').onclick = () => done(null);
+    inp.onkeydown = (e) => {
+      if (e.isComposing) return;   // 输入法选词时的 Enter 是确认候选
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); done(inp.value.trim()); }
+      if (e.key === 'Escape') done(null);
+    };
   });
 }
 
@@ -1536,6 +2067,10 @@ function promptFillPlaceholders(tokens) {
 // 按 token 文本存，不按文件存：[项目技术栈] 在哪个提示词里都是同一件事，
 // 按文件存的话换一个提示词就要重填一遍，这份记忆等于没有。
 const MAX_FILL_MEMORY = 200;
+// 单个值超过这个长度就不记。填写框支持多行之后，常见用法是往里粘一整段报错 /
+// 代码：那是一次性的内容，记下来只会在下次预填一大段过期的日志，而且 200 条
+// 这样的值整体写进 config.json，每次 setConfig 都要序列化几百 KB。
+const MAX_FILL_MEMORY_VALUE = 2000;
 function rememberFillValues(values) {
   if (!state.fillMemory) state.fillMemory = {};
   let changed = false;
@@ -1543,6 +2078,7 @@ function rememberFillValues(values) {
     const v = String(values[k] == null ? '' : values[k]).trim();
     // 空值不记。用户这次故意留空，不该把上次填好的内容抹掉。
     if (!v) continue;
+    if (v.length > MAX_FILL_MEMORY_VALUE) continue;
     if (state.fillMemory[k] === v) continue;
     // 先删再插，让它排到 key 顺序的末尾——下面按"最旧"淘汰靠的就是这个顺序。
     delete state.fillMemory[k];
@@ -1663,7 +2199,56 @@ function openComposer() {
   const modal = $('composer-modal');
   if (!modal) return;
   modal.classList.remove('hidden');
+  renderComposerExportTargets();
   updateComposerPreview();
+}
+
+// 导出目标的勾选框。每次打开装配器都按磁盘上的配置重画（同 openSettings 的
+// 更新检查开关）：上次写盘失败时界面必须回到真实状态，而不是停在用户点过的样子。
+// 用 createElement 而不是拼 innerHTML：路径虽然是常量，但这个容器在弹层里，
+// 不给"将来有人把可变内容拼进来"留口子。
+function renderComposerExportTargets() {
+  const box = $('comp-export-targets');
+  if (!box) return;
+  const chosen = new Set(RULE_TARGETS.normalizeIds(state.config.ruleExportTargets));
+  box.textContent = '';
+  for (const target of RULE_TARGETS.list) {
+    const label = document.createElement('label');
+    label.className = 'comp-choice';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = target.id;
+    input.checked = chosen.has(target.id);
+    const pathEl = document.createElement('code');
+    pathEl.className = 'comp-target-path';
+    pathEl.textContent = target.path;
+    const hint = document.createElement('span');
+    hint.className = 'comp-target-hint';
+    // 挂 data-i18n 而不是只写一次 t()：切语言时 applyI18n() 会顺手重绘它
+    hint.dataset.i18n = target.hintKey;
+    hint.textContent = t(target.hintKey);
+    label.append(input, pathEl, hint);
+    box.appendChild(label);
+  }
+}
+
+function checkedExportTargetIds() {
+  return Array.from(document.querySelectorAll('#comp-export-targets input[type="checkbox"]:checked')).map(el => el.value);
+}
+
+// 勾选即落盘。写盘失败把这一格拨回去并提示，否则界面显示的目标和下次打开
+// 读到的配置对不上（E_CONFIG_WRITE 是真实存在的失败路径）。
+async function onComposerExportTargetChange(e) {
+  const input = e.target;
+  if (!input || input.type !== 'checkbox') return;
+  const ids = checkedExportTargetIds();
+  try {
+    await api.setConfig({ ruleExportTargets: ids });
+    state.config.ruleExportTargets = ids;
+  } catch (err) {
+    input.checked = !input.checked;
+    toast(describeError(err), 'error');
+  }
 }
 
 function closeComposer() {
@@ -1784,24 +2369,12 @@ async function saveComposerPrompt() {
 async function exportComposerRules() {
   const vals = getComposerValues();
   const resolved = await resolveComposerMarkdown(vals);
-  const projName = vals.name || 'Project Blueprint';
-  const claudeContent = [
-    '# ' + projName + ' - AI Engineering Guidelines',
-    '',
-    resolved
-  ].join('\n');
-  const cursorContent = [
-    '# Cursor Rules for ' + projName,
-    '',
-    resolved
-  ].join('\n');
+  // 以界面上的勾选为准：它在打开装配器时已经按配置画过，之后每次勾选都同步落盘。
+  // 各目标的标题和 .mdc 的 frontmatter 在 src/rule-targets.js 里生成。
+  const payloadFiles = RULE_TARGETS.build(checkedExportTargetIds(), vals.name, resolved);
+  if (!payloadFiles.length) { toast(t('composerExportNoTarget'), 'error'); return; }
   try {
-    const res = await api.exportProjectRules({
-      files: [
-        { name: 'CLAUDE.md', content: claudeContent },
-        { name: '.cursorrules', content: cursorContent }
-      ]
-    });
+    const res = await api.exportProjectRules({ files: payloadFiles });
     if (res && res.ok) {
       const files = res.files || [];
       const skipped = res.skipped || [];
@@ -2115,6 +2688,319 @@ function migrateLock(oldRel, newRel) {
   }
 }
 
+// ===== 批量操作（文件树多选） =====
+// 执行在主进程（batch-move / batch-tags / batch-trash，一次 IPC 逐项结算），
+// 理由见 lib/batch-ops.js 文件头。这一侧只管：收集选择、确认、把结果同步到
+// 标签页和锁列表、汇总报告。
+
+function batchNameOf(rel) {
+  const m = state.metaByRel.get(rel);
+  return (m && m.meta && m.meta.title) ? m.meta.title : fileNameNoExt(String(rel).split('/').pop());
+}
+
+// 正在编辑的文件在这一批里时，先按切换文件的规则处理草稿（保存 / 不保存 / 取消）。
+// 不处理的话，批量在磁盘上改了它，编辑器里还是旧正文，下一次保存就撞冲突
+// 或者把批量的改动盖回去。
+async function leaveEditForBatch(rels) {
+  if (!state.editMode || !rels.includes(state.currentRel)) return true;
+  return leaveEditForSwitch();
+}
+
+// 进行中禁止重复触发。标志在第一个 await 之前置上：连点两下时第二下进来，
+// 第一下的选阶段弹层还开着，这里就把它拦掉，而不是再弹一个。
+async function runBatch(fn) {
+  if (state.batchRunning) { toast(t('batchBusy'), 'error'); return; }
+  state.batchRunning = true;
+  renderBatchBar();
+  try {
+    await fn();
+  } finally {
+    state.batchRunning = false;
+    renderBatchBar();
+  }
+}
+
+// 汇总报告：成功 N 个、失败哪些、为什么、跳过哪些。全部成功时只弹一条 toast；
+// 有失败或跳过时弹一个要手动关掉的对话框——失败原因一闪而过的话等于没报。
+// 每一行带 data-rel / data-code，自检从真实渲染出来的对话框里读结果，不走后门。
+function showBatchReport(actionKey, res) {
+  const ok = (res && res.ok) || [];
+  const failed = (res && res.failed) || [];
+  const skipped = (res && res.skipped) || [];
+  const action = t(actionKey);
+  if (!failed.length && !skipped.length) {
+    toast(t('batchDone', { action, ok: ok.length }), 'success');
+    return Promise.resolve();
+  }
+  const row = (kind, it) => {
+    const reason = describeError(new Error(it.code + '|' + (it.detail || it.rel)));
+    return `<li class="batch-report-item ${kind}" data-rel="${escapeHtml(it.rel)}" data-code="${escapeHtml(it.code)}">`
+      + `<span class="batch-report-kind">${escapeHtml(t(kind === 'failed' ? 'batchReportFailed' : 'batchReportSkipped'))}</span>`
+      + `<span class="batch-report-name">${escapeHtml(batchNameOf(it.rel))}</span>`
+      + `<span class="batch-report-reason">${escapeHtml(reason)}</span></li>`;
+  };
+  return new Promise(resolve => {
+    const menu = $('ctx-menu');
+    menu.innerHTML = `
+      <div class="ctx-prompt-wrap batch-report">
+        <div class="ctx-prompt-title" id="batch-report-title">${escapeHtml(t('batchReportTitle', { action, ok: ok.length, failed: failed.length, skipped: skipped.length }))}</div>
+        <ul class="batch-report-list">${failed.map(it => row('failed', it)).join('')}${skipped.map(it => row('skipped', it)).join('')}</ul>
+        <div class="ctx-prompt-actions">
+          <button class="btn-primary" id="ctx-ok">${escapeHtml(t('ok'))}</button>
+        </div>
+      </div>`;
+    showCenteredMenu();
+    const done = () => {
+      pendingPromptDone = null;
+      hideCtxMenu();
+      menu.innerHTML = '';
+      resolve();
+    };
+    // 点外部 / Esc 走 hideCtxMenu → settlePendingPrompt，同样能把 Promise 结掉
+    pendingPromptDone = done;
+    $('ctx-ok').onclick = done;
+    $('ctx-ok').focus();
+  });
+}
+
+// 被移动的文件：标签页路径、当前文件、锁列表都跟着改（和单个移动同一套记账）。
+function applyMovedTabs(moved) {
+  for (const { rel, newRel } of moved) {
+    migrateLock(rel, newRel);
+    const tab = state.tabs.find(tb => tb.rel === rel);
+    if (tab) tab.rel = newRel;
+    if (state.activeTab === rel) state.activeTab = newRel;
+  }
+}
+
+// 磁盘上改过的文件，若开在标签页里就重读一遍；当前标签同时重画预览和元信息栏。
+// 没加载过的占位标签不用管，第一次切过去时本来就会读盘。
+async function reloadTabsFromDisk(rels) {
+  const set = new Set(rels);
+  let touchedCurrent = false;
+  for (const tab of state.tabs) {
+    if (!set.has(tab.rel) || !tab.loaded) continue;
+    try {
+      const res = await api.readFile(tab.rel);
+      tab.content = res.content;
+      tab.meta = res.meta;
+      if (tab.rel === state.currentRel) {
+        state.currentContent = res.content;
+        state.currentMeta = res.meta;
+        touchedCurrent = true;
+      }
+    } catch { /* 读失败保持旧内容，下次打开自然重读 */ }
+  }
+  renderTabs();
+  if (touchedCurrent) {
+    renderBreadcrumb();
+    renderMetaBar();
+    renderContent();
+  }
+}
+
+// 批量移动之后同步工作流引用：所有被移动文件的引用汇总起来，只问一次。
+// 和单个移动的 syncWorkflowRefs 一样，必须经用户确认，不能静默改 workflow。
+async function syncBatchWorkflowRefs(moved) {
+  const pairs = [];
+  for (const m of moved) {
+    let refs = [];
+    try { refs = await api.findWorkflowRefs(m.rel); } catch { refs = []; }
+    if (refs && refs.length) pairs.push({ ...m, refs });
+  }
+  if (!pairs.length) return;
+  const allRefs = [...new Set(pairs.flatMap(p => p.refs))];
+  const list = pairs.map(p => '· ' + batchNameOf(p.newRel) + ' ← ' + p.refs.map(r => r.replace(/^workflows\//, '')).join(', ')).join('\n');
+  const ok = await confirmDialog(t('batchRefsConfirm', { files: pairs.length, count: allRefs.length, list }));
+  if (!ok) return;
+  const updated = new Set();
+  const failed = [];
+  for (const p of pairs) {
+    try {
+      const res = await api.updateWorkflowRefs(p.refs, p.rel, p.newRel);
+      for (const u of (res && res.updated) || []) updated.add(u);
+      for (const f of (res && res.failed) || []) failed.push(f.rel);
+    } catch (e) {
+      failed.push(...p.refs);
+      console.error('批量同步工作流引用失败:', p.rel, e); // i18n-exempt: 开发日志
+    }
+  }
+  if (failed.length) {
+    toast(t('renameRefsPartial', { updated: updated.size, failed: failed.length, files: [...new Set(failed)].join(', ') }), 'error');
+  } else {
+    toast(t('renameRefsUpdated', { count: updated.size }), 'success');
+  }
+  if (updated.size) await reloadTabsFromDisk([...updated]);
+}
+
+function selectedRels() {
+  return TREE_SELECTION.ordered(state.treeSelection, treeFileRows());
+}
+
+async function batchMoveSelected() {
+  await runBatch(async () => {
+    const rels = selectedRels();
+    if (rels.length < 2) return;
+    const stage = await pickStage(t('batchMoveTitle'));
+    if (!stage) return;
+    if (!(await leaveEditForBatch(rels))) return;
+    let res;
+    try {
+      res = await api.batchMove(rels, 'prompts/' + stage);
+    } catch (e) {
+      toast(tErr('moveFailed', e), 'error');
+      return;
+    }
+    const moved = res.ok.filter(it => it.newRel);
+    const wasCurrent = state.currentRel;
+    applyMovedTabs(moved);
+    const movedCurrent = moved.find(it => it.rel === wasCurrent);
+    clearTreeSelection();
+    await refreshTree();
+    if (movedCurrent) await openFile(movedCurrent.newRel);
+    saveTabsDebounced();
+    await showBatchReport('batchActionMove', res);
+    await syncBatchWorkflowRefs(moved);
+  });
+}
+
+// 标签输入：逗号（含全角逗号、顿号）分隔，去空、去重。合法性由主进程再校验一遍。
+function parseTagInput(text) {
+  const out = [];
+  for (const s of String(text || '').split(/[,，、]/)) {
+    const v = s.trim();
+    if (v && !out.includes(v)) out.push(v);
+  }
+  return out;
+}
+
+// 批量标签的输入框：一个输入框，"添加"和"删除"两个按钮。
+// 返回 { mode: 'add'|'remove', tags } 或 null（取消 / 点外部 / Esc）。
+function promptTagEdit(rels) {
+  const existing = new Set();
+  for (const rel of rels) {
+    const m = state.metaByRel.get(rel);
+    if (m && Array.isArray(m.meta.tags)) m.meta.tags.forEach(tag => tag && existing.add(String(tag)));
+  }
+  const hint = existing.size ? t('batchTagsExisting', { tags: [...existing].join(', ') }) : t('batchTagsNone');
+  return new Promise(resolve => {
+    const menu = $('ctx-menu');
+    menu.innerHTML = `
+      <div class="ctx-prompt-wrap">
+        <div class="ctx-prompt-title">${escapeHtml(t('batchTagsTitle', { count: rels.length }))}</div>
+        <div class="batch-tags-hint">${escapeHtml(hint)}</div>
+        <input id="ctx-input" class="ctx-prompt-input" placeholder="${escapeHtml(t('batchTagsPlaceholder'))}" list="tag-datalist">
+        <div class="ctx-prompt-actions">
+          <button class="btn-link" id="ctx-cancel">${escapeHtml(t('cancel_'))}</button>
+          <button class="btn-danger" id="ctx-tags-remove">${escapeHtml(t('batchTagsRemove'))}</button>
+          <button class="btn-primary" id="ctx-ok">${escapeHtml(t('batchTagsAdd'))}</button>
+        </div>
+      </div>`;
+    showCenteredMenu();
+    const inp = $('ctx-input');
+    inp.focus();
+    const done = (v) => {
+      pendingPromptDone = null;
+      hideCtxMenu();
+      menu.innerHTML = '';
+      resolve(v);
+    };
+    const submit = (mode) => {
+      const tags = parseTagInput(inp.value);
+      done(tags.length ? { mode, tags } : null);
+    };
+    pendingPromptDone = done;
+    $('ctx-ok').onclick = () => submit('add');
+    $('ctx-tags-remove').onclick = () => submit('remove');
+    $('ctx-cancel').onclick = () => done(null);
+    inp.onkeydown = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); submit('add'); }
+      if (e.key === 'Escape') done(null);
+    };
+  });
+}
+
+async function batchTagsSelected() {
+  await runBatch(async () => {
+    const rels = selectedRels();
+    if (rels.length < 2) return;
+    const edit = await promptTagEdit(rels);
+    if (!edit) return;
+    if (!(await leaveEditForBatch(rels))) return;
+    let res;
+    try {
+      res = await api.batchTags(rels, edit.mode === 'add' ? { add: edit.tags } : { remove: edit.tags });
+    } catch (e) {
+      toast(tErr('saveFailed', e), 'error');
+      return;
+    }
+    // 选择保留：打完一个标签常常紧接着再打一个，或者顺手移动这一批。
+    await refreshTree();
+    await reloadTabsFromDisk(res.ok.map(it => it.rel));
+    await showBatchReport('batchActionTags', res);
+  });
+}
+
+// 被删除的标签页按单个删除（deleteCurrent）的规则处理：移除标签，
+// 当前标签被删时切到相邻的那个，没有了就回到空状态。
+async function closeTrashedTabs(removed) {
+  const set = new Set(removed);
+  for (const rel of removed) state.lockedFiles.delete(rel);
+  const activeIdx = state.tabs.findIndex(tb => tb.rel === state.activeTab);
+  const activeRemoved = state.activeTab != null && set.has(state.activeTab);
+  let next = null;
+  if (activeRemoved) {
+    next = state.tabs.slice(activeIdx + 1).find(tb => !set.has(tb.rel))
+      || state.tabs.slice(0, activeIdx).reverse().find(tb => !set.has(tb.rel)) || null;
+  }
+  state.tabs = state.tabs.filter(tb => !set.has(tb.rel));
+  if (!activeRemoved) { renderTabs(); saveTabsDebounced(); return; }
+  if (next) {
+    await switchTab(next.rel);
+  } else {
+    state.activeTab = null;
+    state.currentRel = null;
+    state.currentContent = '';
+    state.currentMeta = {};
+    $('content-area').classList.add('hidden');
+    $('empty-state').classList.remove('hidden');
+    renderTabs();
+    saveTabsDebounced();
+  }
+}
+
+async function batchDeleteSelected() {
+  await runBatch(async () => {
+    const rels = selectedRels();
+    if (rels.length < 2) return;
+    // 锁定和被引用都在确认之前汇总列出来，只确认一次。锁以主进程为准（它在
+    // config 队列里判），这里列出来只是让用户事先知道哪些会被跳过。
+    const locked = rels.filter(r => state.lockedFiles.has(r));
+    const referenced = [];
+    for (const rel of rels) {
+      if (locked.includes(rel) || !rel.startsWith('prompts/')) continue;
+      let refs = [];
+      try { refs = await api.findWorkflowRefs(rel); } catch { refs = []; }
+      if (refs && refs.length) referenced.push(batchNameOf(rel) + ' ← ' + refs.map(r => r.replace(/^workflows\//, '').replace(/\.md$/i, '')).join(', '));
+    }
+    const parts = [t('batchDeleteConfirm', { count: rels.length })];
+    if (locked.length) parts.push(t('batchDeleteLocked', { count: locked.length, names: locked.map(r => '· ' + batchNameOf(r)).join('\n') }));
+    if (referenced.length) parts.push(t('batchDeleteReferenced', { count: referenced.length, names: referenced.map(s => '· ' + s).join('\n') }));
+    if (!(await confirmDialog(parts.join('\n\n')))) return;
+    if (!(await leaveEditForBatch(rels))) return;
+    let res;
+    try {
+      res = await api.batchTrash(rels);
+    } catch (e) {
+      toast(tErr('deleteFailed', e), 'error');
+      return;
+    }
+    await closeTrashedTabs(res.ok.map(it => it.rel));
+    await refreshTree();
+    await showBatchReport('batchActionDelete', res);
+  });
+}
+
 // ===== 上下文菜单 =====
 function showCtxMenu(x, y, node) {
   const menu = $('ctx-menu');
@@ -2127,6 +3013,9 @@ function showCtxMenu(x, y, node) {
     if (node.rel.startsWith('prompts/')) items.push({ label: t('ctxMoveTo'), act: async () => { await openFile(node.rel); moveCurrent(); } });
     const locked = state.lockedFiles.has(node.rel);
     items.push({ label: locked ? t('unlock') : t('lock'), act: async () => { await openFile(node.rel); toggleLockFile(node.rel); } });
+    // 收藏不需要先打开文件：它不依赖当前标签，打开一次反而会多写一条"最近打开"。
+    const fav = state.usage.favorites.includes(node.rel);
+    items.push({ label: fav ? t('ctxUnfavorite') : t('ctxFavorite'), act: () => toggleFavorite(node.rel) });
     items.push({ sep: true });
     items.push({ label: t('delete'), danger: true, act: async () => { await openFile(node.rel); deleteCurrent(); } });
   } else {
@@ -2275,6 +3164,8 @@ const doSearch = debounce(async (q) => {
   const results = await api.search(q);
   if (seq !== searchSeq) return;
   $('tree').classList.add('hidden');
+  // 搜索结果盖住了整棵树，选择里的行全都看不见了：清掉，批量条一起收起。
+  syncTreeSelection();
   box.classList.remove('hidden');
   if (!results.length) {
     box.innerHTML = '<div class="search-empty">' + escapeHtml(t('noResults')) + '</div>';
@@ -2355,36 +3246,68 @@ function filterTreeRows() {
   } else {
     document.querySelectorAll('.tree-row.dir').forEach(r => r.style.display = '');
   }
+  // refreshTree / applyFilter / setLang 都经过这里：重建或筛掉的行不能留在选择里。
+  syncTreeSelection();
 }
 
 // 更可靠的方式：重建树时给每行打上 __rel —— 已在 buildTreeNode 中实现（row.__rel = node.rel）
 
 // ===== 版本历史 =====
+// 列表第一行固定是"当前内容"：它没有快照条目（快照装的是旧内容），但它可能带着
+// 最近一次保存填的说明。不单列这一行的话，那句说明在历史里无处安放——
+// 挂到最新那条快照上又是错的，那条快照是改动之前的内容。
+// 每一行的说明都描述那一行自己的内容，顶部一行提示把这条规则说出来。
 async function openHistory() {
   if (!state.currentRel) return;
   state.historyRel = state.currentRel;
-  const list = await api.listVersions(state.historyRel);
+  const [list, currentNote] = await Promise.all([
+    api.listVersions(state.historyRel),
+    api.getCurrentNote(state.historyRel).catch(() => '')
+  ]);
   const drawer = $('history-drawer');
   drawer.classList.remove('hidden');
   $('version-detail').classList.add('hidden');
   $('version-list').classList.remove('hidden');
   const vl = $('version-list');
-  if (!list.length) {
-    vl.innerHTML = '<div class="search-empty">' + escapeHtml(t('noHistory')) + '</div>';
-    return;
-  }
-  vl.innerHTML = list.map(v => `
+  const noteLine = (note) => note
+    ? `<span class="vi-note" title="${escapeHtml(note)}">${escapeHtml(note)}</span>`
+    : '';
+  const noteBtn = (file) => `<button class="btn-link" data-note="${escapeHtml(file)}" title="${escapeHtml(t('editVersionNote'))}" aria-label="${escapeHtml(t('editVersionNote'))}">✎</button>`;
+  const currentRow = `
+    <div class="version-item current" data-current="1">
+      <span class="vi-time">${escapeHtml(t('currentContentRow'))}${noteLine(currentNote)}</span>
+      <span class="vi-actions">${noteBtn('')}</span>
+    </div>`;
+  const rows = list.map(v => `
     <div class="version-item" data-file="${escapeHtml(v.file)}">
-      <span class="vi-time">${escapeHtml(formatVersionTime(v.timestamp))}<small>${escapeHtml(v.pinned ? t('pinned') : t('versionNth', { n: list.length - list.indexOf(v) }))}</small></span>
+      <span class="vi-time">${escapeHtml(formatVersionTime(v.timestamp))}<small>${escapeHtml(v.pinned ? t('pinned') : t('versionNth', { n: list.length - list.indexOf(v) }))}</small>${noteLine(v.note)}</span>
       <span class="vi-actions">
         <button class="pin-btn ${v.pinned ? 'pinned' : ''}" data-pin="${escapeHtml(v.file)}">${v.pinned ? '⭐' : '☆'}</button>
+        ${noteBtn(v.file)}
         <button class="btn-link" data-view="${escapeHtml(v.file)}">${escapeHtml(t('view'))}</button>
         <button class="btn-link danger" data-roll="${escapeHtml(v.file)}">${escapeHtml(t('rollback'))}</button>
       </span>
     </div>
   `).join('');
-  vl.querySelectorAll('.version-item').forEach(item => {
+  const empty = list.length ? '' : '<div class="search-empty">' + escapeHtml(t('noHistory')) + '</div>';
+  vl.innerHTML = '<div class="version-note-hint">' + escapeHtml(t('versionNoteHint')) + '</div>' + currentRow + rows + empty;
+  const editNote = async (file, current) => {
+    const next = await promptInput(t('editVersionNoteTitle'), t('versionNotePlaceholder'), current);
+    if (next === null) return;
+    try {
+      // file 为 null 表示"当前内容"那一行（主进程按磁盘上的正文算哈希）
+      await api.setVersionNote(state.historyRel, file, next);
+      toast(t('noteSaved'), 'success');
+      openHistory();
+    } catch (err) {
+      toast(tErr('noteFailed', err), 'error');
+    }
+  };
+  vl.querySelector('[data-current] [data-note]').onclick = (e) => { e.stopPropagation(); editNote(null, currentNote); };
+  vl.querySelectorAll('.version-item[data-file]').forEach(item => {
     const file = item.dataset.file;
+    const entry = list.find(v => v.file === file);
+    item.querySelector('[data-note]').onclick = (e) => { e.stopPropagation(); editNote(file, entry ? entry.note : ''); };
     item.querySelector('[data-view]').onclick = () => viewVersion(file);
     item.querySelector('[data-roll]').onclick = async () => {
       if (!(await confirmDialog(t('rollbackConfirm')))) return;
@@ -2551,6 +3474,7 @@ async function openSettings() {
   const chk = $('chk-update-check');
   if (chk) chk.checked = state.config.updateCheck !== false;
   renderUpdateStatus();
+  refreshQuickLaunchStatus();
 }
 function renderSettingsTypes() {
   const list = $('types-list');
@@ -2746,11 +3670,18 @@ async function setLang(lang) {
   renderTabs();
   renderStats();
   renderRecent();
+  renderUsage();
   updateStatusCounts();
   if (state.currentRel) {
     renderBreadcrumb();
     renderMetaBar();
     renderContent();
+  }
+  renderQuickLaunchSettings();
+  // 历史抽屉开着时重绘：列表里的"当前内容"行、说明提示和"第 N 个"都是动态文案。
+  // 只在列表视图时重绘，正在看 diff 的话不把用户踢回列表。
+  if (!$('history-drawer').classList.contains('hidden') && !$('version-list').classList.contains('hidden')) {
+    openHistory().catch(() => {});
   }
   updateStatusInfo(t('ready'));
   if (langSaveError) toast(describeError(langSaveError), 'error');
@@ -2825,6 +3756,66 @@ async function renderUpdateStatus() {
     parts.push(t('updateFound', { version: latest, current }));
   }
   el.textContent = parts.join(' · ');
+}
+
+// ===== 全局快捷键 =====
+// 真正的注册状态只在主进程里（globalShortcut 是主进程 API），这里缓存一份只为显示。
+// 开关的真值同样不能只信 state.config：配置说开着，不代表这一次启动注册上了——
+// 被别的程序占用时 registered 是 false，界面必须说"未生效"，而不是显示一个打着勾的开关。
+async function refreshQuickLaunchStatus() {
+  try {
+    state.quickLaunch = await api.getQuickLaunchStatus();
+  } catch (e) {
+    console.error('读取全局快捷键状态失败:', e); // i18n-exempt: 开发日志
+    state.quickLaunch = state.quickLaunch || { enabled: false, shortcut: '', registered: false, error: null };
+  }
+  renderQuickLaunchSettings();
+  return state.quickLaunch;
+}
+function quickLaunchStatusText(q) {
+  if (!q || !q.enabled) return t('quickLaunchStatusOff');
+  if (q.registered) return t('quickLaunchStatusOn', { shortcut: q.shortcut });
+  return t('quickLaunchStatusFailed', { reason: describeError(new Error((q.error || 'E_SHORTCUT_TAKEN') + '|' + q.shortcut)) });
+}
+function renderQuickLaunchSettings() {
+  const q = state.quickLaunch;
+  const chk = $('chk-quick-launch');
+  const inp = $('quick-launch-shortcut');
+  const status = $('quick-launch-status');
+  if (!q || !chk || !inp || !status) return;
+  chk.checked = !!q.enabled;
+  // 正在输入时不覆盖：用户敲到一半，状态刷新把输入框改回旧值会很莫名其妙
+  if (document.activeElement !== inp) inp.value = q.shortcut || '';
+  status.textContent = quickLaunchStatusText(q);
+  status.classList.toggle('error', !!(q.enabled && !q.registered));
+}
+// 改开关或组合键。主进程那边是"先注册、成功才落盘"，失败时磁盘和注册状态都不动，
+// 所以这里失败了只需要把界面拨回主进程说的真实状态。
+async function applyQuickLaunch(patch) {
+  try {
+    state.quickLaunch = await api.setQuickLaunch(patch);
+    const inp = $('quick-launch-shortcut');
+    if (inp) inp.value = state.quickLaunch.shortcut || '';
+    toast(t('quickLaunchSaved'), 'success');
+  } catch (e) {
+    toast(describeError(e), 'error');
+    // 开关和状态行拨回真实状态，但输入框留着用户刚敲的值，方便他就地改
+    const inp = $('quick-launch-shortcut');
+    const typed = inp ? inp.value : '';
+    await refreshQuickLaunchStatus();
+    if (inp) inp.value = typed;
+    return false;
+  }
+  renderQuickLaunchSettings();
+  return true;
+}
+// 启动时查一次：配置里开着、但这一次没注册上（被别的程序占了），必须当面说。
+// 不说的话用户只会发现"按了没反应"，没人会去翻设置面板里那一行状态。
+async function checkQuickLaunchAtStartup() {
+  const q = await refreshQuickLaunchStatus();
+  if (q && q.enabled && !q.registered) {
+    toast(describeError(new Error((q.error || 'E_SHORTCUT_TAKEN') + '|' + q.shortcut)), 'error');
+  }
 }
 
 // ===== 分隔条拖拽 =====
@@ -2994,6 +3985,11 @@ async function init() {
     }
   });
   $('btn-filter-toggle').onclick = () => $('filter-panel').classList.toggle('hidden');
+  // 文件树多选的批量操作条
+  $('btn-batch-move').onclick = batchMoveSelected;
+  $('btn-batch-tags').onclick = batchTagsSelected;
+  $('btn-batch-delete').onclick = batchDeleteSelected;
+  $('btn-batch-clear').onclick = clearTreeSelection;
   $('btn-filter-apply').onclick = applyFilter;
   $('btn-filter-clear').onclick = () => {
     $('filter-stage').value = '';
@@ -3003,6 +3999,10 @@ async function init() {
   };
 
   // 内容区按钮
+  // 侧边栏收藏/常用切换。用户点过之后就记住这一栏（本次运行内），不再自动挑。
+  document.querySelectorAll('#usage-panel .usage-tab').forEach(b => {
+    b.onclick = () => { state.usagePanelTab = b.dataset.tab; renderUsage(); };
+  });
   $('btn-copy').onclick = async () => {
     // 按钮变成"已复制"要以真的复制了为前提。占位符面板可以被取消，
     // 那时剪贴板没动过，再闪一下"已复制"就是在骗人。
@@ -3027,6 +4027,13 @@ async function init() {
   // 结果一次点击写两遍盘、多一条无差异快照、version 自增 2。
   $('btn-save').onclick = () => saveCurrent().then(ok => { if (ok) exitEditMode(false); });
   $('btn-cancel').onclick = () => exitEditMode(false);
+  // 说明框里按 Enter 等于 Ctrl+S：保存但留在编辑模式。和保存按钮（保存后退出编辑）
+  // 不同，是因为写完说明按 Enter 的人通常还想接着改，被踢回预览会打断他。
+  $('version-note-input').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    e.preventDefault();
+    if (state.editMode) saveCurrent();
+  });
   $('btn-history').onclick = openHistory;
   $('btn-rename').onclick = renameCurrent;
   $('btn-move').onclick = moveCurrent;
@@ -3083,6 +4090,7 @@ async function init() {
   $('comp-roles').addEventListener('change', updateComposerPreviewDebounced);
   $('comp-stacks').addEventListener('change', updateComposerPreviewDebounced);
   $('comp-rules').addEventListener('change', updateComposerPreviewDebounced);
+  $('comp-export-targets').addEventListener('change', onComposerExportTargetChange);
 
   // 升级检查的三个按钮 + 开关。
   //
@@ -3126,6 +4134,22 @@ async function init() {
   // 主进程查到新版本会推过来。用户没开界面时窗口可能还没加载完，
   // 那种情况下这条推送会丢——设置面板里的 renderUpdateStatus 能补上。
   api.onUpdateAvailable((info) => showUpdateBanner(info));
+  // 全局快捷键。关的时候不带组合键：输入框里正敲着一个不合法的值，也不该挡住"关掉"。
+  // 开的时候带上输入框里的值，用户改完组合键直接勾开关，就是想用这个新键。
+  $('chk-quick-launch').onchange = async (e) => {
+    const on = !!e.target.checked;
+    const typed = $('quick-launch-shortcut').value.trim();
+    const patch = on && typed ? { enabled: true, shortcut: typed } : { enabled: on };
+    if (!await applyQuickLaunch(patch)) e.target.checked = !!(state.quickLaunch && state.quickLaunch.enabled);
+  };
+  $('btn-quick-launch-apply').onclick = () => applyQuickLaunch({ shortcut: $('quick-launch-shortcut').value });
+  $('quick-launch-shortcut').onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); $('btn-quick-launch-apply').click(); }
+  };
+  checkQuickLaunchAtStartup();
+  // 外部改动。挂在首次 refreshTree 和恢复标签之后：在那之前的改动，
+  // 首次读树、读正文时已经是最新的了。
+  api.onLibraryChanged((info) => { onLibraryChanged(info); });
 
   $('btn-empty-trash').onclick = async () => {
     if (await confirmDialog(t('emptyTrashConfirm'))) {
@@ -3168,10 +4192,17 @@ async function init() {
     // 所以 Ctrl+N（新建提示词）和 Ctrl+E（导出）由菜单负责——它们经
     // menu-action IPC 回到这里的 onMenuAction，功能不变。
     // 之前这里也各写了一份，那两个分支实际永远不会执行，属于误导性死代码。
-    // 菜单里没有的键才留在这边：Ctrl+W / Ctrl+S / Ctrl+Shift+F / Ctrl+I / Ctrl+Shift+L。
+    // 菜单里没有的键才留在这边：Ctrl+W / Ctrl+S / Ctrl+Shift+S / Ctrl+Shift+F / Ctrl+I / Ctrl+Shift+L。
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'w') {
       e.preventDefault();
       if (state.activeTab) closeTab(state.activeTab);
+    } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 's') {
+      // 带说明保存：只把焦点移到说明框，写完按 Enter 才保存。
+      // 不直接弹窗：说明是可选的，弹窗会把"想顺手写一句"变成"必须处理一个对话框"。
+      // 必须排在 Ctrl+S 之前——按着 Shift 时 e.key 是大写 'S'，下面那条认不出来，
+      // 但大写锁定打开时不按 Shift 也是 'S'，所以这里要同时判 shiftKey。
+      e.preventDefault();
+      if (state.editMode) { $('version-note-input').focus(); $('version-note-input').select(); }
     } else if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
       if (state.editMode) saveCurrent();
@@ -3202,6 +4233,11 @@ async function init() {
       if (sd && !sd.classList.contains('hidden')) { sd.classList.add('hidden'); return; }
       const fp = $('filter-panel');
       if (fp && !fp.classList.contains('hidden')) { fp.classList.add('hidden'); return; }
+      // 焦点在编辑器里时 Esc 先退出编辑；其余情况下有多选就先清空选择。
+      // 两者都在时按焦点分主次，而不是固定顺序：在树里按 Esc 的人想的是取消选择，
+      // 不是丢掉编辑器里的草稿。
+      const inEditor = document.activeElement === $('editor');
+      if (state.treeSelection.selected.size && !inEditor) { e.preventDefault(); clearTreeSelection(); return; }
       if (state.editMode) { e.preventDefault(); exitEditMode(false); }
     }
   });

@@ -129,6 +129,16 @@ const PAIRS = [
   ['ui', '--focus-ring', '--bg-sidebar', '焦点环（侧边栏）'],
   ['ui', '--focus-ring', '--selection', '焦点环压在选中行上'],
   ['ui', '--flow-edge', '--bg-alt', '流程图连线'],
+
+  // 文件树多选（.tree-row.multi-selected）：底色上压正文、锁定文件的次要文字和焦点环；
+  // 左侧色条是形状信号，对选中底色、侧边栏底色、当前打开文件的底色（一行既打开又被选中）
+  // 都要 3:1——色条对不上侧边栏就只剩一层浅色底，和 hover 分不开。
+  ['text', '--text', '--multi-select-bg', '多选：文件名压在选中底色上'],
+  ['text', '--text-muted', '--multi-select-bg', '多选：锁定文件名压在选中底色上'],
+  ['ui', '--focus-ring', '--multi-select-bg', '多选：焦点环压在选中行上'],
+  ['ui', '--multi-select-mark', '--multi-select-bg', '多选：左侧色条对选中底色'],
+  ['ui', '--multi-select-mark', '--bg-sidebar', '多选：左侧色条对侧边栏'],
+  ['ui', '--multi-select-mark', '--selection', '多选：左侧色条压在当前打开的行上'],
 ];
 
 // 经 opacity 淡化后仍然承载信息的图形：先混合再算。
@@ -212,6 +222,11 @@ check(/var\(--danger-text\)/.test(ruleOf('.btn-danger')) &&
       /var\(--danger-text\)/.test(ruleOf('.ctx-item.danger')),
   '危险操作文字走 --danger-text');
 check(/var\(--accent-text\)/.test(ruleOf('.meta-chip.type')), '工程类型 chip 走 --accent-text');
+// 多选的选中态必须真的走这两个 token。规则是 .tree-row.multi-selected 与它的 :hover
+// 逗号合并写成一条，ruleOf 只认单个选择器紧跟 {，所以取 :hover 那一段（两者共用同一个规则体）。
+check(/var\(--multi-select-bg\)/.test(ruleOf('.tree-row.multi-selected:hover')) &&
+      /var\(--multi-select-mark\)/.test(ruleOf('.tree-row.multi-selected:hover')),
+  '文件树多选走 --multi-select-bg / --multi-select-mark');
 check(/var\(--ctx-hover\)/.test(ruleOf('.ctx-item:hover')), '菜单 hover 底色走 --ctx-hover（不再复用选区色）');
 check(/var\(--border-strong\)/.test(ruleOf('.btn-icon')) &&
       /var\(--border-strong\)/.test(ruleOf('.btn-secondary')) &&
@@ -291,7 +306,10 @@ const LEGACY = {
     '--on-accent': '#ffffff',
     '--ctx-hover': '#dbeafe',
     '--flow-edge': '#93c0f9',        // --primary 在 opacity .5 下混出来的实色
-    '--text-muted': '#636c76'
+    '--text-muted': '#636c76',
+    // 多选最省事的写法：直接复用当前文件的选中色当底色和色条——色条和底色融成一片
+    '--multi-select-bg': '#dbeafe',
+    '--multi-select-mark': '#dbeafe'
   },
   'theme-dark': {
     '--border-strong': '#3c3c3c',
@@ -306,16 +324,22 @@ const LEGACY = {
     '--on-accent': '#ffffff',
     '--ctx-hover': '#264f78',
     '--flow-edge': '#2c5049',
-    '--text-muted': '#9d9d9d'
+    '--text-muted': '#9d9d9d',
+    '--multi-select-bg': '#264f78',
+    '--multi-select-mark': '#264f78'
   }
 };
 let legacyReds = 0;
+let legacyMultiReds = 0;
 for (const [name, vars] of Object.entries(themes)) {
   const legacy = Object.assign({}, vars, LEGACY[name]);
   const reds = runPalette(name, legacy, name);
   legacyReds += reds.length;
+  legacyMultiReds += reds.filter(r => r.includes('多选')).length;
   console.log('  ' + name + ' 旧配色不达标 ' + reds.length + ' 对');
 }
+// 单独数多选那几对：总数 >= 10 由旧的那批就能凑够，新加的断言是不是空的从总数上看不出来。
+check(legacyMultiReds >= 4, '复用选中色的多选配色被判不达标（' + legacyMultiReds + ' 对），多选那几对断言不是空的');
 check(legacyReds >= 10, '旧配色确实被判不达标（' + legacyReds + ' 对），这批断言不是空的');
 
 console.log('');

@@ -395,6 +395,553 @@
           '原文件里应保留 ' + token);
       }
 
+      // ---- 占位符的选项与默认值 ----
+      // 种子 部署检查.md 是扩展语法的内置示例：[目标环境|生产|预发|测试] 有选项，
+      // [部署方式=Docker|...] 有默认值。用真实种子而不是现造的夹具，理由同上面那段。
+      {
+        const OPT = '[目标环境|生产|预发|测试]';
+        const DEF = '[部署方式=Docker|Docker|静态资源|CI 流水线]';
+        await openFile('prompts/deployment/部署检查.md');
+        await sleep(400);
+        const chipOf = (tok) => Array.from(document.querySelectorAll('#preview mark.ph')).find(el => el.dataset.token === tok);
+        const optChip = chipOf(OPT);
+        const defChip = chipOf(DEF);
+        check('有选项的 chip 带上了"可选"标记',
+          !!optChip && optChip.classList.contains('ph-opts') && !!optChip.dataset.badge,
+          optChip ? optChip.className + ' badge=' + optChip.dataset.badge : '(chip 不见了)');
+        check('有默认值的 chip 显示默认值并带上"默认"标记',
+          !!defChip && defChip.classList.contains('ph-default') && defChip.textContent === 'Docker' && !!defChip.dataset.badge,
+          defChip ? defChip.className + ' text=' + defChip.textContent : '(chip 不见了)');
+
+        const origPromptDone = pendingPromptDone;
+        try {
+          if (optChip) optChip.click();
+          for (let i = 0; i < 40 && !document.getElementById('ctx-input'); i++) await sleep(50);
+          const inp = document.getElementById('ctx-input');
+          const sel = inp && inp.previousElementSibling && inp.previousElementSibling.tagName === 'SELECT'
+            ? inp.previousElementSibling : null;
+          const choices = sel ? Array.from(sel.options).map(o => o.value).filter(Boolean) : [];
+          check('就地填写有选项的占位符时出现下拉框，列出全部选项',
+            !!inp && inp.tagName === 'TEXTAREA' && JSON.stringify(choices) === JSON.stringify(['生产', '预发', '测试']),
+            inp ? inp.tagName + ' ' + JSON.stringify(choices) : '没弹出填写框');
+          if (sel) {
+            sel.value = '预发';
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          check('在下拉框里选一项会写进填写框', !!inp && inp.value === '预发', inp ? inp.value : '');
+          // Shift+Enter 是换行，不能提交。合成的 keydown 不会真的插入换行，
+          // 这里能分辨的是"弹层还开着"：处理器若把它当 Enter 提交，弹层就关了。
+          if (inp) inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true, cancelable: true }));
+          await sleep(150);
+          check('就地填写框里 Shift+Enter 不提交', !!document.getElementById('ctx-input') && menuVisible());
+          const live = document.getElementById('ctx-input');
+          if (live) live.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+          await sleep(300);
+        } finally {
+          if (pendingPromptDone) { const cancel = pendingPromptDone; cancel(null); }
+          pendingPromptDone = origPromptDone;
+        }
+        const optAfter = chipOf(OPT);
+        check('就地填写框里 Enter 提交，chip 显示选中的值',
+          !!optAfter && optAfter.classList.contains('ph-filled') && optAfter.textContent === '预发',
+          optAfter ? optAfter.className + ' text=' + optAfter.textContent : '(chip 不见了)');
+
+        // 复制：填过的用填的值，没点过的默认值 chip 按默认值填，其余原样保留。
+        const origWrite = navigator.clipboard.writeText.bind(navigator.clipboard);
+        let copied = null;
+        navigator.clipboard.writeText = async (text) => { copied = text; };
+        const cancelPanelSoon = (async () => {
+          for (let i = 0; i < 12; i++) {
+            await sleep(50);
+            if (pendingPromptDone) pendingPromptDone(null);
+          }
+        })();
+        try {
+          await copyContent();
+        } catch (err) {
+          copied = 'THREW:' + String(err && err.message);
+        } finally {
+          navigator.clipboard.writeText = origWrite;
+          await cancelPanelSoon;
+        }
+        check('复制时没改过的默认值按默认值填入',
+          !!copied && copied.includes('**目标环境**：预发') && copied.includes('**部署方式**：Docker')
+            && !copied.includes('[部署方式=') && copied.includes('[在此描述变更内容]'),
+          String(copied).slice(0, 200));
+
+        // 复制面板：默认值预填进框里，上次填过的值优先于默认值。
+        // 直接调 promptFillPlaceholders，不走 copyContent：上面已经就地填过，
+        // copyContent 不会再弹面板。
+        const items = PLACEHOLDERS.extract(parseFrontmatter(state.currentContent).body);
+        const openPanel = async () => {
+          const pending = promptFillPlaceholders(items);
+          await sleep(100);
+          const areas = Array.from(document.querySelectorAll('#ctx-menu textarea[data-token]'));
+          const snapshot = areas.map(a => [a.dataset.token, a.value]);
+          const selects = document.querySelectorAll('#ctx-menu select').length;
+          const ok = document.getElementById('fill-ok');
+          if (ok) await realClick(ok);
+          const values = await pending;
+          return { snapshot: Object.fromEntries(snapshot), selects, values };
+        };
+        const savedMemo = state.fillMemory[DEF];
+        try {
+          delete state.fillMemory[DEF];
+          const first = await openPanel();
+          check('复制面板里有默认值的框预填默认值，有选项的带下拉框',
+            first.snapshot[DEF] === 'Docker' && first.selects === 2 && first.values && first.values[DEF] === 'Docker',
+            JSON.stringify(first));
+          state.fillMemory[DEF] = '静态资源';
+          const second = await openPanel();
+          check('复制面板里上次填过的值优先于默认值', second.snapshot[DEF] === '静态资源', JSON.stringify(second.snapshot));
+        } finally {
+          if (savedMemo === undefined) delete state.fillMemory[DEF];
+          else state.fillMemory[DEF] = savedMemo;
+          if (pendingPromptDone) pendingPromptDone(null);
+        }
+      }
+
+      // ---- 装配器的导出目标 ----
+      // 临时数据目录里的 config 从没存过 ruleExportTargets，正好是"老用户升级上来"的状态：
+      // 勾上的必须恰好是原来固定导出的那两份。勾选之后要真的落盘，而且关掉再打开
+      // 装配器时按配置重画（不是停在 DOM 上次的样子）。
+      {
+        const targetBoxes = () => Array.from(document.querySelectorAll('#comp-export-targets input[type="checkbox"]'));
+        const checkedIds = () => targetBoxes().filter(el => el.checked).map(el => el.value).join(',');
+        await realClick(document.getElementById('btn-composer'));
+        const opened = !document.getElementById('composer-modal').classList.contains('hidden');
+        check('装配器列出全部导出目标（' + targetBoxes().length + ' 项）', opened && targetBoxes().length === 5,
+          opened ? '' : '装配器没打开');
+        check('没存过勾选状态时默认只勾 CLAUDE.md 和 .cursorrules', checkedIds() === 'claude,cursor-legacy', checkedIds());
+        const agents = targetBoxes().find(el => el.value === 'agents');
+        if (agents) { agents.click(); await sleep(300); }
+        const saved = (await window.promptFlowApi.getConfig()).ruleExportTargets;
+        check('勾选导出目标后写进配置', JSON.stringify(saved) === '["claude","agents","cursor-legacy"]', JSON.stringify(saved));
+        await realClick(document.getElementById('btn-composer-close'));
+        await realClick(document.getElementById('btn-composer'));
+        check('重新打开装配器时导出目标按配置恢复', checkedIds() === 'claude,agents,cursor-legacy', checkedIds());
+        await realClick(document.getElementById('btn-composer-close'));
+      }
+
+      // ---- 带说明保存 → 历史抽屉里看得到说明 ----
+      // 走真实入口：编辑区的说明框 + Ctrl+S、Ctrl+Shift+S 聚焦 + 说明框里 Enter。
+      // 第二次保存之后再看一次，是为了验证语义而不只是"字出现了"：说明描述的是
+      // 那次保存写进去的内容，所以第一句先在"当前内容"行，第二次保存后要跟着那份
+      // 内容挪到快照行，不能留在当前内容上，也不能挂到装着更旧内容的那条快照上。
+      //
+      // 等待一律用"轮询 IPC 直到条件成立"，不用 sleep：窗口在后台时 Chromium 把计时器
+      // 节流到约 1 秒一次，这一段原先按 sleep 写要 13 秒，把整个 UI 自检顶过了 120 秒上限
+      // （实测）。IPC 往返不受节流，条件一成立就往下走。
+      {
+        const noteRel = 'prompts/testing/' + newName + '.md';
+        const api = window.promptFlowApi;
+        const until = async (cond) => {
+          for (let i = 0; i < 300; i++) {
+            if (await cond()) return true;
+            await api.getRoot();
+          }
+          return false;
+        };
+        await openFile(noteRel);
+        document.getElementById('btn-edit').click();
+        const noteInput = document.getElementById('version-note-input');
+        const editor = document.getElementById('editor');
+        const ctrlKey = (target, key, shift) => target.dispatchEvent(new KeyboardEvent('keydown', { key, ctrlKey: true, shiftKey: !!shift, bubbles: true, cancelable: true }));
+        const historyRows = () => ({
+          current: (document.querySelector('#version-list .version-item.current .vi-note') || {}).textContent || '',
+          snapshots: Array.from(document.querySelectorAll('#version-list .version-item[data-file]'))
+            .map(el => (el.querySelector('.vi-note') || {}).textContent || '')
+        });
+        // 打开抽屉走按钮的真实 click；等到"当前内容"行渲染出来再读
+        const openDrawer = async (expectSnapshots) => {
+          document.getElementById('version-list').innerHTML = '';
+          document.getElementById('btn-history').click();
+          await until(() => !!document.querySelector('#version-list .version-item.current')
+            && document.querySelectorAll('#version-list .version-item[data-file]').length >= expectSnapshots);
+        };
+        check('编辑模式下有可选的版本说明输入框', !!noteInput && noteInput.offsetParent !== null && state.editMode,
+          noteInput ? 'visible=' + (noteInput.offsetParent !== null) + ' editMode=' + state.editMode : 'no input');
+
+        editor.value = editor.value + '\nUI 自检第一处改动';
+        editor.dispatchEvent(new Event('input', { bubbles: true }));
+        noteInput.value = 'UI自检说明一';
+        const v0 = (await api.listVersions(noteRel)).length;
+        ctrlKey(editor, 's');
+        await until(async () => noteInput.value === '' && !isDirty());
+        check('Ctrl+S 带说明保存后清空说明框且留在编辑模式', noteInput.value === '' && state.editMode
+          && (await api.readFile(noteRel)).content.includes('UI 自检第一处改动'), 'note=' + noteInput.value);
+
+        await openDrawer(v0 + 1);
+        let rows = historyRows();
+        check('带说明保存后历史抽屉里能看到说明（挂在当前内容那一行）',
+          rows.current === 'UI自检说明一' && !rows.snapshots.includes('UI自检说明一'), JSON.stringify(rows));
+        document.getElementById('btn-history-close').click();
+
+        // Ctrl+Shift+S 只聚焦说明框，不保存
+        const v1 = (await api.listVersions(noteRel)).length;
+        editor.focus();
+        ctrlKey(editor, 'S', true);
+        await api.getRoot();
+        check('Ctrl+Shift+S 聚焦说明框且不触发保存', document.activeElement === noteInput
+          && (await api.listVersions(noteRel)).length === v1,
+        (document.activeElement ? (document.activeElement.id || document.activeElement.tagName) : 'none') + ' editMode=' + state.editMode);
+
+        editor.value = editor.value + '\nUI 自检第二处改动';
+        editor.dispatchEvent(new Event('input', { bubbles: true }));
+        noteInput.value = 'UI自检说明二';
+        noteInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+        await until(async () => noteInput.value === '' && !isDirty());
+        await openDrawer(v1 + 1);
+        rows = historyRows();
+        check('说明框里 Enter 保存，上一句说明随它描述的内容进入历史',
+          rows.current === 'UI自检说明二' && rows.snapshots[0] === 'UI自检说明一' && !rows.snapshots.slice(1).includes('UI自检说明一'),
+          JSON.stringify(rows));
+        document.getElementById('btn-history-close').click();
+        // 收尾前把编辑器复位到基准：上面任一次保存没成功的话编辑器还是脏的，
+        // 点取消会弹原生确认框，UI 自检里没人去点，整段自检挂到超时，前面的
+        // 失败信息也一条都输出不出来。
+        if (isDirty()) { editor.value = state.editBaseline; editor.dispatchEvent(new Event('input', { bubbles: true })); }
+        document.getElementById('btn-cancel').click();
+        await until(() => !state.editMode);
+      }
+
+      // ---- 收藏 / 常用 ----
+      // 用自己新建的文件，不动种子：这段会把它改名、删进回收站、再清空回收站。
+      // tests/ui-smoke.js 预先往 usage.json 里放了一个外部已删除文件的收藏和高频统计
+      // （prompts/testing/外部已删除.md，复制 50 次、刚刚用过），用来验"不留幽灵条目"：
+      // 渲染不过滤的话，它会排在收藏里、并且压在常用第一位。
+      {
+        const ghost = 'prompts/testing/外部已删除.md';
+        const favRel = 'prompts/testing/收藏自检-' + Date.now() + '.md';
+        const api = window.promptFlowApi;
+        const panel = document.getElementById('usage-panel');
+        const listRels = () => Array.from(document.querySelectorAll('#usage-list .usage-item')).map(el => el.dataset.rel);
+        const showTab = async (tab) => {
+          const b = panel.querySelector('.usage-tab[data-tab="' + tab + '"]');
+          if (b) await realClick(b);
+        };
+        const pre = await api.getUsage();
+        check('前置：usage.json 里确实有外部已删除文件的收藏和统计',
+          pre.favorites.includes(ghost) && pre.frequent.some(x => x.rel === ghost && x.count >= 10), JSON.stringify(pre));
+        await api.createFile(favRel, '---\ntitle: 收藏自检\n---\n\n没有占位符的正文。\n');
+        await refreshTree();
+        await sleep(300);
+
+        // 右键 → 收藏
+        const row = Array.from(document.querySelectorAll('#tree .tree-row.file')).find(r => r.__rel === favRel);
+        const ctxItemFor = (key) => Array.from(menu().querySelectorAll('.ctx-item')).find(el => el.textContent === t(key));
+        let favItem = null;
+        if (row) {
+          row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 200, clientY: 200 }));
+          await sleep(200);
+          favItem = ctxItemFor('ctxFavorite');
+        }
+        check('右键菜单里有「收藏」', !!favItem, row ? menu().textContent : '树里找不到新建的文件');
+        if (favItem) await realClick(favItem);
+        await sleep(400);
+        const panelShown = () => !panel.classList.contains('hidden') && panel.offsetParent !== null;
+        check('收藏后侧边栏显示收藏区且列出这个文件', panelShown() && listRels().includes(favRel),
+          'hidden=' + panel.classList.contains('hidden') + ' 列表=' + JSON.stringify(listRels()));
+        check('收藏区不显示外部已删除的文件（不留幽灵条目）', panelShown() && !listRels().includes(ghost),
+          JSON.stringify(listRels()));
+        if (row) {
+          row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 200, clientY: 200 }));
+          await sleep(200);
+          check('已收藏的文件右键显示「取消收藏」', !!ctxItemFor('ctxUnfavorite'), menu().textContent);
+          await realClick(document.body);
+        }
+
+        // 收藏条目一键打开
+        await openFile('workflows/branch-flow-example.md');
+        await sleep(200);
+        const favBtn = Array.from(document.querySelectorAll('#usage-list .usage-item')).find(el => el.dataset.rel === favRel);
+        if (favBtn) await realClick(favBtn);
+        await sleep(400);
+        check('点收藏条目能打开对应文件', state.currentRel === favRel, String(state.currentRel));
+
+        // 复制两次 → 常用第一。剪贴板换成采集器，不碰真实剪贴板。
+        const origWrite = navigator.clipboard.writeText.bind(navigator.clipboard);
+        navigator.clipboard.writeText = async () => {};
+        try {
+          await openFile(favRel);
+          await copyContent();
+          await copyContent();
+          await sleep(400);
+          const u = await api.getUsage();
+          const mine = u.frequent.find(x => x.rel === favRel);
+          check('复制成功记了次数和最后使用时间', !!mine && mine.count === 2 && Date.now() - mine.lastUsedAt < 60000,
+            JSON.stringify(mine));
+          await showTab('frequent');
+          // ghost 统计是 50 次、刚刚用过，不过滤就排第一
+          check('常用列表按使用排序且不显示外部已删除的文件',
+            listRels()[0] === favRel && !listRels().includes(ghost), JSON.stringify(listRels()));
+          const badge = (document.querySelector('#usage-list .usage-item .us-count') || {}).textContent || '';
+          check('常用条目显示复制次数', badge === t('usageCount', { count: 2 }), badge);
+
+          // 取消填充面板：不算一次使用。用一个带占位符、没有就地填过的文件。
+          const phRel = 'prompts/code-generation/功能实现.md';
+          await openFile(phRel);
+          delete state.previewFills[phRel];
+          const beforeCancel = ((await api.getUsage()).frequent.find(x => x.rel === phRel) || { count: 0 }).count;
+          const cancelSoon = (async () => {
+            for (let i = 0; i < 40 && !pendingPromptDone; i++) await sleep(50);
+            if (pendingPromptDone) pendingPromptDone(null);
+          })();
+          const copied = await copyContent();
+          await cancelSoon;
+          await sleep(300);
+          const afterCancel = ((await api.getUsage()).frequent.find(x => x.rel === phRel) || { count: 0 }).count;
+          check('取消复制不计入使用次数', copied === false && afterCancel === beforeCancel,
+            'copyContent=' + copied + ' 次数 ' + beforeCancel + ' → ' + afterCancel);
+        } finally {
+          navigator.clipboard.writeText = origWrite;
+        }
+
+        // 改名：统计和收藏跟着走
+        const renamedRel = favRel.replace(/\.md$/, '-改名.md');
+        await api.rename(favRel, renamedRel);
+        await refreshTree();
+        await sleep(400);
+        const ur = await api.getUsage();
+        const mineAfter = ur.frequent.find(x => x.rel === renamedRel);
+        check('改名后收藏和统计跟着文件走',
+          ur.favorites.includes(renamedRel) && !ur.favorites.includes(favRel) && !!mineAfter && mineAfter.count === 2
+            && !ur.frequent.some(x => x.rel === favRel), JSON.stringify({ favorites: ur.favorites, mine: mineAfter }));
+        await showTab('favorites');
+        check('改名后收藏区显示新路径', listRels().includes(renamedRel) && !listRels().includes(favRel), JSON.stringify(listRels()));
+
+        // 删进回收站：不显示，但保留；恢复后还在
+        await api.trash(renamedRel);
+        await refreshTree();
+        await sleep(400);
+        const ut = await api.getUsage();
+        check('删进回收站后收藏区不再显示它', !listRels().includes(renamedRel), JSON.stringify(listRels()));
+        check('删进回收站时保留收藏和统计', ut.favorites.includes(renamedRel) && ut.frequent.some(x => x.rel === renamedRel),
+          JSON.stringify(ut.favorites));
+        const item = (await api.listTrash()).items.find(i => i.originalRel === renamedRel);
+        if (item) await api.restore(item.id);
+        await refreshTree();
+        await sleep(400);
+        await showTab('favorites');
+        const us = await api.getUsage();
+        check('从回收站恢复后收藏和统计还在', !!item && listRels().includes(renamedRel)
+          && (us.frequent.find(x => x.rel === renamedRel) || {}).count === 2, JSON.stringify(listRels()));
+
+        // 改名再删再清空回收站：统计和收藏清掉（清的是改名后的路径）
+        await api.trash(renamedRel);
+        await api.emptyTrash();
+        await refreshTree();
+        await sleep(400);
+        const ue = await api.getUsage();
+        check('清空回收站后统计和收藏一起清掉',
+          !ue.favorites.includes(renamedRel) && !ue.frequent.some(x => x.rel === renamedRel), JSON.stringify(ue.favorites));
+        check('清空回收站只清被彻底删除的文件，不动其他文件的统计',
+          ue.frequent.some(x => x.rel === 'prompts/code-generation/功能实现.md'), JSON.stringify(ue.frequent.map(x => x.rel)));
+        // 语言切换后收藏/常用区跟着重画（标签文字来自 data-i18n，列表空提示来自 t()）
+        const tabText = panel.querySelector('.usage-tab[data-tab="frequent"]').textContent;
+        check('收藏/常用区的标签走 i18n', tabText === t('frequent'), tabText);
+      }
+
+      // ---- 文件树多选与批量操作 ----
+      // 全程走真实事件：Ctrl/Shift+点击行、点批量条按钮、在弹层里输入并点确定。
+      // 原生确认框由 tests/ui-smoke.js 的对话框队列应答（顺序：批量移动的引用同步 → 批量删除）。
+      // 批量移动的"引用只问一次"就靠这个队列验：问了两次的话第二次会吃掉删除那一项，
+      // 删除被当成取消，下面删除那几条全红，ui-smoke 还会报"队列已空"。
+      {
+        const api = window.promptFlowApi;
+        const D = 'prompts/testing/UI批量';
+        const rA = D + 'A.md', rB = D + 'B.md', rC = D + 'C.md', rL = D + '锁定.md';
+        const wf = 'workflows/UI批量引用.md';
+        const L = I18N[(state.config && state.config.lang) || 'zh'] || I18N.zh;
+        await api.createFile(rA, '---\ntitle: UI批量A\nstage: testing\ntags: [丙]\n---\nA');
+        await api.createFile(rB, '---\ntitle: UI批量B\nstage: testing\ntags:\n  - 多行\n---\nB');
+        await api.createFile(rC, '---\ntitle: UI批量C\nstage: testing\ntags: [丙]\n---\nC');
+        await api.createFile(rL, '---\ntitle: UI批量锁定\nstage: testing\n---\n锁定正文');
+        await api.createFile('prompts/deployment/UI批量B.md', '---\ntitle: 目标目录里的同名文件\n---\n不能被覆盖');
+        await api.createFile(wf, '---\ntitle: UI批量引用\nflow:\n  - id: a\n    prompt: ' + rA + '\n  - id: b\n    prompt: ' + rB + '\n---\n');
+        state.expandedPaths.add('prompts').add('prompts/testing').add('prompts/deployment');
+        await refreshTree();
+        await sleep(200);
+        const rowOf = (rel) => Array.from(document.querySelectorAll('#tree .tree-row.file')).find(r => r.__rel === rel);
+        const clickRow = async (rel, mods) => {
+          const el = rowOf(rel);
+          if (!el) return false;
+          for (const type of ['mousedown', 'mouseup', 'click']) {
+            el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, ...(mods || {}) }));
+          }
+          await sleep(200);
+          return true;
+        };
+        const selected = () => [...state.treeSelection.selected].sort();
+        const barShown = () => !document.getElementById('batch-bar').classList.contains('hidden');
+        const waitFor = async (fn, ms) => {
+          const t0 = Date.now();
+          while (Date.now() - t0 < (ms || 4000)) { if (fn()) return true; await sleep(50); }
+          return false;
+        };
+        const confirmInput = async (value) => {
+          await waitFor(() => !!document.getElementById('ctx-input'), 2000);
+          const inp = document.getElementById('ctx-input');
+          if (!inp) return false;
+          inp.value = value;
+          await realClick(document.getElementById('ctx-ok'));
+          return true;
+        };
+
+        // 选择：普通单击照旧打开文件；Ctrl+点击切换选中、不打开文件
+        await clickRow(rA);
+        await sleep(200);
+        check('多选：普通单击仍然打开文件且不进入多选', state.currentRel === rA && selected().length === 0 && !barShown(),
+          'currentRel=' + state.currentRel + ' selected=' + selected().join(','));
+        await clickRow(rC, { ctrlKey: true });
+        check('多选：单击 A 后 Ctrl+点击 C，两个都选中并出现批量条',
+          selected().join() === [rA, rC].sort().join() && barShown() && state.currentRel === rA,
+          selected().join(',') + ' bar=' + barShown());
+        check('多选：选中行有可见的选中态',
+          rowOf(rA).classList.contains('multi-selected') && rowOf(rC).getAttribute('aria-selected') === 'true'
+          && !rowOf(rB).classList.contains('multi-selected'));
+        await clickRow(rC, { ctrlKey: true });
+        check('多选：再次 Ctrl+点击取消选中，只剩 1 个时批量条收起', selected().join() === rA && !barShown(), selected().join(','));
+
+        // Esc 清空
+        await clickRow(rB, { ctrlKey: true });
+        const beforeEsc = selected().length;
+        document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        await sleep(150);
+        check('多选：Esc 清空选择', beforeEsc === 2 && selected().length === 0 && !barShown(), 'before=' + beforeEsc + ' after=' + selected().length);
+
+        // Shift+点击：按可见顺序。先在无筛选时确认 B 夹在 A、C 之间，再筛掉 B
+        const order = Array.from(document.querySelectorAll('#tree .tree-row.file')).map(r => r.__rel);
+        check('多选前置：树上 B 夹在 A 和 C 之间', order.indexOf(rA) < order.indexOf(rB) && order.indexOf(rB) < order.indexOf(rC),
+          [rA, rB, rC].map(r => order.indexOf(r)).join(','));
+        await clickRow(rA);
+        await clickRow(rC, { shiftKey: true });
+        check('多选：Shift+点击选中锚点到这一行之间的所有可见行', selected().join() === [rA, rB, rC].sort().join(), selected().join(','));
+        document.getElementById('filter-tag').value = '丙';
+        applyFilter();
+        await sleep(100);
+        check('多选前置：标签筛选把 B 隐藏了而 A、C 可见',
+          rowOf(rB).offsetParent === null && rowOf(rA).offsetParent !== null && rowOf(rC).offsetParent !== null);
+        check('多选：筛选后看不见的行从选择里剔掉', selected().join() === [rA, rC].sort().join(), selected().join(','));
+        await clickRow(rA);
+        await clickRow(rC, { shiftKey: true });
+        check('多选：Shift+点击跳过被筛掉、看不见的行', selected().join() === [rA, rC].sort().join(), selected().join(','));
+        document.getElementById('filter-tag').value = '';
+        applyFilter();
+        await sleep(100);
+
+        // 折叠目录：目录里的选中项剔掉（折叠用的是 hidden 类，不是行内 display:none）
+        await clickRow(rA);
+        await clickRow(rC, { ctrlKey: true });
+        const testingDir = Array.from(document.querySelectorAll('#tree .tree-row.dir'))
+          .find(r => r.nextElementSibling && r.nextElementSibling.contains(rowOf(rA)) && !r.nextElementSibling.querySelector('.tree-row.dir'));
+        const beforeCollapse = selected().length;
+        if (testingDir) await realClick(testingDir);
+        check('多选：折叠目录后目录里的选中项被剔掉、批量条收起',
+          !!testingDir && beforeCollapse === 2 && selected().length === 0 && !barShown(),
+          'dir=' + !!testingDir + ' before=' + beforeCollapse + ' after=' + selected().length);
+        if (testingDir) await realClick(testingDir);
+
+        // Shift+方向键扩展选择
+        {
+          await clickRow(rA);
+          rowOf(rA).focus();
+          rowOf(rA).dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', shiftKey: true, bubbles: true }));
+          await sleep(100);
+          check('多选：Shift+↓ 把下一行并进选择', selected().join() === [rA, rB].sort().join(), selected().join(','));
+          clearTreeSelection();
+        }
+
+        // 批量移动：连点两下只弹一个选目录弹层；同名生成新名字；标签页路径跟着改；引用只问一次
+        await clickRow(rA);
+        await clickRow(rB, { ctrlKey: true });
+        const moveBtn = document.getElementById('btn-batch-move');
+        moveBtn.click();
+        await sleep(50);
+        const disabledWhileRunning = moveBtn.disabled;
+        const firstMenuInput = document.getElementById('ctx-input');
+        // 绕过按钮禁用直接再调一次入口：防的是"另一个入口同时触发"，按钮禁用拦不住那种
+        batchMoveSelected();
+        await sleep(100);
+        check('批量：进行中再次触发被拦下（按钮禁用 + 提示进行中，弹层还是原来那一个）',
+          disabledWhileRunning && document.getElementById('ctx-input') === firstMenuInput
+          && document.getElementById('toast').textContent === L.batchBusy,
+          'disabled=' + disabledWhileRunning + ' toast=' + document.getElementById('toast').textContent);
+        await confirmInput(L.stage_deployment || 'deployment');
+        await waitFor(() => !state.batchRunning, 6000);
+        const metaRels = (await api.getMetaList()).map(m => m.rel);
+        const newA = 'prompts/deployment/UI批量A.md', newB = 'prompts/deployment/UI批量B-1.md';
+        check('批量移动：两个文件都移到了目标目录，同名的生成新名字',
+          metaRels.includes(newA) && metaRels.includes(newB) && !metaRels.includes(rA) && !metaRels.includes(rB),
+          JSON.stringify(metaRels.filter(r => r.includes('UI批量'))));
+        check('批量移动：目标目录里原有的同名文件没有被覆盖',
+          (await api.readFile('prompts/deployment/UI批量B.md')).content.includes('不能被覆盖'));
+        check('批量移动：已打开的标签页跟着改路径',
+          state.tabs.some(tb => tb.rel === newA) && !state.tabs.some(tb => tb.rel === rA) && state.currentRel === newA,
+          'tabs=' + state.tabs.map(tb => tb.rel).join(',') + ' current=' + state.currentRel);
+        const wfAfter = (await api.readFile(wf)).content;
+        check('批量移动：确认一次后两个文件的工作流引用都更新了',
+          wfAfter.includes('prompt: ' + newA) && wfAfter.includes('prompt: ' + newB), wfAfter);
+        check('批量移动：移动后选择清空', selected().length === 0 && !barShown());
+
+        // 批量打标签：跨目录选择，行内 / 多行两种写法；当前打开的标签页重读
+        await clickRow(rC);
+        await clickRow(newA, { ctrlKey: true });
+        await clickRow(newB, { ctrlKey: true });
+        await realClick(document.getElementById('btn-batch-tags'));
+        await confirmInput('UI批量标签, 第二个');
+        await waitFor(() => !state.batchRunning, 6000);
+        const cAfter = await api.readFile(rC);
+        const bAfter = await api.readFile(newB);
+        check('批量打标签：行内数组追加两个标签', JSON.stringify(cAfter.meta.tags) === '["丙","UI批量标签","第二个"]', JSON.stringify(cAfter.meta.tags));
+        check('批量打标签：多行列表保留写法并追加',
+          bAfter.content.includes('tags:\n  - 多行\n  - "UI批量标签"\n  - "第二个"\n'), bAfter.content);
+        check('批量打标签：当前打开的标签页重读了磁盘（元信息栏出现新标签）',
+          state.currentRel === rC && state.currentContent.includes('UI批量标签')
+          && document.getElementById('meta-bar').textContent.includes('UI批量标签'),
+          document.getElementById('meta-bar').textContent);
+        check('批量打标签：每个文件留了一条快照', (await api.listVersions(rC)).length === 1);
+        check('批量打标签：完成后选择保留（便于接着操作这一批）', selected().length === 3, selected().join(','));
+        await realClick(document.getElementById('btn-batch-tags'));
+        await waitFor(() => !!document.getElementById('ctx-tags-remove'), 2000);
+        document.getElementById('ctx-input').value = '第二个';
+        await realClick(document.getElementById('ctx-tags-remove'));
+        await waitFor(() => !state.batchRunning, 6000);
+        check('批量删标签：只拿掉输入的那一个',
+          JSON.stringify((await api.readFile(rC)).meta.tags) === '["丙","UI批量标签"]'
+          && !(await api.readFile(newB)).content.includes('第二个'), (await api.readFile(newB)).content);
+
+        // 批量删除：锁定的被主进程跳过并在报告里列出；当前标签被删时切到相邻的那个
+        await api.setConfig({ lockedFiles: [rL] });
+        state.lockedFiles = new Set([rL]);
+        await openFile(rL);
+        await clickRow(rC);
+        await clickRow(rL, { ctrlKey: true });
+        await clickRow(newA, { ctrlKey: true });
+        await realClick(document.getElementById('btn-batch-delete'));
+        const reportShown = await waitFor(() => !!document.querySelector('#ctx-menu .batch-report-list'), 6000);
+        const items = Array.from(document.querySelectorAll('#ctx-menu .batch-report-item'))
+          .map(li => ({ rel: li.dataset.rel, code: li.dataset.code, kind: li.classList.contains('skipped') ? 'skipped' : 'failed' }));
+        check('批量删除：结果汇总列出被跳过的锁定文件及原因',
+          reportShown && items.length === 1 && items[0].rel === rL && items[0].code === 'E_LOCKED' && items[0].kind === 'skipped',
+          JSON.stringify(items));
+        const reportTitle = (document.getElementById('batch-report-title') || {}).textContent || '';
+        check('批量删除：汇总标题写明成功 2 个、跳过 1 个',
+          reportTitle === L.batchReportTitle.split('{action}').join(L.batchActionDelete).split('{ok}').join('2').split('{failed}').join('0').split('{skipped}').join('1'),
+          reportTitle);
+        if (document.getElementById('ctx-ok')) await realClick(document.getElementById('ctx-ok'));
+        await waitFor(() => !state.batchRunning, 4000);
+        const trashedRels = (await api.listTrash()).items.map(i => i.originalRel);
+        check('批量删除：未锁定的进了回收站', trashedRels.includes(rC) && trashedRels.includes(newA), JSON.stringify(trashedRels.slice(0, 6)));
+        check('批量删除：锁定的文件还在', (await api.readFile(rL)).content.includes('锁定正文'));
+        check('批量删除：被删文件的标签页关掉了，当前标签切到相邻的那个',
+          !state.tabs.some(tb => tb.rel === rC || tb.rel === newA) && state.currentRel === rL && state.activeTab === rL,
+          'tabs=' + state.tabs.map(tb => tb.rel).join(',') + ' current=' + state.currentRel);
+        await api.setConfig({ lockedFiles: [] });
+        state.lockedFiles = new Set();
+        clearTreeSelection();
+      }
+
       // ---- 右键菜单 ----
       const fileRow = document.querySelector('#tree .tree-row.file') || document.querySelector('#tree .tree-row');
       if (fileRow) {

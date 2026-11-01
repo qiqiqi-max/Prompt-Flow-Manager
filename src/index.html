@@ -55,6 +55,27 @@
       <!-- 左：文件树 -->
       <aside class="sidebar">
         <div class="sidebar-header" data-i18n="sidebarFiles">文件</div>
+        <!-- 收藏 / 常用。两栏都没有内容时整块隐藏（见 renderUsage），
+             所以新用户的侧边栏和以前一样；有内容时高度封顶，树始终留着大半。 -->
+        <div id="usage-panel" class="usage-panel hidden">
+          <div class="usage-tabs" role="tablist">
+            <button type="button" class="usage-tab" role="tab" data-tab="favorites" data-i18n="favorites">收藏</button>
+            <button type="button" class="usage-tab" role="tab" data-tab="frequent" data-i18n="frequent">常用</button>
+          </div>
+          <div id="usage-list" class="usage-list" role="tabpanel"></div>
+        </div>
+        <!-- 批量操作条：文件树里选中 2 个及以上文件时出现（Ctrl/Shift+点击选择，Esc 清空）。
+             放在树上方而不是右键菜单里：右键菜单是"对这一行"的语义，批量项混进去
+             要靠"右键的这一行在不在选择里"来切换含义，点错一行就成了单个操作。 -->
+        <div id="batch-bar" class="batch-bar hidden" role="toolbar" data-i18n-aria="batchBarLabel">
+          <span id="batch-count" class="batch-count" aria-live="polite"></span>
+          <div class="batch-actions">
+            <button class="btn-secondary" id="btn-batch-move" data-i18n="batchMove">移动</button>
+            <button class="btn-secondary" id="btn-batch-tags" data-i18n="batchTags">标签</button>
+            <button class="btn-danger" id="btn-batch-delete" data-i18n="batchDelete">删除</button>
+            <button class="btn-link" id="btn-batch-clear" data-i18n="batchClear">取消选择</button>
+          </div>
+        </div>
         <div id="tree" class="tree"></div>
         <div id="search-results" class="search-results hidden"></div>
       </aside>
@@ -109,6 +130,16 @@
           <!-- 元信息条 -->
           <div class="meta-bar" id="meta-bar"></div>
 
+          <!-- 外部改动提示条：文件在应用之外被改（且正在编辑、有未保存改动），
+               或被删除/改名。非阻塞，不挡编辑；文案和按钮由 renderExternalNotice 填。 -->
+          <div id="external-notice" class="external-notice hidden" role="status" aria-live="polite">
+            <span id="external-notice-text" class="external-notice-text"></span>
+            <span class="external-notice-actions">
+              <button class="btn-link" id="btn-external-primary"></button>
+              <button class="btn-link" id="btn-external-secondary"></button>
+            </span>
+          </div>
+
           <!-- 预览区 -->
           <div id="preview-wrap" class="preview-wrap">
             <!-- 占位符提示行：[提示文字] 在正文里标成可点的 chip，但这没有自解释性，
@@ -121,6 +152,12 @@
           <div id="editor-wrap" class="editor-wrap hidden">
             <textarea id="editor" class="editor" spellcheck="false" data-i18n-placeholder="editorPlaceholder" placeholder="在此编辑提示词内容…"></textarea>
             <div class="editor-actions">
+              <!-- 版本说明：可选，不填照常保存，所以 Ctrl+S 的快速保存不受影响。
+                   maxlength 与主进程 MAX_VERSION_NOTE 一致（主进程另有校验）。 -->
+              <input id="version-note-input" class="version-note-input" type="text" maxlength="200" autocomplete="off"
+                data-i18n-placeholder="versionNotePlaceholder" placeholder="版本说明（可选）"
+                data-i18n-title="versionNoteTitle" title="可选：一句话说明这次保存改了什么，随这次保存写入的内容记入历史。Ctrl+Shift+S 聚焦此处，Enter 保存"
+                data-i18n-aria="versionNotePlaceholder" aria-label="版本说明（可选）">
               <button class="btn-primary" id="btn-save" data-i18n="save">保存 (Ctrl+S)</button>
               <button class="btn-secondary" id="btn-cancel" data-i18n="cancel">取消</button>
             </div>
@@ -205,6 +242,22 @@
           </label>
           <p class="settings-hint" id="update-status"></p>
         </div>
+        <div class="settings-section">
+          <h3 data-i18n="settingsQuickLaunch">全局快捷键</h3>
+          <!-- 默认关闭：全局快捷键会从所有程序手里抢走这个组合。真正的注册状态只在主进程里，
+               这里显示的状态行每次打开设置都重新问一遍（见 renderer.js 的 refreshQuickLaunchStatus）。 -->
+          <p class="settings-desc" data-i18n="quickLaunchDesc">在任何程序里按下快捷键，弹出一个小搜索框：输入即搜，↑↓ 选择，Enter 复制，Esc 收起。主窗口最小化时也能用。</p>
+          <label class="settings-toggle">
+            <input type="checkbox" id="chk-quick-launch">
+            <span data-i18n="quickLaunchLabel">启用全局快捷键</span>
+          </label>
+          <div class="types-actions">
+            <input type="text" id="quick-launch-shortcut" autocomplete="off" spellcheck="false" data-i18n-placeholder="quickLaunchShortcutPlaceholder" data-i18n-aria="quickLaunchShortcutLabel" placeholder="例如 Ctrl+Alt+Space">
+            <button class="btn-primary" id="btn-quick-launch-apply" data-i18n="quickLaunchApply">应用</button>
+          </div>
+          <p class="settings-hint" id="quick-launch-status"></p>
+          <p class="settings-hint" data-i18n="quickLaunchHint">默认 Ctrl+Alt+Space。全局快捷键会在所有程序里生效，被别的程序占用时会提示注册失败。</p>
+        </div>
       </div>
     </div>
   </div>
@@ -252,6 +305,12 @@
               <label class="comp-choice"><input type="checkbox" value="prompts/snippets/rules/testing.md" checked><span data-i18n="composerRuleTesting">自动化测试与防回归</span></label>
             </div>
           </div>
+          <div class="composer-field">
+            <label data-i18n="composerExportTargets">导出目标</label>
+            <!-- 选项由 renderer.js 按 src/rule-targets.js 的清单生成，勾选状态存在 config.ruleExportTargets。
+                 不在这里手写：清单和主进程白名单之间已经有一道一致性检查，再多一份 HTML 就是第三份真值。 -->
+            <div class="composer-checks" id="comp-export-targets"></div>
+          </div>
         </div>
         <div class="composer-right">
           <div class="composer-preview-header">
@@ -263,7 +322,7 @@
       <div class="composer-footer">
         <button class="btn-primary" id="btn-comp-copy" data-i18n="composerBtnCopy">复制组装提示词</button>
         <button class="btn-secondary" id="btn-comp-save" data-i18n="composerBtnSave">保存为新提示词</button>
-        <button class="btn-secondary" id="btn-comp-export-rules" data-i18n="composerBtnExportRules">导出项目规则 (CLAUDE.md / .cursorrules)</button>
+        <button class="btn-secondary" id="btn-comp-export-rules" data-i18n="composerBtnExportRules">导出项目规则</button>
       </div>
     </div>
   </div>
@@ -326,6 +385,11 @@
        双用模块，tests/flow-graph.test.js 里 require 同一份文件。 -->
   <script src="flow-graph.js"></script>
   <script src="composer-meta.js"></script>
+  <!-- 规则导出目标清单与内容生成（src/rule-targets.js）。双用模块，
+       tests/rule-export.test.js 里 require 同一份文件。 -->
+  <script src="rule-targets.js"></script>
+  <!-- 文件树多选的选择模型（src/tree-selection.js）：双用模块，测试里直接 require 同一份。 -->
+  <script src="tree-selection.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

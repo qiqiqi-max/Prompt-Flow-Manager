@@ -9,7 +9,8 @@
 // 传输是 stdio 上的行分隔 JSON-RPC 2.0（MCP 的 stdio 传输：一行一条消息）。
 // 没有用官方 SDK：这个项目运行时只有两个依赖（archiver / yauzl），为了一个
 // 只读服务再拉进一棵依赖树不划算，而这里需要的协议面很窄——
-// initialize / tools/list / tools/call / ping，加上 notify 的忽略即可。
+// initialize / tools/list / tools/call / prompts/list / prompts/get / ping，
+// 加上 notify 的忽略即可。prompts 把库里的提示词做成客户端的斜杠命令，见 mcp/prompts.js。
 //
 // 用法（在 MCP 客户端里配置）：
 //   {
@@ -29,7 +30,10 @@ const { createLibrary } = require('../lib/library.js');
 const workflowIndex = require('../lib/workflow-index.js');
 const flowGraph = require('../src/flow-graph.js');
 const FRONTMATTER = require('../src/frontmatter.js');
-const { toolDefinitions, createHandlers } = require('./tools.js');
+const PLACEHOLDERS = require('../src/placeholders.js');
+const INCLUDES = require('../src/includes.js');
+const { toolDefinitions, createHandlers, safeLibraryRel, truncateBody } = require('./tools.js');
+const { createPromptHandlers } = require('./prompts.js');
 
 const SERVER_INFO = { name: 'prompt-flow-manager', version: require('../package.json').version };
 const PROTOCOL_VERSION = '2024-11-05';
@@ -44,6 +48,11 @@ const library = createLibrary({
   stripFrontmatter: (c) => FRONTMATTER.strip(c)
 });
 const handlers = createHandlers({ library, workflowIndex, dataRoot, parseFrontmatter: (c) => FRONTMATTER.parse(c), flowGraph });
+// 占位符与 include 用渲染进程的同一份实现（双端导出），路径闸和截断规则用 tools 的那一份：
+// 斜杠命令拿到的正文和 prompts_get、和应用里复制出去的，三者不能各算各的。
+const promptHandlers = createPromptHandlers({
+  library, dataRoot, placeholders: PLACEHOLDERS, includes: INCLUDES, safeLibraryRel, truncateBody
+});
 
 // 写响应。JSON-RPC 的 id 必须原样回填，通知（没有 id）不回。
 function send(msg) {
@@ -62,7 +71,9 @@ async function handle(msg) {
     case 'initialize':
       reply(id, {
         protocolVersion: (params && params.protocolVersion) || PROTOCOL_VERSION,
-        capabilities: { tools: {} },
+        // prompts 不声明 listChanged：server 不监听文件变化，也就没有变更通知可发。
+        // 客户端每次 prompts/list 拿到的都是现算的结果。
+        capabilities: { tools: {}, prompts: {} },
         serverInfo: SERVER_INFO
       });
       return;
@@ -90,6 +101,19 @@ async function handle(msg) {
         // 工具内部抛错不当协议错误：把它作为 isError 的结果回给调用方，
         // 这样模型能看到"这一步失败了"，而不是整条会话断掉。
         reply(id, { isError: true, content: [{ type: 'text', text: '工具执行失败: ' + String(e && e.message ? e.message : e) }] });
+      }
+      return;
+    }
+    case 'prompts/list':
+    case 'prompts/get': {
+      // 和 tools/call 不同，prompts 的失败按协议错误回：结果里没有 isError 这种
+      // "执行失败但会话照常"的位置。未知 name、参数类型不对是 -32602（rpcCode），
+      // 其余是内部错误 -32603。
+      try {
+        const result = method === 'prompts/list' ? await promptHandlers.list(params) : await promptHandlers.get(params);
+        reply(id, result);
+      } catch (e) {
+        replyError(id, e && e.rpcCode ? e.rpcCode : -32603, String(e && e.message ? e.message : e));
       }
       return;
     }
