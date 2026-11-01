@@ -109,6 +109,16 @@
           <!-- 元信息条 -->
           <div class="meta-bar" id="meta-bar"></div>
 
+          <!-- 外部改动提示条：文件在应用之外被改（且正在编辑、有未保存改动），
+               或被删除/改名。非阻塞，不挡编辑；文案和按钮由 renderExternalNotice 填。 -->
+          <div id="external-notice" class="external-notice hidden" role="status" aria-live="polite">
+            <span id="external-notice-text" class="external-notice-text"></span>
+            <span class="external-notice-actions">
+              <button class="btn-link" id="btn-external-primary"></button>
+              <button class="btn-link" id="btn-external-secondary"></button>
+            </span>
+          </div>
+
           <!-- 预览区 -->
           <div id="preview-wrap" class="preview-wrap">
             <!-- 占位符提示行：[提示文字] 在正文里标成可点的 chip，但这没有自解释性，

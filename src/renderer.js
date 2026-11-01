@@ -589,6 +589,9 @@ const saveTabsDebounced = debounce(async () => {
   } catch (e) { reportBackgroundSaveError(e); }
 }, 500);
 function renderTabs() {
+  // 外部改动提示条跟着"当前是哪个标签"走。切标签、开/关文件、保存、切语言
+  // 全都会经过 renderTabs，挂在这里就不用在每条路径上各记一次。
+  renderExternalNotice();
   const bar = $('tabs-bar');
   if (!bar) return;
   if (!state.tabs.length) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
@@ -1285,6 +1288,13 @@ async function exitEditMode(save, opts) {
     $('btn-edit').textContent = t('edit');
     renderContent();
     await clearDraft(discardedRel);
+    // 编辑期间文件在外部被改过（提示条点过"保留我的版本"，或者没理它）：
+    // 丢弃自己的改动之后，该看到的是磁盘上的最新内容，而不是进编辑那一刻的旧内容。
+    const tab = activeTabObj();
+    if (tab && tab.externalStale) {
+      try { await reloadActiveFromDisk(); } catch (e) { toast(tErr('openFailed', e), 'error'); }
+    }
+    renderExternalNotice();
     return true;
   }
   state.editMode = false;
@@ -1292,6 +1302,7 @@ async function exitEditMode(save, opts) {
   $('preview-wrap').classList.remove('hidden');
   $('editor-wrap').classList.add('hidden');
   $('btn-edit').textContent = t('edit');
+  renderExternalNotice();
   return true;
 }
 
@@ -1350,7 +1361,7 @@ async function saveCurrent() {
         state.currentContent = latest.content;
         state.currentMeta = latest.meta;
         const tab = state.tabs.find(t => t.rel === state.currentRel);
-        if (tab) { tab.content = latest.content; tab.meta = latest.meta; tab.loaded = true; }
+        if (tab) { tab.content = latest.content; tab.meta = latest.meta; tab.loaded = true; clearExternalFlags(tab); }
         await clearDraft(state.currentRel);
         state.editMode = false;
         state.editBaseline = '';
@@ -1374,9 +1385,10 @@ async function saveCurrent() {
     // 拿 saved 当基准会让保存后立刻又显示未保存。
     state.editBaseline = content;
     await clearDraft(state.currentRel);
-    // 同步到标签
+    // 同步到标签。存盘成功说明磁盘上就是我们的版本了，外部改动的标记一并清掉
+    // （提示条里点了"保留我的版本"、再在冲突框里选覆盖，就走到这里）。
     const tab = state.tabs.find(t => t.rel === state.currentRel);
-    if (tab) { tab.content = saved; tab.meta = meta; tab.loaded = true; }
+    if (tab) { tab.content = saved; tab.meta = meta; tab.loaded = true; clearExternalFlags(tab); }
     toast(t('saved'), 'success');
     setMetaList(await api.getMetaList());
     renderBreadcrumb();
@@ -1398,6 +1410,167 @@ async function saveCurrent() {
     toast(tErr('saveFailed', e), 'error');
     return false;
   }
+}
+
+// ===== 外部改动 =====
+// 主进程监视三个内容目录（lib/library-watch.js），应用之外的改动合并后推过来，
+// 应用自己的写入在那边已经滤掉了。这里决定每个标签怎么处理：
+//   - 没有未保存改动：静默重载正文（正在编辑但没改动的，编辑框一起更新）
+//   - 正在编辑且有未保存改动：不动编辑框，挂非阻塞提示条，让用户选
+//     "重新加载（丢弃我的改动）"或"保留我的版本"；保存时 E_SAVE_CONFLICT 照旧兜底
+//   - 文件被删除或改名：标签不关（里面可能有用户还要的内容），挂提示条说明
+// 标签上的四个标记：
+//   externalStale            编辑期间磁盘内容变了，编辑基准已经过期
+//   externalStaleDismissed   用户点了"保留我的版本"，在下次外部改动之前不再提示
+//   externalMissing          文件已不在库里
+//   externalMissingDismissed 用户点了"知道了"
+function activeTabObj() {
+  return state.activeTab ? state.tabs.find(tb => tb.rel === state.activeTab) || null : null;
+}
+
+function clearExternalFlags(tab) {
+  if (!tab) return;
+  tab.externalStale = false;
+  tab.externalStaleDismissed = false;
+  tab.externalMissing = false;
+  tab.externalMissingDismissed = false;
+}
+
+function renderExternalNotice() {
+  const bar = $('external-notice');
+  if (!bar) return;
+  const tab = activeTabObj();
+  let mode = null;
+  if (tab && tab.externalMissing && !tab.externalMissingDismissed) mode = 'missing';
+  else if (tab && state.editMode && tab.externalStale && !tab.externalStaleDismissed) mode = 'stale';
+  bar.dataset.mode = mode || '';
+  if (!mode) { bar.classList.add('hidden'); return; }
+  const primary = $('btn-external-primary');
+  const secondary = $('btn-external-secondary');
+  $('external-notice-text').textContent = t(mode === 'missing' ? 'externalRemoved' : 'externalModified');
+  primary.textContent = t(mode === 'missing' ? 'externalCloseTab' : 'externalReload');
+  secondary.textContent = t(mode === 'missing' ? 'externalDismiss' : 'externalKeepMine');
+  const rel = tab.rel;
+  primary.onclick = async () => {
+    if (state.activeTab !== rel) return;
+    if (mode === 'missing') {
+      await closeTab(rel);
+      return;
+    }
+    try { await reloadActiveFromDisk(); } catch (e) { toast(tErr('openFailed', e), 'error'); }
+  };
+  secondary.onclick = () => {
+    const cur = activeTabObj();
+    if (!cur || cur.rel !== rel) return;
+    if (mode === 'missing') cur.externalMissingDismissed = true;
+    else cur.externalStaleDismissed = true;
+    renderExternalNotice();
+  };
+  bar.classList.remove('hidden');
+}
+
+// 丢弃编辑、按磁盘重新载入当前文件。和冲突框里"放弃并载入最新内容"同一个结果：
+// 退出编辑、清草稿、正文换成磁盘上的。
+async function reloadActiveFromDisk() {
+  const rel = state.currentRel;
+  if (!rel) return;
+  const latest = await api.readFile(rel);
+  if (state.currentRel !== rel) return;
+  state.currentContent = latest.content;
+  state.currentMeta = latest.meta;
+  const tab = state.tabs.find(tb => tb.rel === rel);
+  if (tab) { tab.content = latest.content; tab.meta = latest.meta; tab.loaded = true; clearExternalFlags(tab); }
+  if (state.editMode) {
+    state.editMode = false;
+    state.editBaseline = '';
+    $('preview-wrap').classList.remove('hidden');
+    $('editor-wrap').classList.add('hidden');
+    $('btn-edit').textContent = t('edit');
+    await clearDraft(rel);
+  }
+  renderBreadcrumb();
+  renderMetaBar();
+  renderContent();
+  renderTabs();
+}
+
+// 串行处理：两批推送交叉的话，后一批的 readFile 可能先回来，被前一批的旧结果盖掉。
+let externalChain = Promise.resolve();
+function onLibraryChanged(info) {
+  externalChain = externalChain.then(() => applyExternalChanges(info)).catch((e) => {
+    console.error('处理外部改动失败:', e); // i18n-exempt: 开发日志
+  });
+  return externalChain;
+}
+
+async function applyExternalChanges(info) {
+  const changes = (info && Array.isArray(info.changes)) ? info.changes : [];
+  const truncated = !!(info && info.truncated);
+  const touched = new Set(changes.map(c => c.rel));
+  // 重建文件树。refreshTree 本身保留展开状态（按 state.expandedPaths 建）、筛选
+  // （重建后 filterTreeRows 按 state.filter 再过一遍）和选中行（按 currentRel 标 active）。
+  // 它不管的是滚动位置和键盘焦点：用户在树里按方向键走着，外部一改，焦点不能丢。
+  const treeEl = $('tree');
+  const scrollTop = treeEl ? treeEl.scrollTop : 0;
+  const focusedRow = document.activeElement && document.activeElement.closest
+    ? document.activeElement.closest('#tree .tree-row') : null;
+  const focusedRel = focusedRow ? focusedRow.__rel : null;
+  await refreshTree();
+  if (treeEl) treeEl.scrollTop = scrollTop;
+  if (focusedRel) {
+    const row = Array.from(document.querySelectorAll('#tree .tree-row.file')).find(r => r.__rel === focusedRel);
+    if (row) row.focus();
+  }
+
+  let currentReloaded = false;
+  for (const tab of state.tabs) {
+    const exists = state.metaByRel.has(tab.rel);
+    if (!exists) {
+      // 被删或被改名（改名在这一侧就是"旧路径没了"）。标签保留，内容不动。
+      if (!tab.externalMissing) { tab.externalMissing = true; tab.externalMissingDismissed = false; }
+      continue;
+    }
+    const wasMissing = tab.externalMissing;
+    tab.externalMissing = false;
+    tab.externalMissingDismissed = false;
+    // 恢复出来还没读过正文的占位标签：切过去时自然会读最新的
+    if (!tab.loaded) continue;
+    if (!truncated && !touched.has(tab.rel) && !wasMissing) continue;
+    let latest;
+    try { latest = await api.readFile(tab.rel); } catch { continue; }
+    const isCurrent = tab.rel === state.currentRel;
+    // 读盘期间用户可能还在打字，脏判断必须放在 await 之后
+    if (isCurrent && isDirty()) {
+      // 和编辑基准（进编辑那一刻的内容）不同才算外部改了。基准不动：
+      // 保存时 expectedContent 仍是旧内容，E_SAVE_CONFLICT 照旧会拦下来。
+      if (latest.content !== state.currentContent) {
+        tab.externalStale = true;
+        tab.externalStaleDismissed = false;
+      }
+      continue;
+    }
+    if (latest.content === tab.content) continue;
+    tab.content = latest.content;
+    tab.meta = latest.meta;
+    clearExternalFlags(tab);
+    if (isCurrent) {
+      state.currentContent = latest.content;
+      state.currentMeta = latest.meta;
+      if (state.editMode) {
+        // 在编辑但没改动：编辑框和脏判断基准一起换成新内容，否则下一个字就算"脏"，
+        // 而且保存会把外部的改动当成冲突
+        $('editor').value = latest.content;
+        state.editBaseline = latest.content;
+      }
+      currentReloaded = true;
+    }
+  }
+  if (currentReloaded && state.currentRel) {
+    renderBreadcrumb();
+    renderMetaBar();
+    if (!state.editMode) renderContent();
+  }
+  renderTabs();
 }
 
 // ===== 复制 =====
@@ -3126,6 +3299,9 @@ async function init() {
   // 主进程查到新版本会推过来。用户没开界面时窗口可能还没加载完，
   // 那种情况下这条推送会丢——设置面板里的 renderUpdateStatus 能补上。
   api.onUpdateAvailable((info) => showUpdateBanner(info));
+  // 外部改动。挂在首次 refreshTree 和恢复标签之后：在那之前的改动，
+  // 首次读树、读正文时已经是最新的了。
+  api.onLibraryChanged((info) => { onLibraryChanged(info); });
 
   $('btn-empty-trash').onclick = async () => {
     if (await confirmDialog(t('emptyTrashConfirm'))) {
