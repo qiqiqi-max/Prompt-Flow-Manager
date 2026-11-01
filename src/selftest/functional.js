@@ -14,7 +14,9 @@
       check('新建提示词并自动写入 frontmatter', read.meta.version === 1 && !!read.meta.createdAt, JSON.stringify(read.meta));
 
       // 2. 保存 → 产生版本快照 + version 自增
-      await api.saveFile(rel, read.content.replace('第一版正文', '第二版正文'));
+      // 带版本说明保存。说明描述的是这次写进去的"第二版"，所以它先挂在当前内容上，
+      // 不能挂到这次生成的那条快照上——那条快照装的是第一版。
+      await api.saveFile(rel, read.content.replace('第一版正文', '第二版正文'), { note: '改成第二版' });
       read = await api.readFile(rel);
       check('保存后 version 自增', read.meta.version === 2, 'version=' + read.meta.version);
       check('保存后正文已更新', read.content.includes('第二版正文'));
@@ -23,6 +25,23 @@
       check('保存产生了 1 条历史版本', versions.length === 1, '共 ' + versions.length + ' 条');
       const oldVersion = await api.readVersion(rel, versions[0].file);
       check('历史版本存的是修改前的内容', oldVersion.includes('第一版正文'));
+      check('带说明保存后，说明挂在当前内容上', await api.getCurrentNote(rel) === '改成第二版', JSON.stringify(await api.getCurrentNote(rel)));
+      check('带说明保存后，装着旧内容的快照不带这次的说明', versions[0].note === '', JSON.stringify(versions[0]));
+      {
+        // 说明在写盘之前校验：超长时整次保存失败，正文和版本都不动
+        const beforeLong = (await api.readFile(rel)).content;
+        let msg = '';
+        try { await api.saveFile(rel, beforeLong.replace('第二版正文', '不该写进去'), { note: 'x'.repeat(201) }); } catch (e) { msg = String(e && e.message); }
+        const afterLong = (await api.readFile(rel)).content;
+        check('超长版本说明让保存整体失败且不写盘', /E_VERSION_NOTE_TOO_LONG/.test(msg) && afterLong === beforeLong
+          && (await api.listVersions(rel)).length === 1, msg || '保存成功了');
+        let badName = '';
+        try { await api.setVersionNote(rel, '../../../../Windows/win.ini', 'x'); } catch (e) { badName = String(e && e.message); }
+        check('编辑版本说明时版本文件名走白名单', /E_BAD_VERSION_FILE/.test(badName), badName || '居然成功了');
+        let escape = '';
+        try { await api.setVersionNote('../../outside.md', null, 'x'); } catch (e) { escape = String(e && e.message); }
+        check('编辑当前内容说明时路径走写入白名单', /E_PATH_ESCAPE|E_WRITE_FORBIDDEN|E_READ_FORBIDDEN/.test(escape), escape || '居然成功了');
+      }
 
       // 3. 星标
       await api.pinVersion(rel, versions[0].file, true);
@@ -35,6 +54,16 @@
       check('回滚后正文回到旧版', read.content.includes('第一版正文'));
       versions = await api.listVersions(rel);
       check('回滚前的内容也被存成新版本（不丢）', versions.length === 2, '共 ' + versions.length + ' 条');
+      // 回滚前的"第二版"连同它的说明一起进了历史；回滚写进去的内容没有说明
+      {
+        const secondSnap = versions.find(v => !v.pinned);
+        const secondBody = secondSnap ? await api.readVersion(rel, secondSnap.file) : '';
+        check('回滚后，回滚前那一版带着它自己的说明进了历史',
+          !!secondSnap && secondSnap.note === '改成第二版' && secondBody.includes('第二版正文'), JSON.stringify(versions));
+        check('回滚写进去的内容没有说明', await api.getCurrentNote(rel) === '', JSON.stringify(await api.getCurrentNote(rel)));
+        await api.setVersionNote(rel, versions.find(v => v.pinned).file, '星标那版的说明');
+        check('能事后编辑某个版本的说明', (await api.listVersions(rel)).find(v => v.pinned).note === '星标那版的说明');
+      }
 
       // 5. 锁定：主进程必须拦住删除
       await api.setConfig({ lockedFiles: [rel] });
@@ -48,6 +77,8 @@
       await expectThrow('改名后依然删不掉（无法绕过锁）', () => api.trash(renamed));
       const renamedVersions = await api.listVersions(renamed);
       check('改名后版本历史跟随', renamedVersions.length === 2, '共 ' + renamedVersions.length + ' 条');
+      check('改名后版本说明跟随', renamedVersions.map(v => v.note).sort().join('|') === ['星标那版的说明', '改成第二版'].sort().join('|'),
+        JSON.stringify(renamedVersions.map(v => v.note)));
 
       // 6b. 工作流引用只改 flow[].prompt，正文和相近路径不受影响。
       const refWorkflow = 'workflows/自检引用.md';
@@ -243,9 +274,12 @@
         await api.createFile(backupTemplate, '---\ntitle: 自检备份模板\n---\n模板正文');
         await api.createFile(backupTrashPrompt, '---\ntitle: 自检备份回收站\nstage: testing\n---\n回收站第一版');
         const trashRead = await api.readFile(backupTrashPrompt);
-        await api.saveFile(backupTrashPrompt, trashRead.content.replace('回收站第一版', '回收站第二版'));
+        await api.saveFile(backupTrashPrompt, trashRead.content.replace('回收站第一版', '回收站第二版'), { note: '回收站第二版说明' });
         await api.trash(backupTrashPrompt);
         const trashBeforeExport = (await api.listTrash()).items.length;
+        // 当前内容的说明也要随备份走。导入会重新 bump 自动字段，正文和备份里的
+        // 不再逐字节相同，这条说明要靠主进程换绑哈希才能留住。
+        await api.setVersionNote(renamed, null, '备份前的当前说明');
         const zip = await api.exportZip();
         await api.setConfig({
           lockedFiles: [],
@@ -278,6 +312,12 @@
         const restoredVersions = restoredPrompt ? await api.listVersions(restoredPrompt) : [];
         check('完整备份恢复版本历史到导入后的文件', restoredVersions.length >= 2 && imp2.restoredVersions >= 2,
           JSON.stringify({ restoredPrompt, versions: restoredVersions.length, restored: imp2.restoredVersions }));
+        const restoredNotes = restoredVersions.map(v => v.note);
+        check('完整备份往返后版本说明还在', restoredNotes.includes('星标那版的说明') && restoredNotes.includes('改成第二版'),
+          JSON.stringify(restoredNotes));
+        const restoredCurrentNote = restoredPrompt ? await api.getCurrentNote(restoredPrompt) : null;
+        check('完整备份往返后当前内容的说明还在（导入后正文变了也能对上）', restoredCurrentNote === '备份前的当前说明',
+          JSON.stringify(restoredCurrentNote));
         const restoredCfg = await api.getConfig();
         check('完整备份恢复可迁移设置', imp2.restoredSettings === true
           && restoredCfg.projectTypes.includes('自检迁移类型')
@@ -294,6 +334,8 @@
           const restoredTrashVersions = restoredTrashRel ? await api.listVersions(restoredTrashRel) : [];
           check('导入的回收站条目可恢复且带版本历史', !!restoredTrashRel && restoredTrashVersions.length >= 1,
             JSON.stringify({ restoredTrashRel, versions: restoredTrashVersions.length }));
+          const trashCurrentNote = restoredTrashRel ? await api.getCurrentNote(restoredTrashRel) : null;
+          check('备份里回收站条目的版本说明往返后还在', trashCurrentNote === '回收站第二版说明', JSON.stringify(trashCurrentNote));
         } else {
           check('导入的回收站条目可恢复且带版本历史', false, '找不到导入的回收站条目');
         }

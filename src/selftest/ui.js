@@ -523,6 +523,88 @@
         await realClick(document.getElementById('btn-composer-close'));
       }
 
+      // ---- 带说明保存 → 历史抽屉里看得到说明 ----
+      // 走真实入口：编辑区的说明框 + Ctrl+S、Ctrl+Shift+S 聚焦 + 说明框里 Enter。
+      // 第二次保存之后再看一次，是为了验证语义而不只是"字出现了"：说明描述的是
+      // 那次保存写进去的内容，所以第一句先在"当前内容"行，第二次保存后要跟着那份
+      // 内容挪到快照行，不能留在当前内容上，也不能挂到装着更旧内容的那条快照上。
+      //
+      // 等待一律用"轮询 IPC 直到条件成立"，不用 sleep：窗口在后台时 Chromium 把计时器
+      // 节流到约 1 秒一次，这一段原先按 sleep 写要 13 秒，把整个 UI 自检顶过了 120 秒上限
+      // （实测）。IPC 往返不受节流，条件一成立就往下走。
+      {
+        const noteRel = 'prompts/testing/' + newName + '.md';
+        const api = window.promptFlowApi;
+        const until = async (cond) => {
+          for (let i = 0; i < 300; i++) {
+            if (await cond()) return true;
+            await api.getRoot();
+          }
+          return false;
+        };
+        await openFile(noteRel);
+        document.getElementById('btn-edit').click();
+        const noteInput = document.getElementById('version-note-input');
+        const editor = document.getElementById('editor');
+        const ctrlKey = (target, key, shift) => target.dispatchEvent(new KeyboardEvent('keydown', { key, ctrlKey: true, shiftKey: !!shift, bubbles: true, cancelable: true }));
+        const historyRows = () => ({
+          current: (document.querySelector('#version-list .version-item.current .vi-note') || {}).textContent || '',
+          snapshots: Array.from(document.querySelectorAll('#version-list .version-item[data-file]'))
+            .map(el => (el.querySelector('.vi-note') || {}).textContent || '')
+        });
+        // 打开抽屉走按钮的真实 click；等到"当前内容"行渲染出来再读
+        const openDrawer = async (expectSnapshots) => {
+          document.getElementById('version-list').innerHTML = '';
+          document.getElementById('btn-history').click();
+          await until(() => !!document.querySelector('#version-list .version-item.current')
+            && document.querySelectorAll('#version-list .version-item[data-file]').length >= expectSnapshots);
+        };
+        check('编辑模式下有可选的版本说明输入框', !!noteInput && noteInput.offsetParent !== null && state.editMode,
+          noteInput ? 'visible=' + (noteInput.offsetParent !== null) + ' editMode=' + state.editMode : 'no input');
+
+        editor.value = editor.value + '\nUI 自检第一处改动';
+        editor.dispatchEvent(new Event('input', { bubbles: true }));
+        noteInput.value = 'UI自检说明一';
+        const v0 = (await api.listVersions(noteRel)).length;
+        ctrlKey(editor, 's');
+        await until(async () => noteInput.value === '' && !isDirty());
+        check('Ctrl+S 带说明保存后清空说明框且留在编辑模式', noteInput.value === '' && state.editMode
+          && (await api.readFile(noteRel)).content.includes('UI 自检第一处改动'), 'note=' + noteInput.value);
+
+        await openDrawer(v0 + 1);
+        let rows = historyRows();
+        check('带说明保存后历史抽屉里能看到说明（挂在当前内容那一行）',
+          rows.current === 'UI自检说明一' && !rows.snapshots.includes('UI自检说明一'), JSON.stringify(rows));
+        document.getElementById('btn-history-close').click();
+
+        // Ctrl+Shift+S 只聚焦说明框，不保存
+        const v1 = (await api.listVersions(noteRel)).length;
+        editor.focus();
+        ctrlKey(editor, 'S', true);
+        await api.getRoot();
+        check('Ctrl+Shift+S 聚焦说明框且不触发保存', document.activeElement === noteInput
+          && (await api.listVersions(noteRel)).length === v1,
+        (document.activeElement ? (document.activeElement.id || document.activeElement.tagName) : 'none') + ' editMode=' + state.editMode);
+
+        editor.value = editor.value + '\nUI 自检第二处改动';
+        editor.dispatchEvent(new Event('input', { bubbles: true }));
+        noteInput.value = 'UI自检说明二';
+        noteInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+        await until(async () => noteInput.value === '' && !isDirty());
+        await openDrawer(v1 + 1);
+        rows = historyRows();
+        check('说明框里 Enter 保存，上一句说明随它描述的内容进入历史',
+          rows.current === 'UI自检说明二' && rows.snapshots[0] === 'UI自检说明一' && !rows.snapshots.slice(1).includes('UI自检说明一'),
+          JSON.stringify(rows));
+        document.getElementById('btn-history-close').click();
+        // 收尾前把编辑器复位到基准：上面任一次保存没成功的话编辑器还是脏的，
+        // 点取消会弹原生确认框，UI 自检里没人去点，整段自检挂到超时，前面的
+        // 失败信息也一条都输出不出来。
+        if (isDirty()) { editor.value = state.editBaseline; editor.dispatchEvent(new Event('input', { bubbles: true })); }
+        document.getElementById('btn-cancel').click();
+        await until(() => !state.editMode);
+      }
+
       // ---- 右键菜单 ----
       const fileRow = document.querySelector('#tree .tree-row.file') || document.querySelector('#tree .tree-row');
       if (fileRow) {

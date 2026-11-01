@@ -200,6 +200,26 @@ async function withStore(fn, rmImpl, writeImpl) {
     ok(JSON.stringify(JSON.parse(fs.readFileSync(path.join(versionDir, 'index.json'), 'utf8'))) === '{"pinned":{"20260101-010203-004.md":true}}', '导入回收站时过滤非法星标');
   });
 
+  await withStore(async (store) => {
+    // 备份里回收站条目的版本说明要跟着回来。原先这里只重建 pinned，说明整份丢掉。
+    const sha = 'a'.repeat(64);
+    await store.importItems([{
+      originalRel: 'prompts/noted.md',
+      content: 'noted body',
+      versions: [{ file: '20260101-010203-004.md', content: 'old version' }],
+      versionIndex: {
+        pinned: {},
+        notes: { '20260101-010203-004.md': '回收站里的说明', '20260101-010203-999.md': '没有对应快照' },
+        current: { note: '回收站当前说明', sha256: sha }
+      }
+    }], { isAllowedRel: rel => rel.startsWith('prompts/') });
+    const added = (await store.readIndex()).items[0];
+    const vIndex = JSON.parse(fs.readFileSync(path.join(store.storePath(added.versionStore), 'index.json'), 'utf8'));
+    ok(vIndex.notes && vIndex.notes['20260101-010203-004.md'] === '回收站里的说明', '导入回收站时带上版本说明', JSON.stringify(vIndex));
+    ok(!('20260101-010203-999.md' in (vIndex.notes || {})), '导入回收站时不保留没有对应快照的说明', JSON.stringify(vIndex));
+    ok(vIndex.current && vIndex.current.note === '回收站当前说明' && vIndex.current.sha256 === sha, '导入回收站时保留当前内容的说明（正文按原字节写入，哈希仍然有效）', JSON.stringify(vIndex));
+  });
+
   if (failures) process.exit(1);
   console.log('[test:trash-store] 通过');
 })().catch((e) => { console.error(e); process.exit(1); });

@@ -28,6 +28,9 @@ const api = {
   readVersion: (rel, file) => ipcRenderer.invoke('read-version', rel, file),
   pinVersion: (rel, file, pinned) => ipcRenderer.invoke('pin-version', rel, file, pinned),
   rollbackVersion: (rel, file) => ipcRenderer.invoke('rollback-version', rel, file),
+  // 版本说明：读"当前内容"那一行的说明；改某个版本（file 为 null 时是当前内容）的说明
+  getCurrentNote: (rel) => ipcRenderer.invoke('get-current-note', rel),
+  setVersionNote: (rel, file, note) => ipcRenderer.invoke('set-version-note', rel, file, note),
   getMetaList: () => ipcRenderer.invoke('get-meta-list'),
   search: (q) => ipcRenderer.invoke('search', q),
   getConfig: () => ipcRenderer.invoke('get-config'),

@@ -110,6 +110,10 @@ child.on('exit', (code) => {
     /\[selftest:ui\] PASS 按 Tab 焦点在弹层里循环（真的在移动）/,
     /\[selftest:ui\] PASS 弹层关闭后焦点归还给打开的按钮/,
     /\[selftest:ui\] PASS 关闭后不残留对话框属性/,
+    // 版本说明：从编辑区填写到历史抽屉显示的整条路径，以及说明随内容进入历史的语义。
+    /\[selftest:ui\] PASS 带说明保存后历史抽屉里能看到说明/,
+    /\[selftest:ui\] PASS Ctrl\+Shift\+S 聚焦说明框且不触发保存/,
+    /\[selftest:ui\] PASS 说明框里 Enter 保存，上一句说明随它描述的内容进入历史/,
     // 预览区就地填占位符。这几条要显式点名：整段包在 if (marks().length) 里，
     // 种子内容改了导致标记不上时，段里一条都不会输出，而"没有 FAIL"照样是绿的。
     /\[selftest:ui\] PASS 预览区把 \[占位符\] 标成了可点的 chip/,
