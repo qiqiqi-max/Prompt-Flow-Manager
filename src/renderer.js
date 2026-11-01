@@ -94,7 +94,9 @@ const state = {
   fillMemory: {},             // 占位符填充记忆：token 原文 -> 上次填的值（见 rememberFillValues）
   currentRefs: [],            // 当前文件的被引用列表（工作流 rel），见 refreshReferences
   danglingCount: 0,           // 全库悬空引用条数：工作流引用的文件已经不在了
-  previewFills: {}            // 预览区就地填过的占位符：rel -> { token: 值 }，见 enhancePreviewPlaceholders
+  previewFills: {},           // 预览区就地填过的占位符：rel -> { token: 值 }，见 enhancePreviewPlaceholders
+  treeSelection: TREE_SELECTION.empty(), // 文件树多选：{ selected: Set<rel>, anchor }，见 syncTreeSelection
+  batchRunning: false         // 批量操作进行中（禁止重复触发，见 runBatch）
 };
 
 // ===== 工具 =====
@@ -394,6 +396,15 @@ function renderTree() {
       if (e.key === 'ArrowDown') idx = idx + 1 >= rows.length ? 0 : idx + 1;
       else idx = idx - 1 < 0 ? rows.length - 1 : idx - 1;
       rows[idx].focus();
+      // Shift+方向键扩展选择：起点是按键前所在的文件行（还没有锚点时）。
+      // 只在落到文件行上时扩展，目录行不参与选择。
+      if (e.shiftKey && rows[idx].__rel) {
+        if (state.treeSelection.anchor == null && current && current.__rel) {
+          state.treeSelection = TREE_SELECTION.focusAnchor(current.__rel);
+        }
+        state.treeSelection = TREE_SELECTION.range(state.treeSelection, rows[idx].__rel, treeFileRows(), false);
+        syncTreeSelection();
+      }
     } else if (e.key === 'Enter' || e.key === ' ') {
       const row = document.activeElement && document.activeElement.closest
         ? document.activeElement.closest('.tree-row') : null;
@@ -447,6 +458,9 @@ function buildTreeNode(node, depth) {
         children.classList.remove('hidden');
         caret.textContent = '▼';
       }
+      // 折叠之后，目录里被选中的文件已经看不见了，要从选择里剔掉：
+      // 批量删除不能删掉用户此刻在屏幕上看不到的文件。
+      syncTreeSelection();
       // 同步到 config（节流）
       saveExpandedPathsDebounced();
     });
@@ -484,7 +498,7 @@ function buildTreeNode(node, depth) {
       if (m.meta.description) tipParts.push(m.meta.description);
     }
     row.title = tipParts.join('\n');
-    row.addEventListener('click', () => openFile(node.rel));
+    row.addEventListener('click', (e) => onTreeFileClick(e, node.rel));
     row.tabIndex = -1; // 允许聚焦但不参与 tab 导航
     if (state.currentRel === node.rel) row.classList.add('active');
     // 拖拽：文件可拖
@@ -524,6 +538,67 @@ function labelForDir(node) {
     'deployment': dirLabel('deployment')
   };
   return map[node.name] || node.name;
+}
+
+// ===== 文件树多选 =====
+// 选择模型本身在 src/tree-selection.js（纯函数，裸 node 可测），这里只负责把 DOM
+// 折成 { rel, visible } 交给它，再把结果画回去。
+//
+// 可见性一律按渲染结果判（offsetParent !== null），不去匹配 style 字符串：
+// 筛选写行内 display:none，折叠用 .tree-children 的 hidden 类，搜索把整棵树
+// 加 hidden——三种方式 offsetParent 都会是 null（CLAUDE.md 踩过的坑第 12 条）。
+function treeFileRows() {
+  return Array.from(document.querySelectorAll('#tree .tree-row.file'))
+    .map(r => ({ rel: r.__rel, visible: r.offsetParent !== null, el: r }));
+}
+
+// 筛选、折叠、搜索、重建树之后都调它：剔掉已经看不见或不存在的条目，
+// 再把选中态画到行上、刷新批量操作条。
+function syncTreeSelection() {
+  const rows = treeFileRows();
+  state.treeSelection = TREE_SELECTION.prune(state.treeSelection, rows);
+  const sel = state.treeSelection.selected;
+  for (const r of rows) {
+    const on = sel.has(r.rel);
+    r.el.classList.toggle('multi-selected', on);
+    r.el.setAttribute('aria-selected', on ? 'true' : 'false');
+  }
+  renderBatchBar();
+}
+
+function renderBatchBar() {
+  const bar = $('batch-bar');
+  if (!bar) return;
+  const count = state.treeSelection.selected.size;
+  // 选中 1 个时不显示：单个文件已经有内容区按钮和右键菜单，批量条出现只会挤占树的高度。
+  bar.classList.toggle('hidden', count < 2);
+  $('batch-count').textContent = t('batchSelected', { count });
+  for (const id of ['btn-batch-move', 'btn-batch-tags', 'btn-batch-delete']) $(id).disabled = state.batchRunning;
+}
+
+function clearTreeSelection() {
+  state.treeSelection = TREE_SELECTION.empty();
+  syncTreeSelection();
+}
+
+// 文件行的点击。普通单击仍然是打开文件（行为不变），顺带把锚点放在这一行；
+// Ctrl+点击切换选中，Shift+点击按当前可见顺序选一段，两者都不打开文件。
+function onTreeFileClick(e, rel) {
+  if (e && (e.shiftKey || e.ctrlKey || e.metaKey)) {
+    // 还没有锚点时（比如文件是从搜索结果或标签栏打开的），以当前打开的文件为起点
+    if (state.treeSelection.anchor == null && state.currentRel) {
+      state.treeSelection = { selected: new Set(state.treeSelection.selected), anchor: state.currentRel };
+    }
+    const rows = treeFileRows();
+    state.treeSelection = e.shiftKey
+      ? TREE_SELECTION.range(state.treeSelection, rel, rows, e.ctrlKey || e.metaKey)
+      : TREE_SELECTION.toggle(state.treeSelection, rel, rows);
+    syncTreeSelection();
+    return;
+  }
+  state.treeSelection = TREE_SELECTION.focusAnchor(rel);
+  syncTreeSelection();
+  openFile(rel);
 }
 
 // ===== 打开文件 =====
@@ -2115,6 +2190,319 @@ function migrateLock(oldRel, newRel) {
   }
 }
 
+// ===== 批量操作（文件树多选） =====
+// 执行在主进程（batch-move / batch-tags / batch-trash，一次 IPC 逐项结算），
+// 理由见 lib/batch-ops.js 文件头。这一侧只管：收集选择、确认、把结果同步到
+// 标签页和锁列表、汇总报告。
+
+function batchNameOf(rel) {
+  const m = state.metaByRel.get(rel);
+  return (m && m.meta && m.meta.title) ? m.meta.title : fileNameNoExt(String(rel).split('/').pop());
+}
+
+// 正在编辑的文件在这一批里时，先按切换文件的规则处理草稿（保存 / 不保存 / 取消）。
+// 不处理的话，批量在磁盘上改了它，编辑器里还是旧正文，下一次保存就撞冲突
+// 或者把批量的改动盖回去。
+async function leaveEditForBatch(rels) {
+  if (!state.editMode || !rels.includes(state.currentRel)) return true;
+  return leaveEditForSwitch();
+}
+
+// 进行中禁止重复触发。标志在第一个 await 之前置上：连点两下时第二下进来，
+// 第一下的选阶段弹层还开着，这里就把它拦掉，而不是再弹一个。
+async function runBatch(fn) {
+  if (state.batchRunning) { toast(t('batchBusy'), 'error'); return; }
+  state.batchRunning = true;
+  renderBatchBar();
+  try {
+    await fn();
+  } finally {
+    state.batchRunning = false;
+    renderBatchBar();
+  }
+}
+
+// 汇总报告：成功 N 个、失败哪些、为什么、跳过哪些。全部成功时只弹一条 toast；
+// 有失败或跳过时弹一个要手动关掉的对话框——失败原因一闪而过的话等于没报。
+// 每一行带 data-rel / data-code，自检从真实渲染出来的对话框里读结果，不走后门。
+function showBatchReport(actionKey, res) {
+  const ok = (res && res.ok) || [];
+  const failed = (res && res.failed) || [];
+  const skipped = (res && res.skipped) || [];
+  const action = t(actionKey);
+  if (!failed.length && !skipped.length) {
+    toast(t('batchDone', { action, ok: ok.length }), 'success');
+    return Promise.resolve();
+  }
+  const row = (kind, it) => {
+    const reason = describeError(new Error(it.code + '|' + (it.detail || it.rel)));
+    return `<li class="batch-report-item ${kind}" data-rel="${escapeHtml(it.rel)}" data-code="${escapeHtml(it.code)}">`
+      + `<span class="batch-report-kind">${escapeHtml(t(kind === 'failed' ? 'batchReportFailed' : 'batchReportSkipped'))}</span>`
+      + `<span class="batch-report-name">${escapeHtml(batchNameOf(it.rel))}</span>`
+      + `<span class="batch-report-reason">${escapeHtml(reason)}</span></li>`;
+  };
+  return new Promise(resolve => {
+    const menu = $('ctx-menu');
+    menu.innerHTML = `
+      <div class="ctx-prompt-wrap batch-report">
+        <div class="ctx-prompt-title" id="batch-report-title">${escapeHtml(t('batchReportTitle', { action, ok: ok.length, failed: failed.length, skipped: skipped.length }))}</div>
+        <ul class="batch-report-list">${failed.map(it => row('failed', it)).join('')}${skipped.map(it => row('skipped', it)).join('')}</ul>
+        <div class="ctx-prompt-actions">
+          <button class="btn-primary" id="ctx-ok">${escapeHtml(t('ok'))}</button>
+        </div>
+      </div>`;
+    showCenteredMenu();
+    const done = () => {
+      pendingPromptDone = null;
+      hideCtxMenu();
+      menu.innerHTML = '';
+      resolve();
+    };
+    // 点外部 / Esc 走 hideCtxMenu → settlePendingPrompt，同样能把 Promise 结掉
+    pendingPromptDone = done;
+    $('ctx-ok').onclick = done;
+    $('ctx-ok').focus();
+  });
+}
+
+// 被移动的文件：标签页路径、当前文件、锁列表都跟着改（和单个移动同一套记账）。
+function applyMovedTabs(moved) {
+  for (const { rel, newRel } of moved) {
+    migrateLock(rel, newRel);
+    const tab = state.tabs.find(tb => tb.rel === rel);
+    if (tab) tab.rel = newRel;
+    if (state.activeTab === rel) state.activeTab = newRel;
+  }
+}
+
+// 磁盘上改过的文件，若开在标签页里就重读一遍；当前标签同时重画预览和元信息栏。
+// 没加载过的占位标签不用管，第一次切过去时本来就会读盘。
+async function reloadTabsFromDisk(rels) {
+  const set = new Set(rels);
+  let touchedCurrent = false;
+  for (const tab of state.tabs) {
+    if (!set.has(tab.rel) || !tab.loaded) continue;
+    try {
+      const res = await api.readFile(tab.rel);
+      tab.content = res.content;
+      tab.meta = res.meta;
+      if (tab.rel === state.currentRel) {
+        state.currentContent = res.content;
+        state.currentMeta = res.meta;
+        touchedCurrent = true;
+      }
+    } catch { /* 读失败保持旧内容，下次打开自然重读 */ }
+  }
+  renderTabs();
+  if (touchedCurrent) {
+    renderBreadcrumb();
+    renderMetaBar();
+    renderContent();
+  }
+}
+
+// 批量移动之后同步工作流引用：所有被移动文件的引用汇总起来，只问一次。
+// 和单个移动的 syncWorkflowRefs 一样，必须经用户确认，不能静默改 workflow。
+async function syncBatchWorkflowRefs(moved) {
+  const pairs = [];
+  for (const m of moved) {
+    let refs = [];
+    try { refs = await api.findWorkflowRefs(m.rel); } catch { refs = []; }
+    if (refs && refs.length) pairs.push({ ...m, refs });
+  }
+  if (!pairs.length) return;
+  const allRefs = [...new Set(pairs.flatMap(p => p.refs))];
+  const list = pairs.map(p => '· ' + batchNameOf(p.newRel) + ' ← ' + p.refs.map(r => r.replace(/^workflows\//, '')).join(', ')).join('\n');
+  const ok = await confirmDialog(t('batchRefsConfirm', { files: pairs.length, count: allRefs.length, list }));
+  if (!ok) return;
+  const updated = new Set();
+  const failed = [];
+  for (const p of pairs) {
+    try {
+      const res = await api.updateWorkflowRefs(p.refs, p.rel, p.newRel);
+      for (const u of (res && res.updated) || []) updated.add(u);
+      for (const f of (res && res.failed) || []) failed.push(f.rel);
+    } catch (e) {
+      failed.push(...p.refs);
+      console.error('批量同步工作流引用失败:', p.rel, e); // i18n-exempt: 开发日志
+    }
+  }
+  if (failed.length) {
+    toast(t('renameRefsPartial', { updated: updated.size, failed: failed.length, files: [...new Set(failed)].join(', ') }), 'error');
+  } else {
+    toast(t('renameRefsUpdated', { count: updated.size }), 'success');
+  }
+  if (updated.size) await reloadTabsFromDisk([...updated]);
+}
+
+function selectedRels() {
+  return TREE_SELECTION.ordered(state.treeSelection, treeFileRows());
+}
+
+async function batchMoveSelected() {
+  await runBatch(async () => {
+    const rels = selectedRels();
+    if (rels.length < 2) return;
+    const stage = await pickStage(t('batchMoveTitle'));
+    if (!stage) return;
+    if (!(await leaveEditForBatch(rels))) return;
+    let res;
+    try {
+      res = await api.batchMove(rels, 'prompts/' + stage);
+    } catch (e) {
+      toast(tErr('moveFailed', e), 'error');
+      return;
+    }
+    const moved = res.ok.filter(it => it.newRel);
+    const wasCurrent = state.currentRel;
+    applyMovedTabs(moved);
+    const movedCurrent = moved.find(it => it.rel === wasCurrent);
+    clearTreeSelection();
+    await refreshTree();
+    if (movedCurrent) await openFile(movedCurrent.newRel);
+    saveTabsDebounced();
+    await showBatchReport('batchActionMove', res);
+    await syncBatchWorkflowRefs(moved);
+  });
+}
+
+// 标签输入：逗号（含全角逗号、顿号）分隔，去空、去重。合法性由主进程再校验一遍。
+function parseTagInput(text) {
+  const out = [];
+  for (const s of String(text || '').split(/[,，、]/)) {
+    const v = s.trim();
+    if (v && !out.includes(v)) out.push(v);
+  }
+  return out;
+}
+
+// 批量标签的输入框：一个输入框，"添加"和"删除"两个按钮。
+// 返回 { mode: 'add'|'remove', tags } 或 null（取消 / 点外部 / Esc）。
+function promptTagEdit(rels) {
+  const existing = new Set();
+  for (const rel of rels) {
+    const m = state.metaByRel.get(rel);
+    if (m && Array.isArray(m.meta.tags)) m.meta.tags.forEach(tag => tag && existing.add(String(tag)));
+  }
+  const hint = existing.size ? t('batchTagsExisting', { tags: [...existing].join(', ') }) : t('batchTagsNone');
+  return new Promise(resolve => {
+    const menu = $('ctx-menu');
+    menu.innerHTML = `
+      <div class="ctx-prompt-wrap">
+        <div class="ctx-prompt-title">${escapeHtml(t('batchTagsTitle', { count: rels.length }))}</div>
+        <div class="batch-tags-hint">${escapeHtml(hint)}</div>
+        <input id="ctx-input" class="ctx-prompt-input" placeholder="${escapeHtml(t('batchTagsPlaceholder'))}" list="tag-datalist">
+        <div class="ctx-prompt-actions">
+          <button class="btn-link" id="ctx-cancel">${escapeHtml(t('cancel_'))}</button>
+          <button class="btn-danger" id="ctx-tags-remove">${escapeHtml(t('batchTagsRemove'))}</button>
+          <button class="btn-primary" id="ctx-ok">${escapeHtml(t('batchTagsAdd'))}</button>
+        </div>
+      </div>`;
+    showCenteredMenu();
+    const inp = $('ctx-input');
+    inp.focus();
+    const done = (v) => {
+      pendingPromptDone = null;
+      hideCtxMenu();
+      menu.innerHTML = '';
+      resolve(v);
+    };
+    const submit = (mode) => {
+      const tags = parseTagInput(inp.value);
+      done(tags.length ? { mode, tags } : null);
+    };
+    pendingPromptDone = done;
+    $('ctx-ok').onclick = () => submit('add');
+    $('ctx-tags-remove').onclick = () => submit('remove');
+    $('ctx-cancel').onclick = () => done(null);
+    inp.onkeydown = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); submit('add'); }
+      if (e.key === 'Escape') done(null);
+    };
+  });
+}
+
+async function batchTagsSelected() {
+  await runBatch(async () => {
+    const rels = selectedRels();
+    if (rels.length < 2) return;
+    const edit = await promptTagEdit(rels);
+    if (!edit) return;
+    if (!(await leaveEditForBatch(rels))) return;
+    let res;
+    try {
+      res = await api.batchTags(rels, edit.mode === 'add' ? { add: edit.tags } : { remove: edit.tags });
+    } catch (e) {
+      toast(tErr('saveFailed', e), 'error');
+      return;
+    }
+    // 选择保留：打完一个标签常常紧接着再打一个，或者顺手移动这一批。
+    await refreshTree();
+    await reloadTabsFromDisk(res.ok.map(it => it.rel));
+    await showBatchReport('batchActionTags', res);
+  });
+}
+
+// 被删除的标签页按单个删除（deleteCurrent）的规则处理：移除标签，
+// 当前标签被删时切到相邻的那个，没有了就回到空状态。
+async function closeTrashedTabs(removed) {
+  const set = new Set(removed);
+  for (const rel of removed) state.lockedFiles.delete(rel);
+  const activeIdx = state.tabs.findIndex(tb => tb.rel === state.activeTab);
+  const activeRemoved = state.activeTab != null && set.has(state.activeTab);
+  let next = null;
+  if (activeRemoved) {
+    next = state.tabs.slice(activeIdx + 1).find(tb => !set.has(tb.rel))
+      || state.tabs.slice(0, activeIdx).reverse().find(tb => !set.has(tb.rel)) || null;
+  }
+  state.tabs = state.tabs.filter(tb => !set.has(tb.rel));
+  if (!activeRemoved) { renderTabs(); saveTabsDebounced(); return; }
+  if (next) {
+    await switchTab(next.rel);
+  } else {
+    state.activeTab = null;
+    state.currentRel = null;
+    state.currentContent = '';
+    state.currentMeta = {};
+    $('content-area').classList.add('hidden');
+    $('empty-state').classList.remove('hidden');
+    renderTabs();
+    saveTabsDebounced();
+  }
+}
+
+async function batchDeleteSelected() {
+  await runBatch(async () => {
+    const rels = selectedRels();
+    if (rels.length < 2) return;
+    // 锁定和被引用都在确认之前汇总列出来，只确认一次。锁以主进程为准（它在
+    // config 队列里判），这里列出来只是让用户事先知道哪些会被跳过。
+    const locked = rels.filter(r => state.lockedFiles.has(r));
+    const referenced = [];
+    for (const rel of rels) {
+      if (locked.includes(rel) || !rel.startsWith('prompts/')) continue;
+      let refs = [];
+      try { refs = await api.findWorkflowRefs(rel); } catch { refs = []; }
+      if (refs && refs.length) referenced.push(batchNameOf(rel) + ' ← ' + refs.map(r => r.replace(/^workflows\//, '').replace(/\.md$/i, '')).join(', '));
+    }
+    const parts = [t('batchDeleteConfirm', { count: rels.length })];
+    if (locked.length) parts.push(t('batchDeleteLocked', { count: locked.length, names: locked.map(r => '· ' + batchNameOf(r)).join('\n') }));
+    if (referenced.length) parts.push(t('batchDeleteReferenced', { count: referenced.length, names: referenced.map(s => '· ' + s).join('\n') }));
+    if (!(await confirmDialog(parts.join('\n\n')))) return;
+    if (!(await leaveEditForBatch(rels))) return;
+    let res;
+    try {
+      res = await api.batchTrash(rels);
+    } catch (e) {
+      toast(tErr('deleteFailed', e), 'error');
+      return;
+    }
+    await closeTrashedTabs(res.ok.map(it => it.rel));
+    await refreshTree();
+    await showBatchReport('batchActionDelete', res);
+  });
+}
+
 // ===== 上下文菜单 =====
 function showCtxMenu(x, y, node) {
   const menu = $('ctx-menu');
@@ -2275,6 +2663,8 @@ const doSearch = debounce(async (q) => {
   const results = await api.search(q);
   if (seq !== searchSeq) return;
   $('tree').classList.add('hidden');
+  // 搜索结果盖住了整棵树，选择里的行全都看不见了：清掉，批量条一起收起。
+  syncTreeSelection();
   box.classList.remove('hidden');
   if (!results.length) {
     box.innerHTML = '<div class="search-empty">' + escapeHtml(t('noResults')) + '</div>';
@@ -2355,6 +2745,8 @@ function filterTreeRows() {
   } else {
     document.querySelectorAll('.tree-row.dir').forEach(r => r.style.display = '');
   }
+  // refreshTree / applyFilter / setLang 都经过这里：重建或筛掉的行不能留在选择里。
+  syncTreeSelection();
 }
 
 // 更可靠的方式：重建树时给每行打上 __rel —— 已在 buildTreeNode 中实现（row.__rel = node.rel）
@@ -2994,6 +3386,11 @@ async function init() {
     }
   });
   $('btn-filter-toggle').onclick = () => $('filter-panel').classList.toggle('hidden');
+  // 文件树多选的批量操作条
+  $('btn-batch-move').onclick = batchMoveSelected;
+  $('btn-batch-tags').onclick = batchTagsSelected;
+  $('btn-batch-delete').onclick = batchDeleteSelected;
+  $('btn-batch-clear').onclick = clearTreeSelection;
   $('btn-filter-apply').onclick = applyFilter;
   $('btn-filter-clear').onclick = () => {
     $('filter-stage').value = '';
@@ -3202,6 +3599,11 @@ async function init() {
       if (sd && !sd.classList.contains('hidden')) { sd.classList.add('hidden'); return; }
       const fp = $('filter-panel');
       if (fp && !fp.classList.contains('hidden')) { fp.classList.add('hidden'); return; }
+      // 焦点在编辑器里时 Esc 先退出编辑；其余情况下有多选就先清空选择。
+      // 两者都在时按焦点分主次，而不是固定顺序：在树里按 Esc 的人想的是取消选择，
+      // 不是丢掉编辑器里的草稿。
+      const inEditor = document.activeElement === $('editor');
+      if (state.treeSelection.selected.size && !inEditor) { e.preventDefault(); clearTreeSelection(); return; }
       if (state.editMode) { e.preventDefault(); exitEditMode(false); }
     }
   });

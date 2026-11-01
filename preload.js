@@ -21,6 +21,11 @@ const api = {
   // 反方向：这个提示词被哪些工作流引用；顺带带上全库悬空引用体检
   workflowReferences: (rel) => ipcRenderer.invoke('workflow-references', rel),
   trash: (rel) => ipcRenderer.invoke('trash', rel),
+  // 文件树多选的批量操作。主进程逐项结算，返回 { ok, failed, skipped }，
+  // 部分失败不抛错；整批被拒（参数无效 / 另一批还在跑）才抛。
+  batchMove: (rels, dirRel) => ipcRenderer.invoke('batch-move', rels, dirRel),
+  batchTags: (rels, payload) => ipcRenderer.invoke('batch-tags', rels, payload),
+  batchTrash: (rels) => ipcRenderer.invoke('batch-trash', rels),
   listTrash: () => ipcRenderer.invoke('list-trash'),
   restore: (id) => ipcRenderer.invoke('restore', id),
   emptyTrash: () => ipcRenderer.invoke('empty-trash'),

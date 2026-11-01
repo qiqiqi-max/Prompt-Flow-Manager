@@ -458,6 +458,97 @@
           exported.ok === true && exported.bytes > 0, JSON.stringify(exported));
       }
 
+      // 15. 文件树批量操作（batch-move / batch-tags / batch-trash）
+      // 走真实 IPC。断言盯的是磁盘：tags 只改那一段（flow、多行列表原样）、每个文件都留了
+      // 快照、同名生成新名字而不覆盖、锁跟着走、锁定的删除被主进程跳过、部分失败逐项汇总。
+      // 界面那一侧（选择、确认只问一次、标签页跟随）由 test:ui 的真实点击覆盖。
+      {
+        const P = 'prompts/testing/自检批量';
+        const r1 = P + 'A.md', r2 = P + 'B.md', r3 = P + 'C.md';
+        const clash = 'prompts/deployment/自检批量B.md';
+        const missing = 'prompts/testing/自检批量不存在.md';
+        const wf = 'workflows/自检批量引用.md';
+        await api.createFile(r1, '---\ntitle: 批量A\nstage: testing\ntags: [旧标签]\n---\nA 正文');
+        await api.createFile(r2, '---\ntitle: 批量B\nstage: testing\ntags:\n  - 多行一\n  - 多行二\nprojectType: 其他\n---\nB 正文');
+        await api.createFile(r3, '---\ntitle: 批量C\nstage: testing\n---\n批量删除缓存探针');
+        await api.createFile(clash, '---\ntitle: 已在目标目录的同名文件\n---\n原来的正文');
+        await api.createFile(wf, '---\ntitle: 批量引用\nflow:\n  - id: a\n    prompt: ' + r1 + '\n    next: b\n  - id: b\n    prompt: ' + r2 + '\n---\n工作流正文');
+
+        // 15a. 批量打标签：四种写法（行内 / 多行 / 缺失 / 工作流里带 flow）
+        const tagRes = await api.batchTags([r1, r2, r3, wf], { add: ['批量标签'] });
+        check('批量打标签：四个文件全部成功', tagRes.ok.length === 4 && !tagRes.failed.length && !tagRes.skipped.length, JSON.stringify(tagRes));
+        const a1 = await api.readFile(r1);
+        const b1 = await api.readFile(r2);
+        const c1 = await api.readFile(r3);
+        const w1 = await api.readFile(wf);
+        check('批量打标签：行内数组在原有标签后追加', JSON.stringify(a1.meta.tags) === '["旧标签","批量标签"]', JSON.stringify(a1.meta.tags));
+        check('批量打标签：多行列表保留多行写法、原有项不动、新项追加',
+          b1.content.includes('tags:\n  - 多行一\n  - 多行二\n  - "批量标签"\nprojectType: 其他\n'), b1.content);
+        check('批量打标签：缺失 tags 时补上一行', JSON.stringify(c1.meta.tags) === '["批量标签"]', JSON.stringify(c1.meta.tags));
+        // 两半都要：只查 flow 还在的话，"这一项写失败了、文件根本没动"也会让它绿
+        // （反向对照实测：整体重新序列化在工作流上直接抛错，flow 原封不动，这条照绿）。
+        check('批量打标签：工作流的 flow 结构原样保留',
+          JSON.stringify(w1.meta.tags) === '["批量标签"]'
+          && w1.content.includes('flow:\n  - id: a\n    prompt: ' + r1 + '\n    next: b\n  - id: b\n    prompt: ' + r2 + '\n'), w1.content);
+        check('批量打标签：每个文件都留了快照且 version 自增',
+          (await api.listVersions(r1)).length === 1 && (await api.listVersions(wf)).length === 1 && a1.meta.version === 2 && w1.meta.version === 2,
+          'versions r1=' + (await api.listVersions(r1)).length + ' version=' + a1.meta.version);
+        check('批量打标签：标签立刻能搜到（缓存已清）', (await api.search('批量标签')).some(h => h.rel === r3));
+        const again = await api.batchTags([r1, r3], { add: ['批量标签'] });
+        check('批量打标签：标签已存在的算跳过，不写盘也不留快照',
+          again.skipped.length === 2 && again.skipped.every(s => s.code === 'E_BATCH_TAGS_UNCHANGED') && !again.ok.length
+          && (await api.listVersions(r1)).length === 1, JSON.stringify(again));
+        const rm = await api.batchTags([r1, r2], { remove: ['批量标签', '多行一'] });
+        const b2 = await api.readFile(r2);
+        check('批量删标签：行内和多行两种写法都只拿掉那几项',
+          rm.ok.length === 2 && JSON.stringify((await api.readFile(r1)).meta.tags) === '["旧标签"]'
+          && b2.content.includes('tags:\n  - 多行二\nprojectType: 其他\n'), b2.content);
+        // 进行中再发起一批：第二次 invoke 进主进程时，第一批已经在 run 里置上了忙碌标志
+        const p1 = api.batchTags([r1, r2, r3], { add: ['忙碌探针'] });
+        let busy = '';
+        try { await api.batchTags([r1], { add: ['不该写进去'] }); } catch (e) { busy = String(e && e.message); }
+        await p1;
+        check('批量进行中再发起一批被拒（E_BATCH_BUSY），且没有写进去',
+          /E_BATCH_BUSY/.test(busy) && !(await api.readFile(r1)).content.includes('不该写进去'), busy || '第二批居然执行了');
+
+        // 15b. 批量移动：同名生成新名字、版本历史和锁跟随、部分失败逐项汇总
+        await api.setConfig({ lockedFiles: [r2] });
+        const v1Before = (await api.listVersions(r1)).length;
+        const mv = await api.batchMove([r1, r2, r3, wf, missing], 'prompts/deployment');
+        const newOf = (rel) => (mv.ok.find(x => x.rel === rel) || {}).newRel;
+        const codeFor = (rel) => (mv.failed.find(x => x.rel === rel) || {}).code;
+        check('批量移动：三个提示词成功，工作流和不存在的文件进失败清单（没有中途停下）',
+          mv.ok.length === 3 && mv.failed.length === 2, JSON.stringify(mv));
+        check('批量移动：失败原因带错误码', codeFor(wf) === 'E_MOVE_NOT_PROMPT' && codeFor(missing) === 'E_BATCH_SOURCE_MISSING',
+          JSON.stringify(mv.failed));
+        check('批量移动：同名时生成新名字，目标目录里原有的文件不被覆盖',
+          newOf(r2) === 'prompts/deployment/自检批量B-1.md' && (await api.readFile(clash)).content.includes('原来的正文'),
+          String(newOf(r2)));
+        check('批量移动：版本历史跟着文件走',
+          !!newOf(r1) && (await api.listVersions(newOf(r1))).length === v1Before && v1Before >= 2, 'before=' + v1Before);
+        const cfgAfterMove = await api.getConfig();
+        check('批量移动：锁跟着文件走（移走之后照样删不掉）',
+          cfgAfterMove.lockedFiles.includes(newOf(r2)) && !cfgAfterMove.lockedFiles.includes(r2), JSON.stringify(cfgAfterMove.lockedFiles));
+        const relsNow = (await api.getMetaList()).map(m => m.rel);
+        check('批量移动：旧路径都不在了', ![r1, r2, r3].some(r => relsNow.includes(r)), JSON.stringify(relsNow.filter(r => r.includes('自检批量'))));
+        const same = await api.batchMove([newOf(r1), newOf(r3)], 'prompts/deployment');
+        check('批量移动：已在目标目录的算跳过', same.skipped.length === 2 && same.skipped.every(s => s.code === 'E_BATCH_SAME_DIR'),
+          JSON.stringify(same));
+
+        // 15c. 批量删除：锁定的由主进程跳过，其余进回收站
+        const tr = await api.batchTrash([newOf(r1), newOf(r2), newOf(r3)]);
+        check('批量删除：锁定的跳过（E_LOCKED），其余两个成功',
+          tr.ok.length === 2 && tr.skipped.length === 1 && tr.skipped[0].rel === newOf(r2) && tr.skipped[0].code === 'E_LOCKED',
+          JSON.stringify(tr));
+        check('批量删除：锁定的文件还在原处', (await api.readFile(newOf(r2))).content.includes('B 正文'));
+        const trashed = (await api.listTrash()).items.map(i => i.originalRel);
+        check('批量删除：其余的进了回收站（不是真删）', trashed.includes(newOf(r1)) && trashed.includes(newOf(r3)), JSON.stringify(trashed));
+        check('批量删除：删掉之后立刻搜不到（缓存已清）', !(await api.search('批量删除缓存探针')).some(h => h.rel === newOf(r3)));
+
+        await api.setConfig({ lockedFiles: [] });
+        await api.batchTrash([newOf(r2), clash, wf]);
+      }
+
       // 清理
       const leftovers = (await api.getMetaList()).filter(mm => mm.rel !== renamed && mm.top === 'prompts');
       for (const mm of leftovers) { try { await api.trash(mm.rel); } catch (_) {} }

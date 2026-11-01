@@ -55,6 +55,18 @@
       <!-- 左：文件树 -->
       <aside class="sidebar">
         <div class="sidebar-header" data-i18n="sidebarFiles">文件</div>
+        <!-- 批量操作条：文件树里选中 2 个及以上文件时出现（Ctrl/Shift+点击选择，Esc 清空）。
+             放在树上方而不是右键菜单里：右键菜单是"对这一行"的语义，批量项混进去
+             要靠"右键的这一行在不在选择里"来切换含义，点错一行就成了单个操作。 -->
+        <div id="batch-bar" class="batch-bar hidden" role="toolbar" data-i18n-aria="batchBarLabel">
+          <span id="batch-count" class="batch-count" aria-live="polite"></span>
+          <div class="batch-actions">
+            <button class="btn-secondary" id="btn-batch-move" data-i18n="batchMove">移动</button>
+            <button class="btn-secondary" id="btn-batch-tags" data-i18n="batchTags">标签</button>
+            <button class="btn-danger" id="btn-batch-delete" data-i18n="batchDelete">删除</button>
+            <button class="btn-link" id="btn-batch-clear" data-i18n="batchClear">取消选择</button>
+          </div>
+        </div>
         <div id="tree" class="tree"></div>
         <div id="search-results" class="search-results hidden"></div>
       </aside>
@@ -326,6 +338,8 @@
        双用模块，tests/flow-graph.test.js 里 require 同一份文件。 -->
   <script src="flow-graph.js"></script>
   <script src="composer-meta.js"></script>
+  <!-- 文件树多选的选择模型（src/tree-selection.js）：双用模块，测试里直接 require 同一份。 -->
+  <script src="tree-selection.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

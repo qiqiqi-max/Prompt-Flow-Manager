@@ -44,6 +44,10 @@ html { font-size: calc(16px * var(--font-scale)); }
   --hover: #eef1f4;
   --ctx-hover: #e3e8ee;
   --selection: #dbeafe;
+  /* 文件树多选：底色和左侧色条分开两个 token。底色要和 --selection（当前打开的文件）
+     分得开，色条是不靠颜色深浅也能认出"被选中"的形状信号，对侧边栏底色要 3:1。 */
+  --multi-select-bg: #e0e7ff;
+  --multi-select-mark: #4338ca;
   --flow-edge: #2563eb;
   --diff-add-bg: #dcfce7;
   --diff-add-text: #166534;
@@ -77,6 +81,8 @@ html { font-size: calc(16px * var(--font-scale)); }
   --hover: #2a2d2e;
   --ctx-hover: #2d3134;
   --selection: #264f78;
+  --multi-select-bg: #3b2f63;
+  --multi-select-mark: #b4a7f5;
   --flow-edge: #6ba4f8;
   --diff-add-bg: #1a3a2a;
   --diff-add-text: #86efac;
@@ -201,6 +207,10 @@ body {
 .tree-row.focused,
 .tree-row:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .tree-row.locked .name { color: var(--text-muted); }
+/* 多选态写在 .active 之后：一行既是当前打开的文件又被选中时，选中态的底色和色条都要看得见。
+   色条用 inset box-shadow 画在行内，不占布局，也不会和焦点环（outline）互相盖住。 */
+.tree-row.multi-selected,
+.tree-row.multi-selected:hover { background: var(--multi-select-bg); box-shadow: inset 3px 0 0 var(--multi-select-mark); }
 .tree-row.drop-target { background: var(--selection); outline: 2px dashed var(--focus-ring); outline-offset: -2px; }
 .tree-row.file[draggable="true"]:active { cursor: grabbing; }
 .tree-row.file[draggable="true"] { cursor: grab; }
@@ -212,6 +222,24 @@ body {
 .tree-children { padding-left: 14px; }
 .tree-row.file .name { color: var(--text); }
 .tree-row.dir .name { color: var(--text); font-weight: 500; }
+
+/* 批量操作条：选中 2 个及以上文件时出现在树的上方。按钮允许换行，
+   侧边栏最窄 180px 时四个按钮一行放不下。 */
+.batch-bar {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 6px 8px; background: var(--bg-alt); border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.batch-count { font-size: 0.75rem; color: var(--text); }
+.batch-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.batch-actions button { padding: 3px 8px; font-size: 0.75rem; }
+.batch-actions button:disabled { opacity: .6; cursor: default; }
+.batch-tags-hint { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 6px; white-space: normal; }
+.batch-report-list { list-style: none; max-height: 40vh; overflow-y: auto; margin: 6px 0; }
+.batch-report-item { display: flex; flex-wrap: wrap; gap: 6px; padding: 3px 0; font-size: 0.75rem; color: var(--text); }
+.batch-report-item.failed .batch-report-kind { color: var(--danger-text); font-weight: 600; }
+.batch-report-item.skipped .batch-report-kind { color: var(--text-muted); font-weight: 600; }
+.batch-report-reason { color: var(--text-muted); flex-basis: 100%; white-space: normal; }
 
 .search-results { padding: 4px 8px; }
 .search-item {

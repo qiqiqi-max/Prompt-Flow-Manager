@@ -45,6 +45,8 @@ const ruleExport = require('./lib/rule-export');
 const { createVersionStore } = require('./lib/version-store');
 const { createTrashStore } = require('./lib/trash-store');
 const { movePromptWithHistory } = require('./lib/file-move');
+const batchOps = require('./lib/batch-ops');
+const tagRewrite = require('./lib/tag-rewrite');
 // 滚动文件日志 + 诊断包。两个模块都刻意不 require('electron')：
 // 目录、版本号、两个根目录全部由这里传进去，DATA_ROOT / CODE_ROOT 的判断
 // 只允许存在下面那一份（见 123-133 行的说明）。
@@ -800,9 +802,16 @@ ipcMain.handle('clear-draft', async (e, rel) => queueWrite('draft:' + String(rel
 //     结果同一份内容在新旧两个路径各有一份，版本历史却只跟着其中一个。
 // 占两个 key 而不是一个：只占源的话，并发写目标的那条路照样插得进来。
 // 顺序由 queueWriteMulti 统一排序，不会和别处形成环。
-ipcMain.handle('rename', async (e, oldRel, newRel) => queueWriteMulti(
-  ['ver:' + String(oldRel), 'ver:' + String(newRel)],
-  async () => {
+ipcMain.handle('rename', async (e, oldRel, newRel) => renameEntry(oldRel, newRel));
+
+// 具名出来是为了让批量移动走同一条路（版本历史跟随、锁跟随、清缓存都在这里），
+// 而不是在 batch-move 里再抄一份四步磁盘操作。
+function renameEntry(oldRel, newRel) {
+  return queueWriteMulti(['ver:' + String(oldRel), 'ver:' + String(newRel)], () => renameEntryLocked(oldRel, newRel));
+}
+
+// 调用方必须已经占住 ver:<oldRel> 和 ver:<newRel>。
+async function renameEntryLocked(oldRel, newRel) {
   // 两侧都过写入白名单：源要被移走（等于删），目标要被写入，
   // 任一侧落在 .versions/.trash/config.json 上都不行。
   const oldFull = safeJoinWritable(oldRel);
@@ -840,7 +849,7 @@ ipcMain.handle('rename', async (e, oldRel, newRel) => queueWriteMulti(
     console.error('锁定标记跟随改名失败（文件已改名）:', oldRel, '->', newRel, err.message);
   }
   return true;
-}));
+}
 
 // 工作流引用同步：`workflows/*.md` 的 flow[].prompt 指向 prompts/ 下的文件，
 // 改名/移动 prompt 后这些引用会变成死链，而流程图上没有任何报错——这个问题
@@ -995,7 +1004,14 @@ async function isLocked(rel) {
 // （Ctrl+S、切文件时的自动保存都会）会读到删除前的 prev、写回同一个路径，
 // 然后被这里的 fsp.rename 一起卷进 .trash：保存返回成功，内容却不在树里了。
 // 顺序由 queueWriteMulti 统一排（ver:* → trash），内部再占 config 也不成环。
-ipcMain.handle('trash', async (e, rel) => queueWriteMulti(['ver:' + String(rel), 'trash'], async () => {
+ipcMain.handle('trash', async (e, rel) => trashEntry(rel));
+
+// 具名出来给批量删除复用：锁定校验、目录拒绝、回收站索引都只有这一份。
+function trashEntry(rel) {
+  return queueWriteMulti(['ver:' + String(rel), 'trash'], () => trashEntryLocked(rel));
+}
+
+async function trashEntryLocked(rel) {
   // 删除同样是改动库内容：不加白名单就能把 config.json 移进回收站
   const full = safeJoinWritable(rel);
   if (await isLocked(rel)) throw appError('E_LOCKED', rel);
@@ -1029,7 +1045,80 @@ ipcMain.handle('trash', async (e, rel) => queueWriteMulti(['ver:' + String(rel),
     console.error('清理锁定标记失败（文件已移入回收站）:', rel, err.message);
   }
   return true;
-}));
+}
+
+// ---------- 文件树批量操作 ----------
+// 执行方式（主进程一次 IPC、逐项结算、不中途停）的理由写在 lib/batch-ops.js 文件头。
+// 三个 handler 共用一个 runner：任意一种批量在跑时，另一种也要拒绝（E_BATCH_BUSY）——
+// 批量移动和批量删除同时动同一批文件，结果取决于谁先抢到写链，用户没法预期。
+const batchRunner = batchOps.createBatchRunner();
+
+// 批量移动到 prompts/ 下的某个目录。每一项走 renameEntry 同一条路：版本历史跟随、
+// 锁跟随、清缓存。同名时生成新名字（-1、-2…），并且是在占住目标 key 之后再确认：
+// 先挑名字再排队的话，排队期间别处在这个名字上建了文件，movePromptWithHistory
+// 会拒绝（E_TARGET_EXISTS），那时重新挑一次，有上限。
+ipcMain.handle('batch-move', async (e, rels, dirRel) => {
+  const list = batchOps.normalizeRelList(rels);
+  const dir = String(dirRel == null ? '' : dirRel).replace(/\\/g, '/').replace(/\/+$/, '');
+  // 目标目录同样过写入白名单（拿一个虚拟文件名去校验，目录本身不是 .md）
+  safeJoinWritable(dir + '/__probe.md');
+  const exists = (r) => fs.existsSync(safeJoin(r));
+  return batchRunner.run(list, async (rel) => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const target = batchOps.pickMoveTarget(rel, dir, exists);
+      if (target == null) return { skip: 'E_BATCH_SAME_DIR' };
+      if (!fs.existsSync(safeJoinWritable(rel))) throw appError('E_BATCH_SOURCE_MISSING', rel);
+      try {
+        await renameEntry(rel, target);
+        return { newRel: target };
+      } catch (err) {
+        if (batchOps.errorCode(err).code !== 'E_TARGET_EXISTS') throw err;
+      }
+    }
+    throw appError('E_TARGET_EXISTS', rel);
+  });
+});
+
+// 批量添加 / 删除标签。只改 frontmatter 的 tags 那一段（lib/tag-rewrite.js），
+// 不整体重新序列化——工作流的 flow、多行列表都原样留着。
+// 每一项和 save-file 同款：排进 ver:<rel>、旧正文留快照、bump 自动字段、原子写、清缓存。
+ipcMain.handle('batch-tags', async (e, rels, payload) => {
+  const list = batchOps.normalizeRelList(rels);
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const add = tagRewrite.normalizeTagList(Array.isArray(p.add) ? p.add : []);
+  const remove = tagRewrite.normalizeTagList(Array.isArray(p.remove) ? p.remove : []);
+  if (!add.length && !remove.length) throw appError('E_INVALID_PAYLOAD');
+  return batchRunner.run(list, (rel) => queueWrite('ver:' + rel, async () => {
+    const full = safeJoinWritable(rel);
+    const prev = await readPrevContent(full);
+    if (prev == null) throw appError('E_BATCH_SOURCE_MISSING', rel);
+    const next = tagRewrite.rewriteTags(prev, { add, remove });
+    if (!next.changed) return { skip: 'E_BATCH_TAGS_UNCHANGED' };
+    await saveVersion(rel, prev);
+    const toWrite = bumpAutoFields(next.content, prev);
+    await writeFileAtomic(full, toWrite);
+    dropFromCache(full);
+    return { tags: next.after };
+  }));
+});
+
+// 批量删除：每一项走 trashEntry（锁由主进程在 config 队列里判，见 isLocked）。
+// 锁定的文件算"跳过"而不是"失败"：那是用户自己设的保护在起作用。
+// 文件已经不在了要单独报出来：单个删除把它当成功（幂等），但批量的汇总里
+// 说"成功 N 个"而其中一个根本不存在，是在虚报。
+ipcMain.handle('batch-trash', async (e, rels) => {
+  const list = batchOps.normalizeRelList(rels);
+  return batchRunner.run(list, async (rel) => {
+    if (!fs.existsSync(safeJoinWritable(rel))) throw appError('E_BATCH_SOURCE_MISSING', rel);
+    try {
+      await trashEntry(rel);
+    } catch (err) {
+      if (batchOps.errorCode(err).code === 'E_LOCKED') return { skip: 'E_LOCKED' };
+      throw err;
+    }
+    return null;
+  });
+});
 
 ipcMain.handle('list-trash', async () => readTrashIndex());
 

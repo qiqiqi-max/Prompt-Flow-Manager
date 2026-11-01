@@ -186,6 +186,9 @@ npm run test:cli          # 命令行入口：只读子命令、退出码、路�
 npm run test:import-rollback # 真实 Electron 完整备份中途失败后整体撤回
 npm run test:ui-failure # 真实 Electron 配置写入失败时显示提示并恢复界面状态
 npm run test:includes     # 模板包含引擎（裸 node，自带一组反向对照）
+npm run test:tree-selection # 文件树多选模型：范围选择只取可见行（裸 node，自带一组反向对照）
+npm run test:tag-rewrite  # 批量打标签的 tags 文本级改写（裸 node，自带一组反向对照：整体重新序列化必须红）
+npm run test:batch-ops    # 批量操作骨架：部分失败汇总、忙碌拒绝、同名改名（裸 node，自带三组反向对照）
 npm run test:reverse  # 把第一节那套流程自动化：逐条改坏源码，验证目标断言真的变红
 npm run test:reverse-split # 同上，针对「自检模块拆分」那一节的注入契约
 npm run test:quick    # 日常快速检查：lint + 静态检查 + 裸 node 单测

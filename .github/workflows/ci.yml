@@ -159,6 +159,17 @@ jobs:
       - name: 命令行入口
         run: npm run test:cli
 
+      # 文件树多选与批量操作的纯逻辑：选择模型（可见性按渲染结果）、tags 文本级改写、
+      # 批量执行骨架（部分失败汇总、忙碌拒绝、同名生成新名字）。三者都自带反向对照。
+      - name: 文件树多选模型
+        run: npm run test:tree-selection
+
+      - name: 批量打标签的 tags 改写
+        run: npm run test:tag-rewrite
+
+      - name: 批量操作执行骨架
+        run: npm run test:batch-ops
+
       # 纯逻辑测试，不用起 Electron：从 renderer.js 里抠出 debounce 单独验语义。
       # 自带反向对照（旧版一行 debounce 必须失败），所以它不会变成永远绿的空壳。
       - name: debounce 语义
