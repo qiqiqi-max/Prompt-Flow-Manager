@@ -15,6 +15,9 @@
 // 反向对照：把 safeLibraryRel 的白名单放宽成"只要是 .md 就放行"，下面那条
 // ../config.json 的用例必须变红（见文件末尾的自检块）。
 //
+// 第十节是 prompts 能力（斜杠命令）：prompts/list、prompts/get、include 展开、
+// 参数填充、撞名、路径边界、截断、分页和协议错误，反向对照写在各条断言旁边。
+//
 // 运行：PFM_DATA_DIR=. npm run test:mcp
 const fs = require('fs');
 const os = require('os');
@@ -91,6 +94,10 @@ function payloadOf(res) {
     'initialize 返回 serverInfo', JSON.stringify(init && init.result));
   ok(!!init && init.result && init.result.capabilities && !!init.result.capabilities.tools,
     'initialize 声明了 tools 能力');
+  // 客户端只在声明了 prompts 能力时才会去调 prompts/list，没声明就等于这个功能不存在
+  ok(!!init && init.result && init.result.capabilities && !!init.result.capabilities.prompts
+    && !init.result.capabilities.prompts.listChanged,
+    'initialize 声明了 prompts 能力（不声明 listChanged）', JSON.stringify(init && init.result && init.result.capabilities));
   srv.send({ jsonrpc: '2.0', method: 'notifications/initialized' });   // 通知
 
   // ---------- 二、工具清单 ----------
@@ -320,6 +327,241 @@ function payloadOf(res) {
     ok(!!good && !!payloadOf(good) && payloadOf(good).title === 'P', '同一个服务能正常读取库内文件（拒绝不是因为它坏了）');
     srv4.kill();
     fs.rmSync(fixture, { recursive: true, force: true });
+  }
+
+  // ---------- 十、prompts 能力：库里的提示词做成斜杠命令 ----------
+  //
+  // 先用真实库过一遍（种子提示词就是用户会点的那些），再用临时库覆盖真实库里
+  // 没有的形状：include 展开、撞名、路径边界、超长正文、分页。
+  // 这一节的反向对照有两种：能在测试里直接跑的（朴素实现跑同一批输入必须不同），
+  // 写在断言旁边；需要改源码的（删掉某道闸），在提交前手工跑过，结果记在交付说明里。
+  const PLACEHOLDERS = require(path.join(root, 'src', 'placeholders.js'));
+  const INCLUDES = require(path.join(root, 'src', 'includes.js'));
+  const FRONTMATTER = require(path.join(root, 'src', 'frontmatter.js'));
+  const { naturalName, assignPromptNames } = require(path.join(root, 'mcp', 'prompts.js'));
+  const textOf = (res) => (res && res.result && Array.isArray(res.result.messages) && res.result.messages[0]
+    && res.result.messages[0].content ? String(res.result.messages[0].content.text) : null);
+  const errCode = (res) => (res && res.error ? res.error.code : null);
+  {
+    const srv5 = startServer();
+    await srv5.call(1, 'initialize', {});
+    const res = await srv5.call(2, 'prompts/list', {});
+    const prompts = res && res.result && Array.isArray(res.result.prompts) ? res.result.prompts : [];
+    const names = prompts.map(p => p.name);
+    ok(prompts.length >= 5, 'prompts/list 列出了真实库的提示词（' + prompts.length + ' 条）', JSON.stringify(res && res.error));
+    // 能直接当斜杠命令用：Unicode 字母数字加 -，不带空格、斜杠、大写 ASCII
+    const badNames = names.filter(n => !/^[\p{L}\p{N}]+(?:--?[\p{L}\p{N}]+)*$/u.test(n) || /[A-Z]/.test(n));
+    ok(names.length > 0 && badNames.length === 0, '每个 name 都能当斜杠命令（无空格/斜杠/大写）', JSON.stringify(badNames));
+    ok(new Set(names).size === names.length, 'prompt name 全库唯一', JSON.stringify(names));
+    ok(names.includes('project-init-需求分析'), '中文文件名保留成可读的 name', JSON.stringify(names));
+    // 真实库里 snippets/ 有 8 个片段，放开过滤的话这条立刻红
+    ok(!names.some(n => n.startsWith('snippets-')), 'snippets/ 下的片段不列成斜杠命令', JSON.stringify(names));
+    const badArgs = prompts.flatMap(p => (p.arguments || [])
+      .filter(a => !/^arg\d+(?:_[a-z0-9]+)*$/.test(a.name) || typeof a.description !== 'string' || a.required !== false)
+      .map(a => p.name + ':' + JSON.stringify(a)));
+    ok(badArgs.length === 0, '每个 argument 都是合法标识符 + 提示语描述 + 非必填', JSON.stringify(badArgs));
+    // 具体条数和原文写死：`>= 1` 在"多提取了一个"的情况下照样绿
+    const codegen = prompts.find(p => p.name === 'code-generation-功能实现');
+    const codegenArgs = codegen ? codegen.arguments.map(a => [a.name, a.description]) : null;
+    ok(JSON.stringify(codegenArgs) === JSON.stringify([
+      ['arg1_react_typescript_vite', '如 React + TypeScript + Vite'],
+      ['arg2', '在此描述要实现的功能'],
+      ['arg3', '列出涉及的文件路径，或粘贴现有代码']
+    ]), '功能实现的参数按出现顺序从占位符提取', JSON.stringify(codegenArgs));
+    ok(!!codegen && codegen.title === '功能实现' && codegen.description === '根据需求拆分任务并生成可运行代码',
+      'title / description 取自 frontmatter', JSON.stringify(codegen && { t: codegen.title, d: codegen.description }));
+    // 反向对照：不剥 frontmatter 直接 extract，tags 那一行会被当成占位符
+    const raw = fs.readFileSync(path.join(dataRoot, 'prompts', 'code-generation', '功能实现.md'), 'utf8');
+    ok(PLACEHOLDERS.extract(raw).some(t => t.hint === '编码, 实现, 通用')
+      && !!codegen && !codegen.arguments.some(a => a.description === '编码, 实现, 通用'),
+      '反向对照：frontmatter 的 tags 不成为参数（不剥 frontmatter 时会）');
+
+    const g = await srv5.call(3, 'prompts/get', { name: 'project-init-需求分析', arguments: { arg1: '做一个记账应用' } });
+    const text = textOf(g);
+    ok(!!g && !!g.result && g.result.messages.length === 1 && g.result.messages[0].role === 'user'
+      && g.result.messages[0].content.type === 'text', 'prompts/get 返回一条 user 文本消息', JSON.stringify(g && (g.error || g.result)).slice(0, 300));
+    ok(!!text && text.includes('做一个记账应用') && !text.includes('[在此粘贴你的想法、用户原话、或问题描述]'),
+      'prompts/get 把参数填进正文');
+    ok(!!text && !text.includes('stage: project-init') && !text.includes('createdAt:'), 'prompts/get 的正文剥掉了 frontmatter');
+    ok(!!g && !!g.result && g.result.description === '项目启动阶段梳理需求、明确范围、产出需求清单',
+      'prompts/get 的 description 取自 frontmatter', JSON.stringify(g && g.result && g.result.description));
+    const g2 = await srv5.call(4, 'prompts/get', { name: 'project-init-需求分析' });
+    ok(!!textOf(g2) && textOf(g2).includes('[在此粘贴你的想法、用户原话、或问题描述]'), '没传的参数保留原占位符');
+    srv5.kill();
+  }
+  {
+    const fx = fs.mkdtempSync(path.join(os.tmpdir(), 'pfm-mcp-prompts-'));
+    const w = (rel, text) => {
+      const f = path.join(fx, rel);
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.writeFileSync(f, text);
+    };
+    const SECRET = '不该被读出来';
+    // 库外 / 内容目录外的真实文件：include 闸要拦的是**真的读得到**的东西，
+    // 拦一个不存在的文件证明力为零（反向对照里用朴素解析器确认它们都读得到）
+    w('config.json', '{"secret":"' + SECRET + '"}');
+    w('secret.md', '库根目录的 .md ' + SECRET);
+    w('logs/note.md', '日志 ' + SECRET);
+    w('.versions/old.md', '旧版本 ' + SECRET);
+    w('templates/frag.md', '---\ntitle: 模板片段\n---\n模板片段正文');
+    w('prompts/snippets/roles/r.md', '---\ntitle: 角色\nstage: snippets\n---\n你是一位[角色名]。');
+    const comboRaw = [
+      '---', 'title: 组合提示词', 'description: 带 include 的提示词', 'tags: [甲, 乙]', '---',
+      '用 [语言] 调用 [API 名称] 实现。',
+      '{{include: prompts/snippets/roles/r.md}}',
+      '目标：[在此描述目标]',
+      '```', '示例：[语言]', '```', ''
+    ].join('\n');
+    w('prompts/code-generation/组合.md', comboRaw);
+    const boundaryBody = [
+      '甲 {{include: config.json}}',
+      '乙 {{include: secret.md}}',
+      '丙 {{include: logs/note.md}}',
+      '丁 {{include: .versions/old.md}}',
+      '戊 {{include: prompts/../secret.md}}',
+      '己 {{include: templates/frag.md}}',
+      // 白名单内但不存在：要报 include error，不能悄悄展开成空串
+      '庚 {{include: prompts/testing/不存在.md}}', ''
+    ].join('\n');
+    w('prompts/testing/越界.md', '---\ntitle: 越界\n---\n' + boundaryBody);
+    // 三个自然名相同的文件：空格、连字符、大写 + 下划线
+    const clashRels = ['prompts/testing/a b.md', 'prompts/testing/a-b.md', 'prompts/testing/A_B.md'];
+    w(clashRels[0], '---\ntitle: 空格版\n---\n正文：空格版');
+    w(clashRels[1], '---\ntitle: 连字符版\n---\n正文：连字符版');
+    w(clashRels[2], '---\ntitle: 大写版\n---\n正文：大写版');
+    w('prompts/testing/超长.md', '---\ntitle: 超长\n---\n' + 'x'.repeat(60000));
+
+    const srv6 = startServer({ PFM_DATA_DIR: fx });
+    await srv6.call(1, 'initialize', {});
+    const list = await srv6.call(2, 'prompts/list', {});
+    const prompts = list && list.result ? list.result.prompts : [];
+    const byTitle = (t) => prompts.find(p => p.title === t);
+    ok(prompts.length === 6 && !list.result.nextCursor, '临时库列出 6 条且没有下一页',
+      JSON.stringify(prompts.map(p => p.name)));
+    ok(!prompts.some(p => p.title === '角色'), '临时库里的 snippets 片段同样不列出');
+
+    // ---- 参数提取：展开 include 之后再取 ----
+    const combo = byTitle('组合提示词');
+    const comboArgs = combo ? combo.arguments.map(a => [a.name, a.description]) : null;
+    ok(JSON.stringify(comboArgs) === JSON.stringify([
+      ['arg1', '语言'], ['arg2_api', 'API 名称'], ['arg3', '角色名'], ['arg4', '在此描述目标']
+    ]), 'include 进来的片段里的占位符也成为参数，按展开后的顺序编号', JSON.stringify(comboArgs));
+    // 反向对照：不展开 include 直接 extract，片段里的 [角色名] 不会出现
+    ok(!PLACEHOLDERS.extract(FRONTMATTER.strip(comboRaw)).some(t => t.hint === '角色名'),
+      '反向对照：不展开 include 时取不到片段里的占位符');
+
+    // ---- prompts/get：include 展开 + 参数填充 ----
+    const plain = textOf(await srv6.call(3, 'prompts/get', { name: combo && combo.name }));
+    const filled = textOf(await srv6.call(4, 'prompts/get', { name: combo && combo.name, arguments: { arg1: 'Go', arg3: '架构师' } }));
+    ok(!!plain && plain.includes('你是一位[角色名]。') && !plain.includes('{{include:') && !plain.includes('title: 角色'),
+      'prompts/get 展开了 include（且剥掉了片段的 frontmatter）', JSON.stringify(plain));
+    ok(!!filled && filled.includes('用 Go 调用 [API 名称] 实现。') && filled.includes('你是一位架构师。')
+      && filled.includes('目标：[在此描述目标]'),
+      '传了的参数填进去（含片段里的），没传的保留原样', JSON.stringify(filled));
+    ok(!!filled && filled.includes('示例：[语言]'), '代码块里同名的 [语言] 不被替换', JSON.stringify(filled));
+    // 反向对照：按 split/join 全文替换会连代码块一起改掉——上一条有分辨力
+    ok(!!plain && !plain.split('[语言]').join('Go').includes('示例：[语言]'),
+      '反向对照：朴素全文替换会改坏代码块');
+
+    // ---- include 的路径边界 ----
+    const bound = byTitle('越界');
+    const boundText = textOf(await srv6.call(5, 'prompts/get', { name: bound && bound.name }));
+    ok(!!boundText && !boundText.includes(SECRET), 'include 读不到内容目录外的文件（config.json / 库根 / logs / .versions / ..）',
+      JSON.stringify(boundText));
+    ok(!!boundText && (boundText.match(/include error/g) || []).length === 6,
+      '五处越界 + 一处不存在的 include 都留下了 include error 标记', JSON.stringify(boundText));
+    ok(!!boundText && boundText.includes('己 模板片段正文'), '白名单内的 templates/ 照常展开（拒绝不是因为 include 坏了）');
+    // 反向对照：不过闸、直接按路径读文件的解析器会把这几个文件读出来——
+    // 证明上面那条"读不到"拦的是真实可达的文件
+    const naive = await INCLUDES.resolveAsync(boundaryBody, async (r) => {
+      try { return fs.readFileSync(path.join(fx, r), 'utf8'); } catch { return null; }
+    });
+    ok(naive.includes(SECRET), '反向对照：不过闸的解析器确实读得到这些文件');
+    // 一条实测出来的事实（和第九节那段同一个形状）：只撤掉 include 解析器里的
+    // safeLibraryRel，上面"读不到"那条**不会红**——第二道闸 known.has（rel 必须在
+    // 元数据列表里，而元数据只来自三个内容目录下的 .md）照样把它们全拦住。
+    // 撤掉 known.has 则是"不存在的 include 要报错"那条红。safeLibraryRel 本身的
+    // 分辨力由第九节直接调它的单元断言证明。
+
+    // ---- 撞名 ----
+    const clash = clashRels.map(rel => ({ rel, title: FRONTMATTER.parse(fs.readFileSync(path.join(fx, rel), 'utf8')).meta.title }))
+      .map(x => ({ ...x, p: byTitle(x.title) }));
+    const clashNames = clash.map(x => x.p && x.p.name);
+    ok(clashNames.every(n => /^testing-a-b--[0-9a-f]{8}$/.test(n || '')) && new Set(clashNames).size === 3,
+      '自然名相同的三条全部加路径哈希后缀，互不重名', JSON.stringify(clashNames));
+    ok(new Set(clashRels.map(naturalName)).size === 1, '反向对照：这三条的自然名确实相同（不处理撞名就会重名）');
+    // macOS 文件名是 NFD：同一个"é"两种编码必须得到同一个 name
+    ok(naturalName('prompts/x/cafe\u0301.md') === naturalName('prompts/x/caf\u00e9.md')
+      && naturalName('prompts/x/caf\u00e9.md') === 'x-caf\u00e9', 'NFD 与 NFC 文件名得到同一个 name');
+    let clashOk = true;
+    for (const [i, x] of clash.entries()) {
+      const t = textOf(await srv6.call(10 + i, 'prompts/get', { name: x.p && x.p.name }));
+      if (!t || !t.includes('正文：' + x.title)) clashOk = false;
+    }
+    ok(clashOk, '撞名的三条各自取回自己的正文（name 映射没有串）');
+    // 稳定性：和遍历顺序无关。"第一个保留原名、后来的加序号"的朴素做法顺序一变名字就变
+    const fwd = assignPromptNames(clashRels);
+    const rev = assignPromptNames(clashRels.slice().reverse());
+    const naiveAssign = (rels) => {
+      const seen = new Map();
+      const out = new Map();
+      for (const r of rels) {
+        const b = naturalName(r);
+        const n = seen.get(b) || 0;
+        out.set(r, n ? b + '-' + (n + 1) : b);
+        seen.set(b, n + 1);
+      }
+      return out;
+    };
+    ok(clashRels.every(r => fwd.get(r) === rev.get(r)), 'name 与遍历顺序无关');
+    ok(clashRels.some(r => naiveAssign(clashRels).get(r) !== naiveAssign(clashRels.slice().reverse()).get(r)),
+      '反向对照：朴素的"先到先得"命名换个顺序就变');
+    const list2 = await srv6.call(6, 'prompts/list', {});
+    ok(JSON.stringify(list2 && list2.result) === JSON.stringify(list.result), '两次 prompts/list 结果完全一致');
+
+    // ---- 正文上限 ----
+    const longText = textOf(await srv6.call(7, 'prompts/get', { name: byTitle('超长') && byTitle('超长').name }));
+    ok(!!longText && longText.length <= 24000 && longText.includes('正文超长已截断') && longText.includes('共 60000 字符'),
+      '超长正文截断到上限内并在正文里注明', String(longText && longText.length));
+
+    // ---- 协议错误 ----
+    const comboName = combo && combo.name;
+    const bad = [
+      ['未知 name', { name: '不存在的提示词' }],
+      ['缺 name', {}],
+      ['name 不是字符串', { name: 42 }],
+      ['arguments 是数组', { name: comboName, arguments: ['Go'] }],
+      ['参数值不是字符串', { name: comboName, arguments: { arg1: 3 } }],
+      ['未知参数名', { name: comboName, arguments: { arg99: 'x' } }],
+      ['snippets 片段不能当 prompt 取', { name: 'snippets-roles-r' }],
+      ['rel 路径不是 name', { name: 'prompts/code-generation/组合.md' }],
+      ['.. 路径不是 name', { name: '../config' }]
+    ];
+    for (const [i, [label, params]] of bad.entries()) {
+      const r = await srv6.call(30 + i, 'prompts/get', params);
+      ok(errCode(r) === -32602 && !r.result, 'prompts/get 拒绝（-32602）：' + label, JSON.stringify(r && (r.error || r.result)).slice(0, 200));
+    }
+    const badCursor = await srv6.call(40, 'prompts/list', { cursor: 'abc' });
+    ok(errCode(badCursor) === -32602, 'prompts/list 拒绝无效 cursor（-32602）', JSON.stringify(badCursor && badCursor.error));
+    srv6.kill();
+    fs.rmSync(fx, { recursive: true, force: true });
+  }
+  {
+    // 分页：一页 200 条，超过时给 nextCursor。没有分页的话第一页就是 205 条
+    const many = fs.mkdtempSync(path.join(os.tmpdir(), 'pfm-mcp-many-'));
+    fs.mkdirSync(path.join(many, 'prompts', 'testing'), { recursive: true });
+    for (let i = 0; i < 205; i++) fs.writeFileSync(path.join(many, 'prompts', 'testing', 'p' + i + '.md'), '正文 ' + i);
+    const srv7 = startServer({ PFM_DATA_DIR: many });
+    await srv7.call(1, 'initialize', {});
+    const p1 = await srv7.call(2, 'prompts/list', {});
+    const p2 = await srv7.call(3, 'prompts/list', { cursor: p1 && p1.result && p1.result.nextCursor });
+    const n1 = p1 && p1.result ? p1.result.prompts.map(p => p.name) : [];
+    const n2 = p2 && p2.result ? p2.result.prompts.map(p => p.name) : [];
+    ok(n1.length === 200 && p1.result.nextCursor === '200', 'prompts/list 第一页 200 条并给出 nextCursor', String(n1.length));
+    ok(n2.length === 5 && !p2.result.nextCursor && new Set(n1.concat(n2)).size === 205,
+      'prompts/list 第二页取完剩余且不重复', String(n2.length));
+    srv7.kill();
+    fs.rmSync(many, { recursive: true, force: true });
   }
 
   console.log(failures ? `[test:mcp] ${failures} 条失败` : '[test:mcp] 通过');

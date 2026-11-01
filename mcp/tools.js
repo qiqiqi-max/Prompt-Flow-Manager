@@ -240,4 +240,4 @@ function createHandlers(deps) {
   };
 }
 
-module.exports = { toolDefinitions, createHandlers, safeLibraryRel, MAX_BODY_CHARS, MAX_LIST_ITEMS };
+module.exports = { toolDefinitions, createHandlers, safeLibraryRel, truncateBody, MAX_BODY_CHARS, MAX_LIST_ITEMS };

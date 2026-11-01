@@ -42,7 +42,7 @@ Prompt Flow Manager 用于集中整理项目开发中反复使用的提示词、
 | 启动自愈 | 启动时检查数据目录：摘掉回收站里点不动的幽灵记录、把孤立正文收养回可见状态、清掉写入中断留下的半截临时文件 |
 | 可诊断 | 运行日志滚动写入 `logs/`（单文件 2 MB、最多 5 个），设置里可导出一份脱敏的诊断信息用于报障 |
 | 升级提示 | 启动时查询 GitHub 最新发布版本并在右下角提示。只读版本号，不自动下载安装，不发送任何本机信息，设置里可完全关闭 |
-| 只读 MCP 接口 | 自带一个 stdio 的 MCP server，把提示词库暴露给 Claude Code / Codex 等支持 MCP 的工具查询。**只有读操作**，没有任何写入工具 |
+| 只读 MCP 接口 | 自带一个 stdio 的 MCP server，把提示词库暴露给 Claude Code / Codex 等支持 MCP 的工具查询，提示词还能直接作为客户端的斜杠命令使用。**只有读操作**，没有任何写入工具 |
 | 命令行入口 | `npm run pfm -- list / search / get / refs / check`，在终端或流水线里查询、体检提示词库。同样只有读操作；`check` 按退出码报告悬空引用与不可达步骤，可直接当 lint 用 |
 
 应用对大规模提示词库做了针对性优化：文件内容与解析结果按修改时间和大小缓存，目录树与元数据一次遍历返回，搜索时复用正文索引。项目内置的基准脚本可用于复测这些性能路径。
@@ -228,9 +228,25 @@ flowchart LR
 | `workflows_list` | 工作流及其步骤图，含分支与"从入口走不到的步骤" |
 | `prompts_references` | 某条提示词被哪些工作流引用；不传参数则做全库悬空引用体检 |
 
+除了工具，server 还声明了 MCP 的 **prompts** 能力：`prompts/` 下的每条提示词在 Claude Code
+等客户端里直接是一个斜杠命令，选中后客户端拿到的正文已经剥掉 frontmatter、展开了
+`{{include: ...}}`，并按传入的参数填好了占位符（和应用里点「复制」得到的是同一份）。
+
+- **命令名**取自路径：去掉 `prompts/` 和 `.md`，ASCII 字母转小写，空格、斜杠、标点合成一个 `-`，
+  中文保留。例如 `prompts/project-init/需求分析.md` → `project-init-需求分析`。
+  几个文件得到同一个名字时（如 `a b.md` 与 `a-b.md`），**这一组全部**加上 `--<路径哈希 8 位>`，
+  名字只由路径决定，与目录遍历顺序无关。
+- **参数**来自正文里的 `[提示文字]` 占位符（含 include 进来的片段里的），名字是
+  `arg<序号>`，提示文字里有英文时再接一段净化后的小写片段（如 `arg1_react_typescript_vite`），
+  描述就是提示文字。参数都不是必填：没传的占位符原样保留。
+- `prompts/snippets/` 下是给 include 拼装用的片段，**不**列成斜杠命令，但仍可被 include、
+  也仍可用 `prompts_get` 读取。
+- include 的路径闸和工具一致（只放行三个内容目录下的 `.md`）；正文超过长度上限时截断，
+  并在正文末尾注明。未知的命令名、未知参数名、参数值不是字符串都返回 JSON-RPC 的 -32602。
+
 安全边界：只读；路径只允许 `prompts/` `workflows/` `templates/` 下的 `.md`
 （`../` 逃逸、`.versions/`、`config.json`、日志与草稿目录一律拒绝）；返回正文有长度上限。
-没有引入第三方 MCP SDK——协议面只有 initialize / tools/list / tools/call / ping，
+没有引入第三方 MCP SDK——协议面只有 initialize / tools/list / tools/call / prompts/list / prompts/get / ping，
 沿用项目"运行时依赖最小"的取舍（目前只有 archiver 与 yauzl 两个）。
 
 ## 开发与测试
