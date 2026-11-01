@@ -60,6 +60,10 @@ const selftestRendererGlobals = {
   toast: 'readonly',
   refreshReferences: 'readonly',
   copyContent: 'readonly',
+  // 占位符扩展语法的自检要直接打开复制面板看预填值（就地填过之后 copyContent
+  // 不会再弹面板），以及从当前正文取 token 列表。
+  promptFillPlaceholders: 'readonly',
+  parseFrontmatter: 'readonly',
   // 自检要能取消当前弹层（fillPlaceholderInline 弹的输入框没人点就会挂住），
   // 这是 renderer.js 里"当前弹层的 resolve 入口"，自检通过它收尾。
   pendingPromptDone: 'writable'

@@ -395,6 +395,112 @@
           '原文件里应保留 ' + token);
       }
 
+      // ---- 占位符的选项与默认值 ----
+      // 种子 部署检查.md 是扩展语法的内置示例：[目标环境|生产|预发|测试] 有选项，
+      // [部署方式=Docker|...] 有默认值。用真实种子而不是现造的夹具，理由同上面那段。
+      {
+        const OPT = '[目标环境|生产|预发|测试]';
+        const DEF = '[部署方式=Docker|Docker|静态资源|CI 流水线]';
+        await openFile('prompts/deployment/部署检查.md');
+        await sleep(400);
+        const chipOf = (tok) => Array.from(document.querySelectorAll('#preview mark.ph')).find(el => el.dataset.token === tok);
+        const optChip = chipOf(OPT);
+        const defChip = chipOf(DEF);
+        check('有选项的 chip 带上了"可选"标记',
+          !!optChip && optChip.classList.contains('ph-opts') && !!optChip.dataset.badge,
+          optChip ? optChip.className + ' badge=' + optChip.dataset.badge : '(chip 不见了)');
+        check('有默认值的 chip 显示默认值并带上"默认"标记',
+          !!defChip && defChip.classList.contains('ph-default') && defChip.textContent === 'Docker' && !!defChip.dataset.badge,
+          defChip ? defChip.className + ' text=' + defChip.textContent : '(chip 不见了)');
+
+        const origPromptDone = pendingPromptDone;
+        try {
+          if (optChip) optChip.click();
+          for (let i = 0; i < 40 && !document.getElementById('ctx-input'); i++) await sleep(50);
+          const inp = document.getElementById('ctx-input');
+          const sel = inp && inp.previousElementSibling && inp.previousElementSibling.tagName === 'SELECT'
+            ? inp.previousElementSibling : null;
+          const choices = sel ? Array.from(sel.options).map(o => o.value).filter(Boolean) : [];
+          check('就地填写有选项的占位符时出现下拉框，列出全部选项',
+            !!inp && inp.tagName === 'TEXTAREA' && JSON.stringify(choices) === JSON.stringify(['生产', '预发', '测试']),
+            inp ? inp.tagName + ' ' + JSON.stringify(choices) : '没弹出填写框');
+          if (sel) {
+            sel.value = '预发';
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          check('在下拉框里选一项会写进填写框', !!inp && inp.value === '预发', inp ? inp.value : '');
+          // Shift+Enter 是换行，不能提交。合成的 keydown 不会真的插入换行，
+          // 这里能分辨的是"弹层还开着"：处理器若把它当 Enter 提交，弹层就关了。
+          if (inp) inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true, cancelable: true }));
+          await sleep(150);
+          check('就地填写框里 Shift+Enter 不提交', !!document.getElementById('ctx-input') && menuVisible());
+          const live = document.getElementById('ctx-input');
+          if (live) live.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+          await sleep(300);
+        } finally {
+          if (pendingPromptDone) { const cancel = pendingPromptDone; cancel(null); }
+          pendingPromptDone = origPromptDone;
+        }
+        const optAfter = chipOf(OPT);
+        check('就地填写框里 Enter 提交，chip 显示选中的值',
+          !!optAfter && optAfter.classList.contains('ph-filled') && optAfter.textContent === '预发',
+          optAfter ? optAfter.className + ' text=' + optAfter.textContent : '(chip 不见了)');
+
+        // 复制：填过的用填的值，没点过的默认值 chip 按默认值填，其余原样保留。
+        const origWrite = navigator.clipboard.writeText.bind(navigator.clipboard);
+        let copied = null;
+        navigator.clipboard.writeText = async (text) => { copied = text; };
+        const cancelPanelSoon = (async () => {
+          for (let i = 0; i < 12; i++) {
+            await sleep(50);
+            if (pendingPromptDone) pendingPromptDone(null);
+          }
+        })();
+        try {
+          await copyContent();
+        } catch (err) {
+          copied = 'THREW:' + String(err && err.message);
+        } finally {
+          navigator.clipboard.writeText = origWrite;
+          await cancelPanelSoon;
+        }
+        check('复制时没改过的默认值按默认值填入',
+          !!copied && copied.includes('**目标环境**：预发') && copied.includes('**部署方式**：Docker')
+            && !copied.includes('[部署方式=') && copied.includes('[在此描述变更内容]'),
+          String(copied).slice(0, 200));
+
+        // 复制面板：默认值预填进框里，上次填过的值优先于默认值。
+        // 直接调 promptFillPlaceholders，不走 copyContent：上面已经就地填过，
+        // copyContent 不会再弹面板。
+        const items = PLACEHOLDERS.extract(parseFrontmatter(state.currentContent).body);
+        const openPanel = async () => {
+          const pending = promptFillPlaceholders(items);
+          await sleep(100);
+          const areas = Array.from(document.querySelectorAll('#ctx-menu textarea[data-token]'));
+          const snapshot = areas.map(a => [a.dataset.token, a.value]);
+          const selects = document.querySelectorAll('#ctx-menu select').length;
+          const ok = document.getElementById('fill-ok');
+          if (ok) await realClick(ok);
+          const values = await pending;
+          return { snapshot: Object.fromEntries(snapshot), selects, values };
+        };
+        const savedMemo = state.fillMemory[DEF];
+        try {
+          delete state.fillMemory[DEF];
+          const first = await openPanel();
+          check('复制面板里有默认值的框预填默认值，有选项的带下拉框',
+            first.snapshot[DEF] === 'Docker' && first.selects === 2 && first.values && first.values[DEF] === 'Docker',
+            JSON.stringify(first));
+          state.fillMemory[DEF] = '静态资源';
+          const second = await openPanel();
+          check('复制面板里上次填过的值优先于默认值', second.snapshot[DEF] === '静态资源', JSON.stringify(second.snapshot));
+        } finally {
+          if (savedMemo === undefined) delete state.fillMemory[DEF];
+          else state.fillMemory[DEF] = savedMemo;
+          if (pendingPromptDone) pendingPromptDone(null);
+        }
+      }
+
       // ---- 右键菜单 ----
       const fileRow = document.querySelector('#tree .tree-row.file') || document.querySelector('#tree .tree-row');
       if (fileRow) {
