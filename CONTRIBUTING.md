@@ -186,6 +186,8 @@ npm run test:cli          # 命令行入口：只读子命令、退出码、路�
 npm run test:import-rollback # 真实 Electron 完整备份中途失败后整体撤回
 npm run test:ui-failure # 真实 Electron 配置写入失败时显示提示并恢复界面状态
 npm run test:includes     # 模板包含引擎（裸 node，自带一组反向对照）
+npm run test:quick-launch-logic # 全局快捷键：校验、注册状态机、先注册后落盘与回滚（裸 node，自带两组反向对照）
+npm run test:quick-launch # 真实 Electron 快速搜索面板：呼出、搜索、复制、隐藏、安全配置与主窗口一致
 npm run test:reverse  # 把第一节那套流程自动化：逐条改坏源码，验证目标断言真的变红
 npm run test:reverse-split # 同上，针对「自检模块拆分」那一节的注入契约
 npm run test:quick    # 日常快速检查：lint + 静态检查 + 裸 node 单测
@@ -264,7 +266,7 @@ postinstall，二进制改成惰性下载，所以干净环境里 `npm ci` 之�
 
 | 环境变量 | 作用 | 要求 |
 |----------|------|------|
-| `PFM_SELFTEST=1` | 页面加载完跑启动自检并退出 | |
+| `PFM_SELFTEST=1` | 页面加载完跑启动自检并退出。同时让全局快捷键改用内存替身，不注册真实的系统快捷键 | |
 | `PFM_DATA_DIR=<目录>` | 把 DATA_ROOT 指向临时目录 | 下面几项的前置 |
 | `PFM_SELFTEST_FUNCTIONAL=1` | 端到端功能自检 | 必须配 `PFM_DATA_DIR` |
 | `PFM_SELFTEST_UI=1` | 真实事件序列点界面 | 必须配 `PFM_DATA_DIR` |
@@ -276,6 +278,8 @@ postinstall，二进制改成惰性下载，所以干净环境里 `npm ci` 之�
 | `PFM_SELFTEST_ZOOM=<倍数>` | 自检前设置页面缩放，范围 0.5 到 3 | 只给布局测试使用 |
 | `PFM_SELFTEST_CLOSE_UNSAVED=1` | 自定义脚本执行后触发关窗，验证未保存草稿保护 | 必须配 `PFM_DATA_DIR` |
 | `PFM_SELFTEST_CLOSE=<模式>` | 关窗落盘握手 | 必须配 `PFM_DATA_DIR` |
+| `PFM_SELFTEST_QUICK_LAUNCH=full\|startup-taken` | 快速搜索面板自检：模拟按快捷键呼出、搜索、复制、隐藏，比对两个窗口的安全配置；自己负责退出 | 必须配 `PFM_DATA_DIR` |
+| `PFM_SELFTEST_SHORTCUT_TAKEN=<键,键>` | 让自检用的快捷键替身假装这些键已被别的程序占用 | 只在 `PFM_SELFTEST=1` 时生效 |
 | `PFM_SELFTEST_READONLY=1` | 只读体检：每个文件能否读取/解析/渲染 | 只读，不写 |
 | `PFM_SELFTEST_DIALOGS=<json>` | 用队列文件替换系统对话框 | 顺序必须与调用顺序一致 |
 | `PFM_SELFTEST_OPEN=<相对路径>` | 启动后先打开指定文件 | |

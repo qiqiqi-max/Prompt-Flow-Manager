@@ -1577,6 +1577,70 @@ section('调试残留');
     }
   }
 
+  section('全局快捷键快速搜索面板');
+  // 行为（呼出、搜索、复制、隐藏、两个窗口的 webPreferences 逐项一致）由 test:quick-launch
+  // 在真实 Electron 里验。这里卡的是那边结构上看不到的几条：
+  {
+    const qlSrc = fs.readFileSync(path.join(root, 'src/quick-launch.js'), 'utf8');
+    const qlHtml = fs.readFileSync(path.join(root, 'src/quick-launch.html'), 'utf8');
+    const qlPreload = fs.readFileSync(path.join(root, 'quick-launch-preload.js'), 'utf8');
+    const I18NQ = require('../src/i18n.js');
+    // 面板文案同样走 i18n。renderer.js 那条检查只扫 renderer.js，新文件不会自动进来。
+    const bad = collectUnexemptedCjk('src/quick-launch.js');
+    assert(bad.length === 0, 'quick-launch.js 无未标注豁免的硬编码中文' + (bad.length ? '，违规行：\n      ' + bad.join('\n      ') : ''));
+    const used = new Set();
+    for (const m of qlSrc.matchAll(/\bt\('([^']+)'/g)) used.add(m[1]);
+    for (const m of qlHtml.matchAll(/data-i18n(?:-[a-z]+)?="([^"]+)"/g)) used.add(m[1]);
+    const missing = [...used].filter(k => !(k in I18NQ.zh) || !(k in I18NQ.en));
+    assert(used.size >= 8 && missing.length === 0,
+      '面板用到的 i18n 键中英都存在（' + used.size + ' 个）' + (missing.length ? '，缺失：' + missing.join(', ') : ''));
+    // 不留顶层声明：面板页面和 i18n.js / placeholders.js 等共享一个全局词法作用域，
+    // 顶层 const 撞名会让整段脚本不执行（踩过的坑第 2 条）。整个文件必须是一个 IIFE。
+    const code = qlSrc.split(/\r?\n/).filter(l => !/^\s*\/\//.test(l)).join('\n').trim();
+    assert(/^\(function \(\) \{[\s\S]*\}\)\(\);$/.test(code) && !/^(const|let|var|function|class)\s/m.test(qlSrc),
+      'quick-launch.js 整个包在 IIFE 里，没有顶层声明');
+    // CSP 逐字一致。运行时也会比一次，但那次只在面板真的被建出来之后才跑得到
+    const csp = (s) => (s.match(/http-equiv="Content-Security-Policy" content="([^"]+)"/) || [])[1];
+    assert(!!csp(qlHtml) && csp(qlHtml) === csp(htmlSrc), '面板页面的 CSP 与 index.html 逐字一致');
+    // 依赖脚本要在 quick-launch.js 之前加载（它在 IIFE 顶部就取用这些全局）
+    const order = ['i18n.js', 'frontmatter.js', 'placeholders.js', 'includes.js', 'quick-launch.js']
+      .map(f => qlHtml.indexOf('src="' + f + '"'));
+    assert(order.every((v, i) => v > 0 && (i === 0 || v > order[i - 1])), '面板按顺序加载 i18n / frontmatter / placeholders / includes / quick-launch.js');
+    // 面板窗口的创建参数。只在 createQuickPanel 的函数体里查：主窗口那段也写着
+    // contextIsolation: true / sandbox: sandboxActive，全文匹配等于恒真。
+    const at = mainSrc.indexOf('function createQuickPanel()');
+    const end = at > 0 ? mainSrc.indexOf('\n}\n', at) : -1;
+    const body = at > 0 && end > at ? mainSrc.slice(at, end) : '';
+    assert(body.length > 200, '取到了 createQuickPanel 的函数体');
+    assert(/sandbox: sandboxActive/.test(body) && !/sandbox: (true|false)/.test(body),
+      '面板的沙箱取主窗口同一个 sandboxActive（不写死，两个半边的判定只有一份）');
+    assert(/contextIsolation: true/.test(body) && /nodeIntegration: false/.test(body), '面板 contextIsolation 开、nodeIntegration 关');
+    assert(/preload: path\.join\(CODE_ROOT, 'quick-launch-preload\.js'\)/.test(body), '面板 preload 从 CODE_ROOT 加载（打包后在 asar 内）');
+    assert(/loadFile\(path\.join\(CODE_ROOT, 'src', 'quick-launch\.html'\)\)/.test(body), '面板页面从 CODE_ROOT 加载');
+    assert(/setWindowOpenHandler\(\(\) => \(\{ action: 'deny' \}\)\)/.test(body), '面板禁止 window.open');
+    assert(/on\('will-navigate'[\s\S]*?e\.preventDefault\(\)/.test(body), '面板拦截页内导航');
+    assert((pkg.build.files || []).includes('quick-launch-preload.js'), 'build.files 打包了 quick-launch-preload.js（不在 src/ 下，不被 src/**/* 覆盖）');
+    // 面板专用通道核对发送方。preload 白名单只把它们给了面板，但 IPC 通道是全局的。
+    for (const ch of ['quick-launch-copy', 'quick-launch-hide']) {
+      const i = mainSrc.indexOf("ipcMain.handle('" + ch + "'");
+      const h = i > 0 ? mainSrc.slice(i, i + 200) : '';
+      assert(/if \(!isQuickPanelSender\(e\)/.test(h), ch + ' 只认面板自己发来的请求');
+    }
+    // 退出前注销。在 will-quit 处理体里查：unregisterAll 在 lib/quick-launch.js 里也有一处
+    {
+      const i = mainSrc.indexOf("app.on('will-quit'");
+      const h = i > 0 ? mainSrc.slice(i, i + 300) : '';
+      assert(/shortcutController\.unregisterAll\(\)/.test(h), '退出前（will-quit）注销全部全局快捷键');
+    }
+    // 自检不注册真实快捷键：并行的测试进程会互相"占用"，还会抢开发机的按键
+    assert(/const shortcutBackend = process\.env\.PFM_SELFTEST === '1'\s*\? quickLaunch\.createFakeGlobalShortcut/.test(mainSrc),
+      '自检模式下用内存替身代替真实的 globalShortcut');
+    assert(/'quickLaunchEnabled', 'quickLaunchShortcut'/.test(mainSrc), '已知配置键清单含 quickLaunchEnabled / quickLaunchShortcut');
+    assert(/quickLaunchEnabled: false/.test(mainSrc), '全局快捷键默认关闭');
+    assert(/exposeInMainWorld\('quickLaunchApi'/.test(qlPreload) && !/ipcRenderer\.invoke\('(save-file|trash|export-zip|import-zip|set-config)'/.test(qlPreload),
+      '面板 preload 是最小白名单（没有写操作）');
+  }
+
   section('i18n 键完整性');
   const I18N = require('../src/i18n.js');
   const zhKeys = Object.keys(I18N.zh).sort();

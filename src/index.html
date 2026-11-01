@@ -205,6 +205,22 @@
           </label>
           <p class="settings-hint" id="update-status"></p>
         </div>
+        <div class="settings-section">
+          <h3 data-i18n="settingsQuickLaunch">全局快捷键</h3>
+          <!-- 默认关闭：全局快捷键会从所有程序手里抢走这个组合。真正的注册状态只在主进程里，
+               这里显示的状态行每次打开设置都重新问一遍（见 renderer.js 的 refreshQuickLaunchStatus）。 -->
+          <p class="settings-desc" data-i18n="quickLaunchDesc">在任何程序里按下快捷键，弹出一个小搜索框：输入即搜，↑↓ 选择，Enter 复制，Esc 收起。主窗口最小化时也能用。</p>
+          <label class="settings-toggle">
+            <input type="checkbox" id="chk-quick-launch">
+            <span data-i18n="quickLaunchLabel">启用全局快捷键</span>
+          </label>
+          <div class="types-actions">
+            <input type="text" id="quick-launch-shortcut" autocomplete="off" spellcheck="false" data-i18n-placeholder="quickLaunchShortcutPlaceholder" data-i18n-aria="quickLaunchShortcutLabel" placeholder="例如 Ctrl+Alt+Space">
+            <button class="btn-primary" id="btn-quick-launch-apply" data-i18n="quickLaunchApply">应用</button>
+          </div>
+          <p class="settings-hint" id="quick-launch-status"></p>
+          <p class="settings-hint" data-i18n="quickLaunchHint">默认 Ctrl+Alt+Space。全局快捷键会在所有程序里生效，被别的程序占用时会提示注册失败。</p>
+        </div>
       </div>
     </div>
   </div>

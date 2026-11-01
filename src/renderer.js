@@ -92,6 +92,7 @@ const state = {
   tabs: [],                   // 多标签页：[{rel, content, meta, scroll}]
   activeTab: null,            // 当前激活标签的 rel
   fillMemory: {},             // 占位符填充记忆：token 原文 -> 上次填的值（见 rememberFillValues）
+  quickLaunch: null,          // 全局快捷键状态（主进程给的 { enabled, shortcut, registered, error }）
   currentRefs: [],            // 当前文件的被引用列表（工作流 rel），见 refreshReferences
   danglingCount: 0,           // 全库悬空引用条数：工作流引用的文件已经不在了
   previewFills: {}            // 预览区就地填过的占位符：rel -> { token: 值 }，见 enhancePreviewPlaceholders
@@ -2740,6 +2741,7 @@ async function openSettings() {
   const chk = $('chk-update-check');
   if (chk) chk.checked = state.config.updateCheck !== false;
   renderUpdateStatus();
+  refreshQuickLaunchStatus();
 }
 function renderSettingsTypes() {
   const list = $('types-list');
@@ -2941,6 +2943,7 @@ async function setLang(lang) {
     renderMetaBar();
     renderContent();
   }
+  renderQuickLaunchSettings();
   updateStatusInfo(t('ready'));
   if (langSaveError) toast(describeError(langSaveError), 'error');
   else toast(t('langSwitched'), 'success');
@@ -3014,6 +3017,66 @@ async function renderUpdateStatus() {
     parts.push(t('updateFound', { version: latest, current }));
   }
   el.textContent = parts.join(' · ');
+}
+
+// ===== 全局快捷键 =====
+// 真正的注册状态只在主进程里（globalShortcut 是主进程 API），这里缓存一份只为显示。
+// 开关的真值同样不能只信 state.config：配置说开着，不代表这一次启动注册上了——
+// 被别的程序占用时 registered 是 false，界面必须说"未生效"，而不是显示一个打着勾的开关。
+async function refreshQuickLaunchStatus() {
+  try {
+    state.quickLaunch = await api.getQuickLaunchStatus();
+  } catch (e) {
+    console.error('读取全局快捷键状态失败:', e); // i18n-exempt: 开发日志
+    state.quickLaunch = state.quickLaunch || { enabled: false, shortcut: '', registered: false, error: null };
+  }
+  renderQuickLaunchSettings();
+  return state.quickLaunch;
+}
+function quickLaunchStatusText(q) {
+  if (!q || !q.enabled) return t('quickLaunchStatusOff');
+  if (q.registered) return t('quickLaunchStatusOn', { shortcut: q.shortcut });
+  return t('quickLaunchStatusFailed', { reason: describeError(new Error((q.error || 'E_SHORTCUT_TAKEN') + '|' + q.shortcut)) });
+}
+function renderQuickLaunchSettings() {
+  const q = state.quickLaunch;
+  const chk = $('chk-quick-launch');
+  const inp = $('quick-launch-shortcut');
+  const status = $('quick-launch-status');
+  if (!q || !chk || !inp || !status) return;
+  chk.checked = !!q.enabled;
+  // 正在输入时不覆盖：用户敲到一半，状态刷新把输入框改回旧值会很莫名其妙
+  if (document.activeElement !== inp) inp.value = q.shortcut || '';
+  status.textContent = quickLaunchStatusText(q);
+  status.classList.toggle('error', !!(q.enabled && !q.registered));
+}
+// 改开关或组合键。主进程那边是"先注册、成功才落盘"，失败时磁盘和注册状态都不动，
+// 所以这里失败了只需要把界面拨回主进程说的真实状态。
+async function applyQuickLaunch(patch) {
+  try {
+    state.quickLaunch = await api.setQuickLaunch(patch);
+    const inp = $('quick-launch-shortcut');
+    if (inp) inp.value = state.quickLaunch.shortcut || '';
+    toast(t('quickLaunchSaved'), 'success');
+  } catch (e) {
+    toast(describeError(e), 'error');
+    // 开关和状态行拨回真实状态，但输入框留着用户刚敲的值，方便他就地改
+    const inp = $('quick-launch-shortcut');
+    const typed = inp ? inp.value : '';
+    await refreshQuickLaunchStatus();
+    if (inp) inp.value = typed;
+    return false;
+  }
+  renderQuickLaunchSettings();
+  return true;
+}
+// 启动时查一次：配置里开着、但这一次没注册上（被别的程序占了），必须当面说。
+// 不说的话用户只会发现"按了没反应"，没人会去翻设置面板里那一行状态。
+async function checkQuickLaunchAtStartup() {
+  const q = await refreshQuickLaunchStatus();
+  if (q && q.enabled && !q.registered) {
+    toast(describeError(new Error((q.error || 'E_SHORTCUT_TAKEN') + '|' + q.shortcut)), 'error');
+  }
 }
 
 // ===== 分隔条拖拽 =====
@@ -3316,6 +3379,19 @@ async function init() {
   // 主进程查到新版本会推过来。用户没开界面时窗口可能还没加载完，
   // 那种情况下这条推送会丢——设置面板里的 renderUpdateStatus 能补上。
   api.onUpdateAvailable((info) => showUpdateBanner(info));
+  // 全局快捷键。关的时候不带组合键：输入框里正敲着一个不合法的值，也不该挡住"关掉"。
+  // 开的时候带上输入框里的值，用户改完组合键直接勾开关，就是想用这个新键。
+  $('chk-quick-launch').onchange = async (e) => {
+    const on = !!e.target.checked;
+    const typed = $('quick-launch-shortcut').value.trim();
+    const patch = on && typed ? { enabled: true, shortcut: typed } : { enabled: on };
+    if (!await applyQuickLaunch(patch)) e.target.checked = !!(state.quickLaunch && state.quickLaunch.enabled);
+  };
+  $('btn-quick-launch-apply').onclick = () => applyQuickLaunch({ shortcut: $('quick-launch-shortcut').value });
+  $('quick-launch-shortcut').onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); $('btn-quick-launch-apply').click(); }
+  };
+  checkQuickLaunchAtStartup();
 
   $('btn-empty-trash').onclick = async () => {
     if (await confirmDialog(t('emptyTrashConfirm'))) {
