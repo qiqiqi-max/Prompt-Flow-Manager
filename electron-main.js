@@ -51,6 +51,7 @@ const quickLaunch = require('./lib/quick-launch');
 // 外部改动感知（CLI / MCP / git pull / 外部编辑器）。同样不 require electron，
 // 自写过滤和事件合并的说明在那个文件头。
 const { createLibraryWatcher } = require('./lib/library-watch');
+const { createUsageStore } = require('./lib/usage-store');
 // 滚动文件日志 + 诊断包。两个模块都刻意不 require('electron')：
 // 目录、版本号、两个根目录全部由这里传进去，DATA_ROOT / CODE_ROOT 的判断
 // 只允许存在下面那一份（见 123-133 行的说明）。
@@ -176,6 +177,10 @@ const LOGS_DIR = path.join(DATA_ROOT, 'logs');
 // 否则测试改语言/主题会写进用户真实配置。
 const CONFIG_PATH = path.join(process.env.PFM_DATA_DIR ? DATA_ROOT : app.getPath('userData'), 'config.json');
 const DRAFTS_DIR = path.join(path.dirname(CONFIG_PATH), 'drafts');
+// 使用统计与收藏（复制次数、最后使用时间、收藏列表）。和 config.json 放在一起而不是
+// DATA_ROOT：它和草稿一样是本机数据，开发模式下不该落进仓库根目录；打包后两处是同一个目录。
+// 为什么不并进 config.json 见 lib/usage-store.js 文件头。
+const USAGE_PATH = path.join(path.dirname(CONFIG_PATH), 'usage.json');
 
 // 打包后首次运行：从 asar 内拷出种子资源到 Data 目录。
 //
@@ -716,6 +721,44 @@ function queueWriteMulti(keys, fn) {
   return acquire(0);
 }
 
+// ---------- 使用统计与收藏 ----------
+// 自己一条 'usage' 队列，不和 config 共用（理由见 lib/usage-store.js 文件头）。
+// queueWrite 内部套着写入闸门，所以完整备份导入期间统计写入同样排在导入之后。
+//
+// 'usage' 永远**单独**占，不嵌在别的 key 里面：rename / empty-trash 都是先放掉自己的
+// ver:* / trash，再调 usageStore。嵌套占锁在导入闸门面前有个坑——外层已经算进
+// writeGate 的 active，内层 shared() 却要排在已登记的 exclusive 后面，而 exclusive
+// 在等 active 归零，两边互等。不嵌套就构造不出来。
+const usageStore = createUsageStore({
+  file: USAGE_PATH,
+  writeFileAtomic,
+  queue: (fn) => queueWrite('usage', fn),
+  appError,
+  logError: (...a) => console.error(...a)
+});
+
+// rel 统一成正斜杠：渲染进程的树、标签页、锁列表都用正斜杠，键不统一的话
+// 同一个文件会在 usage.json 里出现两条。
+function usageRel(rel) {
+  return String(rel == null ? '' : rel).replace(/\\/g, '/');
+}
+
+// 只给库里真实存在的 .md 记账。走读取白名单：统计的对象只能是 prompts/workflows/templates
+// 下的内容文件，越界路径直接抛（和 read-file 同一套错误码）。
+// 越界路径也当成"不在"：清空回收站时 originalRel 来自索引，可能是手改过的坏值。
+async function usageFileIsLive(rel) {
+  try { return (await fsp.stat(safeJoinReadable(rel))).isFile(); } catch { return false; }
+}
+
+// 记一次使用。主进程侧的入口：渲染进程走 record-usage IPC 到这里；
+// 主进程里自己的复制入口（例如全局快速面板）直接调这个函数，不必绕回渲染进程。
+// 文件不存在时不记、不报错（返回 recorded:false）——外部刚删掉的文件不应该长出统计。
+async function recordPromptUsage(rel) {
+  const r = usageRel(rel);
+  safeJoinReadable(r);
+  return usageStore.record(r, { isLive: usageFileIsLive });
+}
+
 // ---------- 目录树 ----------
 // ---------- IPC ----------
 ipcMain.handle('get-root', () => DATA_ROOT);
@@ -836,7 +879,7 @@ ipcMain.handle('clear-draft', async (e, rel) => queueWrite('draft:' + String(rel
 //     结果同一份内容在新旧两个路径各有一份，版本历史却只跟着其中一个。
 // 占两个 key 而不是一个：只占源的话，并发写目标的那条路照样插得进来。
 // 顺序由 queueWriteMulti 统一排序，不会和别处形成环。
-ipcMain.handle('rename', async (e, oldRel, newRel) => queueWriteMulti(
+const renameLocked = (oldRel, newRel) => queueWriteMulti(
   ['ver:' + String(oldRel), 'ver:' + String(newRel)],
   async () => {
   // 两侧都过写入白名单：源要被移走（等于删），目标要被写入，
@@ -876,7 +919,20 @@ ipcMain.handle('rename', async (e, oldRel, newRel) => queueWriteMulti(
     console.error('锁定标记跟随改名失败（文件已改名）:', oldRel, '->', newRel, err.message);
   }
   return true;
-}));
+});
+
+ipcMain.handle('rename', async (e, oldRel, newRel) => {
+  await renameLocked(oldRel, newRel);
+  // 使用统计和收藏跟着文件走（同锁定标记，"改名 → 删除 → 清空回收站"要清的是新路径）。
+  // 放在 ver:* 锁**之外**：'usage' 不嵌套占锁，见 usageStore 定义处的说明。
+  // 失败只记日志，理由和锁定标记那段一样：文件已经改名成功了。
+  try {
+    await usageStore.migrate(usageRel(oldRel), usageRel(newRel));
+  } catch (err) {
+    console.error('使用统计跟随改名失败（文件已改名）:', oldRel, '->', newRel, err.message);
+  }
+  return true;
+});
 
 // 工作流引用同步：`workflows/*.md` 的 flow[].prompt 指向 prompts/ 下的文件，
 // 改名/移动 prompt 后这些引用会变成死链，而流程图上没有任何报错——这个问题
@@ -1198,11 +1254,36 @@ ipcMain.handle('restore', async (e, id) => queueWriteMulti(await restoreLockKeys
   return true;
 }));
 
-ipcMain.handle('empty-trash', async () => queueWrite('trash', async () => {
-  const { kept, failedNames } = await trashStore.empty();
+ipcMain.handle('empty-trash', async () => {
+  const { kept, removed, failedNames } = await queueWrite('trash', () => trashStore.empty());
+  // 彻底删除的文件，统计和收藏一起清掉。删进回收站时不清，是为了恢复后还在；
+  // 到这一步文件已经没有回来的路了，留着只会在 usage.json 里攒幽灵条目。
+  // 只清真删掉的那些（removed），删失败、还留在回收站里的不动；原路径上已经有了
+  // 新文件的也不动（isLive），那份统计属于新文件。
+  // 在 trash 锁之外调，理由同 rename。失败只记日志：回收站已经清完了。
+  const stillTrashed = new Set(kept.map(i => usageRel(i.originalRel)));
+  const gone = removed.map(i => usageRel(i.originalRel)).filter(r => !stillTrashed.has(r));
+  if (gone.length) {
+    try {
+      await usageStore.forget(gone, { isLive: usageFileIsLive });
+    } catch (err) {
+      console.error('清空回收站后清理使用统计失败:', err.message);
+    }
+  }
   if (kept.length) throw appError('E_TRASH_EMPTY_PARTIAL', failedNames.join(', '));
   return true;
-}));
+});
+
+// 使用统计与收藏。三个都只占 'usage'（读也排队，原因见 lib/usage-store.js 的 createUsageStore）。
+ipcMain.handle('record-usage', async (e, rel) => recordPromptUsage(rel));
+ipcMain.handle('get-usage', async () => usageStore.snapshot());
+ipcMain.handle('set-favorite', async (e, rel, on) => {
+  const r = usageRel(rel);
+  safeJoinReadable(r);
+  // 只允许收藏存在的文件；取消收藏不查（外部删掉的文件也要能从收藏里摘掉）。
+  if (on && !(await usageFileIsLive(r))) throw appError('E_FAVORITE_MISSING', r);
+  return usageStore.setFavorite(r, !!on);
+});
 
 ipcMain.handle('list-versions', async (e, rel) => versionStore.listVersions(rel));
 
@@ -1991,6 +2072,8 @@ async function healDataDir() {
   //
   // 写入点对照（grep writeFileAtomic 的调用方）：
   //   config.json        → DATA_ROOT 顶层，不需要递归
+  //   usage.json         → CONFIG_PATH 所在目录顶层（打包/测试时就是 DATA_ROOT；
+  //                        开发模式下是 userData，和 DATA_ROOT 不是同一个，要单独扫）
   //   .trash/index.json  → TRASH_DIR 一层
   //   版本快照和索引      → .versions/** 递归
   //   正文               → prompts / workflows / templates 递归
@@ -2038,6 +2121,9 @@ async function healDataDir() {
   };
 
   await walk(DATA_ROOT, false);
+  // 不递归：开发模式下这里是 userData，里面是 Chromium 自己的缓存目录，
+  // 那里不可能有本程序的临时文件。顶层文件名由 TMP_PART_RE 严格匹配，误删不到别的东西。
+  if (path.resolve(path.dirname(USAGE_PATH)) !== path.resolve(DATA_ROOT)) await walk(path.dirname(USAGE_PATH), false);
   for (const d of [TRASH_DIR, VERSIONS_DIR, PROMPTS_DIR, WORKFLOWS_DIR, TEMPLATES_DIR]) {
     await walk(d, true);
   }

@@ -605,6 +605,143 @@
         await until(() => !state.editMode);
       }
 
+      // ---- 收藏 / 常用 ----
+      // 用自己新建的文件，不动种子：这段会把它改名、删进回收站、再清空回收站。
+      // tests/ui-smoke.js 预先往 usage.json 里放了一个外部已删除文件的收藏和高频统计
+      // （prompts/testing/外部已删除.md，复制 50 次、刚刚用过），用来验"不留幽灵条目"：
+      // 渲染不过滤的话，它会排在收藏里、并且压在常用第一位。
+      {
+        const ghost = 'prompts/testing/外部已删除.md';
+        const favRel = 'prompts/testing/收藏自检-' + Date.now() + '.md';
+        const api = window.promptFlowApi;
+        const panel = document.getElementById('usage-panel');
+        const listRels = () => Array.from(document.querySelectorAll('#usage-list .usage-item')).map(el => el.dataset.rel);
+        const showTab = async (tab) => {
+          const b = panel.querySelector('.usage-tab[data-tab="' + tab + '"]');
+          if (b) await realClick(b);
+        };
+        const pre = await api.getUsage();
+        check('前置：usage.json 里确实有外部已删除文件的收藏和统计',
+          pre.favorites.includes(ghost) && pre.frequent.some(x => x.rel === ghost && x.count >= 10), JSON.stringify(pre));
+        await api.createFile(favRel, '---\ntitle: 收藏自检\n---\n\n没有占位符的正文。\n');
+        await refreshTree();
+        await sleep(300);
+
+        // 右键 → 收藏
+        const row = Array.from(document.querySelectorAll('#tree .tree-row.file')).find(r => r.__rel === favRel);
+        const ctxItemFor = (key) => Array.from(menu().querySelectorAll('.ctx-item')).find(el => el.textContent === t(key));
+        let favItem = null;
+        if (row) {
+          row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 200, clientY: 200 }));
+          await sleep(200);
+          favItem = ctxItemFor('ctxFavorite');
+        }
+        check('右键菜单里有「收藏」', !!favItem, row ? menu().textContent : '树里找不到新建的文件');
+        if (favItem) await realClick(favItem);
+        await sleep(400);
+        const panelShown = () => !panel.classList.contains('hidden') && panel.offsetParent !== null;
+        check('收藏后侧边栏显示收藏区且列出这个文件', panelShown() && listRels().includes(favRel),
+          'hidden=' + panel.classList.contains('hidden') + ' 列表=' + JSON.stringify(listRels()));
+        check('收藏区不显示外部已删除的文件（不留幽灵条目）', panelShown() && !listRels().includes(ghost),
+          JSON.stringify(listRels()));
+        if (row) {
+          row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 200, clientY: 200 }));
+          await sleep(200);
+          check('已收藏的文件右键显示「取消收藏」', !!ctxItemFor('ctxUnfavorite'), menu().textContent);
+          await realClick(document.body);
+        }
+
+        // 收藏条目一键打开
+        await openFile('workflows/branch-flow-example.md');
+        await sleep(200);
+        const favBtn = Array.from(document.querySelectorAll('#usage-list .usage-item')).find(el => el.dataset.rel === favRel);
+        if (favBtn) await realClick(favBtn);
+        await sleep(400);
+        check('点收藏条目能打开对应文件', state.currentRel === favRel, String(state.currentRel));
+
+        // 复制两次 → 常用第一。剪贴板换成采集器，不碰真实剪贴板。
+        const origWrite = navigator.clipboard.writeText.bind(navigator.clipboard);
+        navigator.clipboard.writeText = async () => {};
+        try {
+          await openFile(favRel);
+          await copyContent();
+          await copyContent();
+          await sleep(400);
+          const u = await api.getUsage();
+          const mine = u.frequent.find(x => x.rel === favRel);
+          check('复制成功记了次数和最后使用时间', !!mine && mine.count === 2 && Date.now() - mine.lastUsedAt < 60000,
+            JSON.stringify(mine));
+          await showTab('frequent');
+          // ghost 统计是 50 次、刚刚用过，不过滤就排第一
+          check('常用列表按使用排序且不显示外部已删除的文件',
+            listRels()[0] === favRel && !listRels().includes(ghost), JSON.stringify(listRels()));
+          const badge = (document.querySelector('#usage-list .usage-item .us-count') || {}).textContent || '';
+          check('常用条目显示复制次数', badge === t('usageCount', { count: 2 }), badge);
+
+          // 取消填充面板：不算一次使用。用一个带占位符、没有就地填过的文件。
+          const phRel = 'prompts/code-generation/功能实现.md';
+          await openFile(phRel);
+          delete state.previewFills[phRel];
+          const beforeCancel = ((await api.getUsage()).frequent.find(x => x.rel === phRel) || { count: 0 }).count;
+          const cancelSoon = (async () => {
+            for (let i = 0; i < 40 && !pendingPromptDone; i++) await sleep(50);
+            if (pendingPromptDone) pendingPromptDone(null);
+          })();
+          const copied = await copyContent();
+          await cancelSoon;
+          await sleep(300);
+          const afterCancel = ((await api.getUsage()).frequent.find(x => x.rel === phRel) || { count: 0 }).count;
+          check('取消复制不计入使用次数', copied === false && afterCancel === beforeCancel,
+            'copyContent=' + copied + ' 次数 ' + beforeCancel + ' → ' + afterCancel);
+        } finally {
+          navigator.clipboard.writeText = origWrite;
+        }
+
+        // 改名：统计和收藏跟着走
+        const renamedRel = favRel.replace(/\.md$/, '-改名.md');
+        await api.rename(favRel, renamedRel);
+        await refreshTree();
+        await sleep(400);
+        const ur = await api.getUsage();
+        const mineAfter = ur.frequent.find(x => x.rel === renamedRel);
+        check('改名后收藏和统计跟着文件走',
+          ur.favorites.includes(renamedRel) && !ur.favorites.includes(favRel) && !!mineAfter && mineAfter.count === 2
+            && !ur.frequent.some(x => x.rel === favRel), JSON.stringify({ favorites: ur.favorites, mine: mineAfter }));
+        await showTab('favorites');
+        check('改名后收藏区显示新路径', listRels().includes(renamedRel) && !listRels().includes(favRel), JSON.stringify(listRels()));
+
+        // 删进回收站：不显示，但保留；恢复后还在
+        await api.trash(renamedRel);
+        await refreshTree();
+        await sleep(400);
+        const ut = await api.getUsage();
+        check('删进回收站后收藏区不再显示它', !listRels().includes(renamedRel), JSON.stringify(listRels()));
+        check('删进回收站时保留收藏和统计', ut.favorites.includes(renamedRel) && ut.frequent.some(x => x.rel === renamedRel),
+          JSON.stringify(ut.favorites));
+        const item = (await api.listTrash()).items.find(i => i.originalRel === renamedRel);
+        if (item) await api.restore(item.id);
+        await refreshTree();
+        await sleep(400);
+        await showTab('favorites');
+        const us = await api.getUsage();
+        check('从回收站恢复后收藏和统计还在', !!item && listRels().includes(renamedRel)
+          && (us.frequent.find(x => x.rel === renamedRel) || {}).count === 2, JSON.stringify(listRels()));
+
+        // 改名再删再清空回收站：统计和收藏清掉（清的是改名后的路径）
+        await api.trash(renamedRel);
+        await api.emptyTrash();
+        await refreshTree();
+        await sleep(400);
+        const ue = await api.getUsage();
+        check('清空回收站后统计和收藏一起清掉',
+          !ue.favorites.includes(renamedRel) && !ue.frequent.some(x => x.rel === renamedRel), JSON.stringify(ue.favorites));
+        check('清空回收站只清被彻底删除的文件，不动其他文件的统计',
+          ue.frequent.some(x => x.rel === 'prompts/code-generation/功能实现.md'), JSON.stringify(ue.frequent.map(x => x.rel)));
+        // 语言切换后收藏/常用区跟着重画（标签文字来自 data-i18n，列表空提示来自 t()）
+        const tabText = panel.querySelector('.usage-tab[data-tab="frequent"]').textContent;
+        check('收藏/常用区的标签走 i18n', tabText === t('frequent'), tabText);
+      }
+
       // ---- 右键菜单 ----
       const fileRow = document.querySelector('#tree .tree-row.file') || document.querySelector('#tree .tree-row');
       if (fileRow) {

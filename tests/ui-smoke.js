@@ -34,6 +34,14 @@ for (const d of ['prompts', 'workflows', 'templates']) {
   const src = path.join(root, d);
   if (fs.existsSync(src)) copyDir(src, path.join(dataDir, d));
 }
+// 一个外部已删除文件的收藏和高频统计：usage.json 里有，库里没有。
+// 收藏区和常用列表必须把它过滤掉，否则用户点上去只会得到"打开失败"。
+// 次数给得很高、时间是现在，保证不过滤时它一定排进常用第一（否则这条断言分辨不出过滤有没有生效）。
+fs.writeFileSync(path.join(dataDir, 'usage.json'), JSON.stringify({
+  schema: 1,
+  items: { 'prompts/testing/外部已删除.md': { count: 50, lastUsedAt: Date.now() } },
+  favorites: ['prompts/testing/外部已删除.md']
+}, null, 2), 'utf8');
 
 const child = spawn(electronBin, [root], {
   cwd: root,
@@ -136,7 +144,21 @@ child.on('exit', (code) => {
     /\[selftest:ui\] PASS 装配器列出全部导出目标/,
     /\[selftest:ui\] PASS 没存过勾选状态时默认只勾 CLAUDE\.md 和 \.cursorrules/,
     /\[selftest:ui\] PASS 勾选导出目标后写进配置/,
-    /\[selftest:ui\] PASS 重新打开装配器时导出目标按配置恢复/
+    /\[selftest:ui\] PASS 重新打开装配器时导出目标按配置恢复/,
+    // 收藏 / 常用 / 跟随文件。整段都依赖"右键菜单里找得到收藏"，找不到时后面的
+    // 检查虽然会 FAIL，但逐条点名才能保证改动之后它们一条都没被静静跳过。
+    /\[selftest:ui\] PASS 前置：usage\.json 里确实有外部已删除文件的收藏和统计/,
+    /\[selftest:ui\] PASS 右键菜单里有「收藏」/,
+    /\[selftest:ui\] PASS 收藏后侧边栏显示收藏区且列出这个文件/,
+    /\[selftest:ui\] PASS 收藏区不显示外部已删除的文件（不留幽灵条目）/,
+    /\[selftest:ui\] PASS 点收藏条目能打开对应文件/,
+    /\[selftest:ui\] PASS 复制成功记了次数和最后使用时间/,
+    /\[selftest:ui\] PASS 常用列表按使用排序且不显示外部已删除的文件/,
+    /\[selftest:ui\] PASS 取消复制不计入使用次数/,
+    /\[selftest:ui\] PASS 改名后收藏和统计跟着文件走/,
+    /\[selftest:ui\] PASS 删进回收站时保留收藏和统计/,
+    /\[selftest:ui\] PASS 从回收站恢复后收藏和统计还在/,
+    /\[selftest:ui\] PASS 清空回收站后统计和收藏一起清掉/
   ];
   const missing = mustHave.filter(re => !re.test(out));
   if (missing.length) console.error('[test:ui] 缺少必需的检查项: ' + missing.map(String).join(', '));

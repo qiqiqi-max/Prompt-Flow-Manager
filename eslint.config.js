@@ -66,6 +66,9 @@ const selftestRendererGlobals = {
   // 不会再弹面板），以及从当前正文取 token 列表。
   promptFillPlaceholders: 'readonly',
   parseFrontmatter: 'readonly',
+  // 收藏 / 常用区：自检要在改名、删除、恢复之后重画并读回 DOM
+  renderUsage: 'readonly',
+  t: 'readonly',               // 按当前语言取文案，断言菜单项/标签文字时用
   // 自检要能取消当前弹层（fillPlaceholderInline 弹的输入框没人点就会挂住），
   // 这是 renderer.js 里"当前弹层的 resolve 入口"，自检通过它收尾。
   pendingPromptDone: 'writable'

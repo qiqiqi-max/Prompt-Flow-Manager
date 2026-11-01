@@ -166,6 +166,7 @@ npm run test:rule-export # 规则文件导出：相对路径白名单、symlink/
 npm run test:composer-meta # 装配器根据技术栈生成项目类型和标签（裸 node）
 npm run test:version-store # 版本列表、星标、版本说明、裁剪和路径校验（裸 node）
 npm run test:trash-store # 回收站索引、存放名校验和部分清空（裸 node）
+npm run test:usage-store # 使用统计与收藏：计数、上限淘汰、改名迁移、常用排序、导入闸门（裸 node，自带七组反向对照）
 npm run test:file-move # 改名时正文和版本历史一起移动，失败时回滚（裸 node）
 npm run test:workflow-refs # 只精确改写 flow 中的 prompt 引用（裸 node）
 npm run test:backup-import # 完整备份按 prompts/workflows/templates 原目录恢复（裸 node）

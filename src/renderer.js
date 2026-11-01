@@ -95,7 +95,11 @@ const state = {
   quickLaunch: null,          // 全局快捷键状态（主进程给的 { enabled, shortcut, registered, error }）
   currentRefs: [],            // 当前文件的被引用列表（工作流 rel），见 refreshReferences
   danglingCount: 0,           // 全库悬空引用条数：工作流引用的文件已经不在了
-  previewFills: {}            // 预览区就地填过的占位符：rel -> { token: 值 }，见 enhancePreviewPlaceholders
+  previewFills: {},           // 预览区就地填过的占位符：rel -> { token: 值 }，见 enhancePreviewPlaceholders
+  // 使用统计与收藏的快照，主进程 usage.json 的视图（见 lib/usage-store.js）。
+  // frequent 已按"常用"综合分排好序；这里不重排，只按 metaByRel 过滤掉已不在库里的条目。
+  usage: { favorites: [], frequent: [] },
+  usagePanelTab: null         // 侧边栏收藏/常用区当前显示哪一栏；null = 自动挑有内容的那栏
 };
 
 // ===== 工具 =====
@@ -326,6 +330,11 @@ async function refreshTree() {
   updateStatusCounts();
   renderStats();
   renderRecent();
+  // 先用手上的快照按新的 metaByRel 重画一遍（刚删进回收站的文件立刻从收藏区消失），
+  // 再去主进程取一次新的：改名/清空回收站之后统计是主进程那边迁过去的，渲染进程不重算。
+  // 不 await：统计只影响侧边栏一块区域，不该拖慢树的刷新。
+  renderUsage();
+  refreshUsage();
   // 元数据变了，引用关系和悬空体检也要跟着刷新：删除/改名一个提示词之后，
   // 打开着的工作流那一页的引用列表不能还停在旧结果上。
   refreshReferences();
@@ -720,6 +729,113 @@ function renderRecent() {
   list.querySelectorAll('.recent-item').forEach(el => {
     el.onclick = () => openFile(el.dataset.rel);
   });
+}
+
+// ===== 使用统计、收藏与常用 =====
+// 统计存在主进程的 usage.json（见 lib/usage-store.js），渲染进程只持有一份快照。
+// 所有接口都返回同一个形状 { favorites, frequent }，拿到就整份替换、重画。
+//
+// 乱序守卫：刷新（refreshTree 触发）和记账（复制成功触发）可能几乎同时在飞。
+// 主进程里两者排在同一条 'usage' 队列上，按发出顺序执行，所以**最后发出**的那个
+// 结果一定包含前面所有写入；只采纳最后发出的那次，界面上的计数就不会倒退。
+const MAX_FREQUENT_SHOWN = 8;
+let usageSeq = 0;
+function applyUsage(seq, view) {
+  if (seq !== usageSeq || !view) return;
+  state.usage = {
+    favorites: Array.isArray(view.favorites) ? view.favorites : [],
+    frequent: Array.isArray(view.frequent) ? view.frequent : []
+  };
+  renderUsage();
+}
+async function refreshUsage() {
+  const seq = ++usageSeq;
+  try { applyUsage(seq, await api.getUsage()); }
+  catch (e) { console.error('读取使用统计失败:', e); } // i18n-exempt: 开发日志
+}
+
+// 记一次使用。复制**真的成功**之后调（copyContent 返回 true 的每条路径上都调了；
+// 取消填充面板、写剪贴板抛错时不调）。其他复制入口照这个约定接：
+//   recordUsage(rel)   rel 是库内相对路径（prompts/... .md，正斜杠）
+//   - 不需要 await，也不会 reject：失败只记控制台。复制已经成功了，统计写失败
+//     不该再弹一条错误盖掉"已复制"。
+//   - 文件不存在时主进程不记账（recorded:false），不会凭空长出幽灵条目。
+//   - 记完会刷新侧边栏的「常用」列表。
+function recordUsage(rel) {
+  if (!rel) return Promise.resolve();
+  const seq = ++usageSeq;
+  return api.recordUsage(rel)
+    .then(view => applyUsage(seq, view))
+    .catch(e => { console.error('记录使用统计失败:', e); }); // i18n-exempt: 开发日志
+}
+
+// 收藏和常用列表都按 metaByRel 过滤：外部删掉的、删进回收站的文件在这里自然消失，
+// 不会留下点了报"打开失败"的幽灵条目。统计本身保留（恢复后还在），只是不显示。
+function usageEntries(tab) {
+  if (tab === 'favorites') {
+    return state.usage.favorites.map(rel => ({ rel, m: state.metaByRel.get(rel) })).filter(x => x.m);
+  }
+  return state.usage.frequent
+    .map(it => ({ rel: it.rel, it, m: state.metaByRel.get(it.rel) }))
+    .filter(x => x.m && x.it.count > 0)
+    .slice(0, MAX_FREQUENT_SHOWN);
+}
+
+function renderUsage() {
+  const panel = $('usage-panel');
+  if (!panel) return;
+  const favs = usageEntries('favorites');
+  const freq = usageEntries('frequent');
+  // 两栏都空就整块藏起来：新用户的侧边栏不该被一块空白占掉，最小窗口下树要的就是这点高度。
+  if (!favs.length && !freq.length) { panel.classList.add('hidden'); return; }
+  panel.classList.remove('hidden');
+  let tab = state.usagePanelTab;
+  if (tab !== 'favorites' && tab !== 'frequent') tab = favs.length ? 'favorites' : 'frequent';
+  panel.querySelectorAll('.usage-tab').forEach(b => {
+    const on = b.dataset.tab === tab;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  const list = $('usage-list');
+  list.dataset.tab = tab;
+  const rows = tab === 'favorites' ? favs : freq;
+  if (!rows.length) {
+    list.innerHTML = `<div class="usage-empty">${escapeHtml(t(tab === 'favorites' ? 'favoritesEmpty' : 'frequentEmpty'))}</div>`;
+    return;
+  }
+  list.innerHTML = rows.map(({ rel, it, m }) => {
+    const icon = rel.startsWith('workflows') ? '🔀' : (rel.startsWith('templates') ? '📋' : '📄');
+    const name = m.meta.title || fileNameNoExt(m.name);
+    let tip = rel;
+    if (it) {
+      let at = '';
+      try { at = new Date(it.lastUsedAt).toLocaleString(); } catch { /* 显示不了就不显示 */ }
+      tip += '\n' + t('usageTooltip', { count: it.count, at });
+    }
+    return `<button type="button" class="usage-item" data-rel="${escapeHtml(rel)}" title="${escapeHtml(tip)}">
+      <span class="us-icon">${icon}</span>
+      <span class="us-name">${escapeHtml(name)}</span>
+      ${it ? `<span class="us-count">${escapeHtml(t('usageCount', { count: it.count }))}</span>` : ''}
+    </button>`;
+  }).join('');
+  list.querySelectorAll('.usage-item').forEach(el => {
+    el.onclick = () => openFile(el.dataset.rel);
+  });
+}
+
+// 收藏 / 取消收藏。由用户主动触发，所以成败都要给反馈（和锁定一样）。
+async function toggleFavorite(rel) {
+  const on = !state.usage.favorites.includes(rel);
+  const seq = ++usageSeq;
+  try {
+    const view = await api.setFavorite(rel, on);
+    // 刚收藏的要立刻看得见：切到收藏栏。
+    if (on) state.usagePanelTab = 'favorites';
+    applyUsage(seq, view);
+    toast(t(on ? 'favorited' : 'unfavorited'), 'success');
+  } catch (e) {
+    toast(tErr('favoriteFailed', e), 'error');
+  }
 }
 
 function renderBreadcrumb() {
@@ -1650,6 +1766,9 @@ async function writeClipboard(text) {
 // 取消也闪一下"已复制"的话，那句反馈就是假的。
 async function copyContent() {
   if (!state.currentRel) return false;
+  // 记账用的 rel 在第一个 await 之前取：填占位符面板开着的时候 currentRel 理论上不会变，
+  // 但统计记到哪个文件上不该依赖这一点。
+  const rel = state.currentRel;
   let { body } = parseFrontmatter(state.currentContent);
   if (INCLUDES.hasInclude(body)) {
     body = await INCLUDES.resolveAsync(body, async (r) => {
@@ -1665,6 +1784,7 @@ async function copyContent() {
   // 没有占位符就保持原来的一步到位。为此多弹一个空面板只是多一次点击。
   if (!tokens.length) {
     await writeClipboard(body);
+    recordUsage(rel);
     toast(t('copySuccess'), 'success');
     return true;
   }
@@ -1679,6 +1799,7 @@ async function copyContent() {
   if (inlineCount) {
     const merged = PLACEHOLDERS.withDefaults(body, inline);
     await writeClipboard(PLACEHOLDERS.fill(body, merged));
+    recordUsage(rel);
     const count = tokens.filter(it => String(merged[it.token] == null ? '' : merged[it.token]).trim()).length;
     const missing = tokens.length - count;
     toast(missing ? t('fillDonePartial', { count, missing }) : t('fillDone', { count }), 'success');
@@ -1690,6 +1811,7 @@ async function copyContent() {
   rememberFillValues(values);
   const count = tokens.filter(it => String(values[it.token] == null ? '' : values[it.token]).trim()).length;
   await writeClipboard(filled);
+  recordUsage(rel);
   toast(count ? t('fillDone', { count }) : t('copySuccess'), 'success');
   return true;
 }
@@ -2503,6 +2625,9 @@ function showCtxMenu(x, y, node) {
     if (node.rel.startsWith('prompts/')) items.push({ label: t('ctxMoveTo'), act: async () => { await openFile(node.rel); moveCurrent(); } });
     const locked = state.lockedFiles.has(node.rel);
     items.push({ label: locked ? t('unlock') : t('lock'), act: async () => { await openFile(node.rel); toggleLockFile(node.rel); } });
+    // 收藏不需要先打开文件：它不依赖当前标签，打开一次反而会多写一条"最近打开"。
+    const fav = state.usage.favorites.includes(node.rel);
+    items.push({ label: fav ? t('ctxUnfavorite') : t('ctxFavorite'), act: () => toggleFavorite(node.rel) });
     items.push({ sep: true });
     items.push({ label: t('delete'), danger: true, act: async () => { await openFile(node.rel); deleteCurrent(); } });
   } else {
@@ -3153,6 +3278,7 @@ async function setLang(lang) {
   renderTabs();
   renderStats();
   renderRecent();
+  renderUsage();
   updateStatusCounts();
   if (state.currentRel) {
     renderBreadcrumb();
@@ -3476,6 +3602,10 @@ async function init() {
   };
 
   // 内容区按钮
+  // 侧边栏收藏/常用切换。用户点过之后就记住这一栏（本次运行内），不再自动挑。
+  document.querySelectorAll('#usage-panel .usage-tab').forEach(b => {
+    b.onclick = () => { state.usagePanelTab = b.dataset.tab; renderUsage(); };
+  });
   $('btn-copy').onclick = async () => {
     // 按钮变成"已复制"要以真的复制了为前提。占位符面板可以被取消，
     // 那时剪贴板没动过，再闪一下"已复制"就是在骗人。
