@@ -38,7 +38,8 @@ const api = {
   confirmUnsaved: (opts) => ipcRenderer.invoke('confirm-unsaved', opts),
   exportZip: () => ipcRenderer.invoke('export-zip'),
   exportSingle: (rel) => ipcRenderer.invoke('export-single', rel),
-  // 一键将装配好的 AI 规则（CLAUDE.md / .cursorrules）导出到用户指定的项目根目录
+  // 一键将装配好的 AI 规则（CLAUDE.md / AGENTS.md / Copilot / Cursor 规则文件）导出到用户指定的项目根目录。
+  // 只传构建好的内容，写哪些相对路径由主进程的 RULE_EXPORT_ALLOWED 决定
   exportProjectRules: (payload) => ipcRenderer.invoke('export-project-rules', payload),
   getStages: () => ipcRenderer.invoke('get-stages'),
   addProjectType: (t) => ipcRenderer.invoke('add-project-type', t),

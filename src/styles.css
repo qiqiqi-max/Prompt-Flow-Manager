@@ -658,6 +658,8 @@ mark {
 }
 .comp-choice:hover { background: var(--hover); }
 .comp-choice input { cursor: pointer; }
+.comp-target-path { font-family: var(--mono); font-size: 0.75rem; }
+.comp-target-hint { color: var(--text-muted); font-size: 0.71875rem; margin-left: auto; text-align: right; }
 .composer-preview-header { margin-bottom: 6px; }
 .composer-preview-header label { font-size: 0.75rem; font-weight: 600; color: var(--text); }
 .composer-preview {

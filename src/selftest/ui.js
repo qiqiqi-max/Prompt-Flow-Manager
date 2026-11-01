@@ -395,6 +395,28 @@
           '原文件里应保留 ' + token);
       }
 
+      // ---- 装配器的导出目标 ----
+      // 临时数据目录里的 config 从没存过 ruleExportTargets，正好是"老用户升级上来"的状态：
+      // 勾上的必须恰好是原来固定导出的那两份。勾选之后要真的落盘，而且关掉再打开
+      // 装配器时按配置重画（不是停在 DOM 上次的样子）。
+      {
+        const targetBoxes = () => Array.from(document.querySelectorAll('#comp-export-targets input[type="checkbox"]'));
+        const checkedIds = () => targetBoxes().filter(el => el.checked).map(el => el.value).join(',');
+        await realClick(document.getElementById('btn-composer'));
+        const opened = !document.getElementById('composer-modal').classList.contains('hidden');
+        check('装配器列出全部导出目标（' + targetBoxes().length + ' 项）', opened && targetBoxes().length === 5,
+          opened ? '' : '装配器没打开');
+        check('没存过勾选状态时默认只勾 CLAUDE.md 和 .cursorrules', checkedIds() === 'claude,cursor-legacy', checkedIds());
+        const agents = targetBoxes().find(el => el.value === 'agents');
+        if (agents) { agents.click(); await sleep(300); }
+        const saved = (await window.promptFlowApi.getConfig()).ruleExportTargets;
+        check('勾选导出目标后写进配置', JSON.stringify(saved) === '["claude","agents","cursor-legacy"]', JSON.stringify(saved));
+        await realClick(document.getElementById('btn-composer-close'));
+        await realClick(document.getElementById('btn-composer'));
+        check('重新打开装配器时导出目标按配置恢复', checkedIds() === 'claude,agents,cursor-legacy', checkedIds());
+        await realClick(document.getElementById('btn-composer-close'));
+      }
+
       // ---- 右键菜单 ----
       const fileRow = document.querySelector('#tree .tree-row.file') || document.querySelector('#tree .tree-row');
       if (fileRow) {

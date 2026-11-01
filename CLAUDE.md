@@ -23,6 +23,7 @@ lib/library.js     内容库数据层：正文缓存、元数据列表、全文�
 mcp/server.js      只读 MCP server（stdio，复用 lib/library.js，不 require electron）
 cli/pfm.js         命令行入口（只读，同样复用 lib/library.js；check 子命令按退出码当 lint 用）
 src/flow-graph.js  工作流图分析：分层、成环、不可达（渲染进程与测试共用）
+src/rule-targets.js 装配器导出规则的目标清单与内容生成（渲染进程与测试共用；落盘白名单另在主进程写死）
 preload.js         桥接：contextBridge 暴露 window.promptFlowApi（白名单 IPC）
 lib/
   zip-import.js    ZIP 导入的纯逻辑（可脱离 Electron 单测）

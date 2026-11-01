@@ -28,6 +28,8 @@ const rendererGlobals = {
   PLACEHOLDERS: 'readonly',
   INCLUDES: 'readonly',
   COMPOSER_META: 'readonly',
+  // src/rule-targets.js：规则导出目标清单与内容生成
+  RULE_TARGETS: 'readonly',
   // src/flow-graph.js 声明的常量（renderer.js 里只读）
   FLOW_GRAPH: 'readonly'
 };
@@ -183,7 +185,7 @@ module.exports = [
   {
     // 双用模块：浏览器里当 <script>，主进程里被 require。
     // 两套 global 都要给，否则结尾那句 typeof module !== 'undefined' 会报 no-undef。
-    files: ['src/i18n.js', 'src/frontmatter.js', 'src/placeholders.js', 'src/includes.js', 'src/composer-meta.js', 'src/workflow-refs.js', 'src/flow-graph.js'],
+    files: ['src/i18n.js', 'src/frontmatter.js', 'src/placeholders.js', 'src/includes.js', 'src/composer-meta.js', 'src/rule-targets.js', 'src/workflow-refs.js', 'src/flow-graph.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',

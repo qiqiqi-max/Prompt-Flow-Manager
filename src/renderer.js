@@ -1663,7 +1663,56 @@ function openComposer() {
   const modal = $('composer-modal');
   if (!modal) return;
   modal.classList.remove('hidden');
+  renderComposerExportTargets();
   updateComposerPreview();
+}
+
+// 导出目标的勾选框。每次打开装配器都按磁盘上的配置重画（同 openSettings 的
+// 更新检查开关）：上次写盘失败时界面必须回到真实状态，而不是停在用户点过的样子。
+// 用 createElement 而不是拼 innerHTML：路径虽然是常量，但这个容器在弹层里，
+// 不给"将来有人把可变内容拼进来"留口子。
+function renderComposerExportTargets() {
+  const box = $('comp-export-targets');
+  if (!box) return;
+  const chosen = new Set(RULE_TARGETS.normalizeIds(state.config.ruleExportTargets));
+  box.textContent = '';
+  for (const target of RULE_TARGETS.list) {
+    const label = document.createElement('label');
+    label.className = 'comp-choice';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = target.id;
+    input.checked = chosen.has(target.id);
+    const pathEl = document.createElement('code');
+    pathEl.className = 'comp-target-path';
+    pathEl.textContent = target.path;
+    const hint = document.createElement('span');
+    hint.className = 'comp-target-hint';
+    // 挂 data-i18n 而不是只写一次 t()：切语言时 applyI18n() 会顺手重绘它
+    hint.dataset.i18n = target.hintKey;
+    hint.textContent = t(target.hintKey);
+    label.append(input, pathEl, hint);
+    box.appendChild(label);
+  }
+}
+
+function checkedExportTargetIds() {
+  return Array.from(document.querySelectorAll('#comp-export-targets input[type="checkbox"]:checked')).map(el => el.value);
+}
+
+// 勾选即落盘。写盘失败把这一格拨回去并提示，否则界面显示的目标和下次打开
+// 读到的配置对不上（E_CONFIG_WRITE 是真实存在的失败路径）。
+async function onComposerExportTargetChange(e) {
+  const input = e.target;
+  if (!input || input.type !== 'checkbox') return;
+  const ids = checkedExportTargetIds();
+  try {
+    await api.setConfig({ ruleExportTargets: ids });
+    state.config.ruleExportTargets = ids;
+  } catch (err) {
+    input.checked = !input.checked;
+    toast(describeError(err), 'error');
+  }
 }
 
 function closeComposer() {
@@ -1784,24 +1833,12 @@ async function saveComposerPrompt() {
 async function exportComposerRules() {
   const vals = getComposerValues();
   const resolved = await resolveComposerMarkdown(vals);
-  const projName = vals.name || 'Project Blueprint';
-  const claudeContent = [
-    '# ' + projName + ' - AI Engineering Guidelines',
-    '',
-    resolved
-  ].join('\n');
-  const cursorContent = [
-    '# Cursor Rules for ' + projName,
-    '',
-    resolved
-  ].join('\n');
+  // 以界面上的勾选为准：它在打开装配器时已经按配置画过，之后每次勾选都同步落盘。
+  // 各目标的标题和 .mdc 的 frontmatter 在 src/rule-targets.js 里生成。
+  const payloadFiles = RULE_TARGETS.build(checkedExportTargetIds(), vals.name, resolved);
+  if (!payloadFiles.length) { toast(t('composerExportNoTarget'), 'error'); return; }
   try {
-    const res = await api.exportProjectRules({
-      files: [
-        { name: 'CLAUDE.md', content: claudeContent },
-        { name: '.cursorrules', content: cursorContent }
-      ]
-    });
+    const res = await api.exportProjectRules({ files: payloadFiles });
     if (res && res.ok) {
       const files = res.files || [];
       const skipped = res.skipped || [];
@@ -3083,6 +3120,7 @@ async function init() {
   $('comp-roles').addEventListener('change', updateComposerPreviewDebounced);
   $('comp-stacks').addEventListener('change', updateComposerPreviewDebounced);
   $('comp-rules').addEventListener('change', updateComposerPreviewDebounced);
+  $('comp-export-targets').addEventListener('change', onComposerExportTargetChange);
 
   // 升级检查的三个按钮 + 开关。
   //
