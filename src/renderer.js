@@ -914,7 +914,10 @@ function enhancePreviewPlaceholders(container) {
   const { body } = parseFrontmatter(state.currentContent);
   // 只标记 extract 认得的 token（它已经排除了链接、行内代码、围栏块、任务列表
   // 勾选框这些同形但不相干的 [..]）。片段外的一律不动。
-  const tokens = PLACEHOLDERS.extract(body).map(it => it.token);
+  const items = PLACEHOLDERS.extract(body);
+  const tokens = items.map(it => it.token);
+  // token -> { options, default }：chip 上要标出"有选项 / 有默认值"，点开时也要用到。
+  const metaOf = new Map(items.map(it => [it.token, it]));
   const values = state.previewFills[rel] || {};
   const wanted = new Map(tokens.map(tok => [tok, tok]));
   if (!tokens.length) return;
@@ -953,13 +956,32 @@ function enhancePreviewPlaceholders(container) {
         mark.setAttribute('role', 'button');
         if (!values[tok]) mark.title = t('fillInlineTitle');
         const filled = values[tok];
+        const meta = metaOf.get(tok) || {};
+        // 有选项 / 有默认值的 chip 带上类名，样式上加一个角标（见 styles.css 的
+        // mark.ph-opts / mark.ph-default）。角标文字走 data-badge + CSS attr()，
+        // 不进 textContent：自检和"填过的 chip 显示值"都按 textContent 比对。
+        const hasOpts = Array.isArray(meta.options) && meta.options.length > 0;
+        const hasDefault = meta.default != null;
+        if (hasOpts) mark.classList.add('ph-opts');
+        if (hasDefault) mark.classList.add('ph-default');
         if (filled) {
           // 填过的直接显示值，并且标出"这是填的、不是原文"
           mark.classList.add('ph-filled');
           mark.textContent = filled;
           mark.title = tok;
+        } else if (hasDefault) {
+          // 没填但有默认值：显示默认值本身。复制时没改就按默认值填（见 copyContent），
+          // 预览显示的就是复制出去的样子。title 里留着原文和"这是默认值"的说明。
+          mark.textContent = meta.default;
+          mark.dataset.badge = t('phBadgeDefault');
+          mark.title = t('phTitleDefault', { token: tok, value: meta.default })
+            + (hasOpts ? '\n' + t('phTitleOptions', { options: meta.options.join(' / ') }) : '');
         } else {
           mark.textContent = tok;
+          if (hasOpts) {
+            mark.dataset.badge = t('phBadgeOptions');
+            mark.title = t('fillInlineTitle') + '\n' + t('phTitleOptions', { options: meta.options.join(' / ') });
+          }
         }
         frag.appendChild(mark);
       }
@@ -983,18 +1005,28 @@ function renderFillHint() {
   const done = Array.from(document.querySelectorAll('#preview ' + PLACEHOLDER_MARK))
     .filter(el => filled[el.dataset.token]).length;
   bar.classList.remove('hidden');
-  bar.textContent = done
+  // 没填但有默认值的处数要单独说：复制时它们会按默认值填进去，不提的话
+  // 用户看到"已填 1/3"会以为另外两处会原样带着方括号出去。
+  const defaulted = Array.from(document.querySelectorAll('#preview ' + PLACEHOLDER_MARK + '.ph-default'))
+    .filter(el => !filled[el.dataset.token]).length;
+  bar.textContent = (done
     ? t('fillHintProgress', { done, total })
-    : t('fillHintClick', { total });
+    : t('fillHintClick', { total }))
+    + (defaulted ? t('sep') + t('fillHintDefaults', { count: defaulted }) : '');
 }
 
 // 点 chip 就地填。返回是否改动了填充记录（供调用方决定要不要重刷提示行）。
+//
+// 预填：这次就地填过的值 > 默认值。不读 fillMemory —— 就地填一直没有接记忆，
+// 这里只是把默认值补进来，不顺手改别的行为。
 async function fillPlaceholderInline(token) {
   const rel = state.currentRel;
   if (!rel) return false;
   const values = state.previewFills[rel] || {};
-  const current = values[token] || '';
-  const next = await promptInput(t('fillInlineTitle'), token, current);
+  const meta = PLACEHOLDERS.extract(parseFrontmatter(state.currentContent).body)
+    .find(it => it.token === token) || { token, hint: token, options: [], default: null };
+  const current = values[token] || meta.default || '';
+  const next = await promptPlaceholderValue(meta, current);
   if (next === null) return false;                 // 取消
   if (!state.previewFills[rel]) state.previewFills[rel] = {};
   if (next === '') delete state.previewFills[rel][token];
@@ -1452,12 +1484,17 @@ async function copyContent() {
   // 预览区已经点着填过的，直接用填好的结果，不再弹面板：用户刚刚就在正文里
   // 逐处填过，再让他面对一张列着同一批 token 的表，等于把同一件事做两遍。
   // 想改的话回预览里点那个 chip（点上就是改）。
+  //
+  // 没点过的 chip 若有默认值，按默认值填（README「文件格式」写明的行为）：
+  // 预览里没填的默认值 chip 显示的就是默认值，复制出去的应当和看到的一致。
   const inline = state.previewFills[state.currentRel] || {};
   const inlineCount = tokens.filter(it => String(inline[it.token] == null ? '' : inline[it.token]).trim()).length;
   if (inlineCount) {
-    await writeClipboard(PLACEHOLDERS.fill(body, inline));
-    const missing = tokens.length - inlineCount;
-    toast(missing ? t('fillDonePartial', { count: inlineCount, missing }) : t('fillDone', { count: inlineCount }), 'success');
+    const merged = PLACEHOLDERS.withDefaults(body, inline);
+    await writeClipboard(PLACEHOLDERS.fill(body, merged));
+    const count = tokens.filter(it => String(merged[it.token] == null ? '' : merged[it.token]).trim()).length;
+    const missing = tokens.length - count;
+    toast(missing ? t('fillDonePartial', { count, missing }) : t('fillDone', { count }), 'success');
     return true;
   }
   const values = await promptFillPlaceholders(tokens);
@@ -1480,17 +1517,28 @@ async function copyContent() {
 // 必须登记 pendingPromptDone。三条外部关闭路径（点弹层外面、Esc、hideCtxMenu）
 // 都只负责把弹层藏起来，不登记的话这个 await 永远等不到结算，整个复制流程卡死
 // （见 settlePendingPrompt 上方的说明，promptInput 当年就是踩了这个）。
+//
+// 每一行是一个自动增高的 textarea（多行输入的理由见 placeholderFieldHtml），
+// 有选项的再加一个下拉框。键位：Enter 跳到下一项（最后一项跳到"填好并复制"按钮，
+// 再按一次 Enter 就是按按钮），Shift+Enter 换行，Ctrl/⌘+Enter 直接提交。
+//
+// 预填优先级：上次填过的值（fillMemory）> 默认值 > 空。上次填过的是用户自己的
+// 明确选择，默认值只是作者的猜测；而默认值写在 token 原文里，作者改了默认值
+// token 原文就变了，旧记忆自然不再命中，不会出现"改了默认值却一直预填旧值"。
+// 预填进框里的默认值被用户清空的话，就按"留空原样保留"处理 —— 面板上看得见的
+// 就是会生效的，不在背后再套一次默认值。
 function promptFillPlaceholders(tokens) {
   return new Promise(resolve => {
     const menu = $('ctx-menu');
+    const initial = tokens.map(it =>
+      (state.fillMemory && state.fillMemory[it.token]) || (it.default != null ? it.default : ''));
     const rows = tokens.map((it, i) => {
-      // 上次填过的值预填。hint 为空（`[]` 之类）时退回显示 token 本身，
+      // hint 为空（`[]` 之类）时退回显示 token 本身，
       // 否则标签是一片空白，用户不知道这一行对应正文里的哪处。
-      const memo = (state.fillMemory && state.fillMemory[it.token]) || '';
       return `
         <div class="fill-row">
           <label class="fill-label" for="fill-in-${i}">${escapeHtml(it.hint || it.token)}</label>
-          <input id="fill-in-${i}" class="ctx-prompt-input" data-token="${escapeHtml(it.token)}" value="${escapeHtml(memo)}" placeholder="${escapeHtml(it.token)}">
+          ${placeholderFieldHtml(it, 'fill-in-' + i, true)}
         </div>`;
     }).join('');
     menu.innerHTML = `
@@ -1498,6 +1546,7 @@ function promptFillPlaceholders(tokens) {
         <div class="ctx-prompt-title">${escapeHtml(t('fillTitle'))}</div>
         <div class="fill-hint">${escapeHtml(t('fillHint'))}</div>
         <div class="fill-list">${rows}</div>
+        <div class="fill-keys">${escapeHtml(t('fillKeysPanel'))}</div>
         <div class="ctx-prompt-actions">
           <button class="btn-link" id="fill-raw">${escapeHtml(t('fillCopyRaw'))}</button>
           <button class="btn-primary" id="fill-ok">${escapeHtml(t('fillAndCopy'))}</button>
@@ -1511,7 +1560,8 @@ function promptFillPlaceholders(tokens) {
       resolve(v);
     };
     pendingPromptDone = done;
-    const inputs = Array.from(menu.querySelectorAll('[data-token]'));
+    const inputs = Array.from(menu.querySelectorAll('textarea[data-token]'));
+    inputs.forEach((inp, i) => { inp.value = initial[i]; });
     const collect = () => {
       const values = {};
       for (const inp of inputs) values[inp.dataset.token] = inp.value;
@@ -1519,15 +1569,112 @@ function promptFillPlaceholders(tokens) {
     };
     $('fill-ok').onclick = () => done(collect());
     $('fill-raw').onclick = () => done({});
-    for (const inp of inputs) {
+    inputs.forEach((inp, i) => {
+      wirePlaceholderField(inp, () => done(null));
       inp.onkeydown = (e) => {
+        if (e.isComposing) return;   // 输入法选词时的 Enter 是确认候选，不是我们的键
         // 提交用 Ctrl+Enter 而不是 Enter：这里通常有好几个输入框，
         // 裸 Enter 更像"下一项"，拿它提交会让人填到一半就被送出去。
-        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); done(collect()); }
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); done(collect()); return; }
+        // Shift+Enter 不拦，走 textarea 默认的换行。
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          (inputs[i + 1] || $('fill-ok')).focus();
+          return;
+        }
         if (e.key === 'Escape') done(null);
       };
-    }
+    });
     if (inputs.length) { inputs[0].focus(); inputs[0].select(); }
+  });
+}
+
+// 一个占位符的填写控件：有选项时一个下拉框 + 一个 textarea，没有时只有 textarea。
+// promptFillPlaceholders 和就地填写（promptPlaceholderValue）共用。
+//
+// 为什么所有填写框都是 textarea，而不是另加一种"多行占位符"语法：
+// 要粘大段报错 / 代码的是**填的人**，写提示词的人事先不知道哪一格会被粘多行。
+// 用语法标记的话，作者没标的格子粘进去换行全被 <input> 吃掉（input 会把换行
+// 静默删掉，粘完看着也像是成功了），这正是要解决的问题本身。改成 textarea 之后
+// 单行内容的外观不变（自动增高，初始一行高），只多出"能换行"这一种能力。
+// 自动增高用 CSS 的 field-sizing: content，不用 JS 量 scrollHeight。
+//
+// 下拉框和 textarea 是同一个值的两个入口：选一项就把它写进 textarea；
+// 在 textarea 里手打，下拉框跟着显示对应项，打的不是任何一项就显示"自定义"。
+// 值永远以 textarea 为准 —— 允许自定义值是需求的一部分。
+// 值不写进 HTML：textarea 的内容若以换行开头会被 HTML 解析器吃掉一个，
+// 调用方在插入 DOM 之后用 .value 赋值。
+function placeholderFieldHtml(it, id, withToken) {
+  const opts = Array.isArray(it.options) ? it.options : [];
+  const select = opts.length
+    ? `<select class="ctx-prompt-input fill-select" aria-label="${escapeHtml(t('fillOptionsLabel'))}">
+        <option value="">${escapeHtml(t('fillCustomOption'))}</option>
+        ${opts.map(o => `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join('')}
+      </select>`
+    : '';
+  return select + `<textarea id="${escapeHtml(id)}" class="ctx-prompt-input fill-input" rows="1"`
+    + (withToken ? ` data-token="${escapeHtml(it.token)}"` : '')
+    + ` placeholder="${escapeHtml(it.token)}"></textarea>`;
+}
+
+// 接上下拉框和 textarea 的双向同步。下拉框是 textarea 紧前面的兄弟元素。
+// onEscape：下拉框聚焦时按 Esc 也要能关弹层（textarea 的 Esc 由调用方处理）。
+function wirePlaceholderField(input, onEscape) {
+  const select = input.previousElementSibling;
+  if (!select || select.tagName !== 'SELECT') return;
+  const sync = () => {
+    const v = input.value.trim();
+    select.value = Array.from(select.options).some(o => o.value && o.value === v) ? v : '';
+  };
+  // 选了"自定义"不清空 textarea：用户可能只是想在当前值上改几个字。
+  // 也不把焦点挪回 textarea：键盘用户在关着的下拉框上按方向键会连续触发 change，
+  // 每次都抢走焦点就没法往下翻了。
+  select.onchange = () => { if (select.value) input.value = select.value; };
+  select.onkeydown = (e) => { if (e.key === 'Escape') onEscape(); };
+  input.addEventListener('input', sync);
+  sync();
+}
+
+// 就地填写一个占位符的弹层。和 promptInput 同一套结构与 id（ctx-input / ctx-ok /
+// ctx-cancel，自检和焦点管理都认这几个 id），区别是输入框换成 textarea、有选项时
+// 多一个下拉框。不直接改 promptInput：新建 / 改名那些弹层要的就是单行。
+//
+// 键位：Enter 确定（和原来的单行框一致，UI 自检里有这条路径），Shift+Enter 换行。
+// 这里只有一个框，不存在"Enter 应该是下一项"的问题，所以和面板的键位不同。
+function promptPlaceholderValue(meta, initial) {
+  return new Promise(resolve => {
+    const menu = $('ctx-menu');
+    menu.innerHTML = `
+      <div class="ctx-prompt-wrap">
+        <div class="ctx-prompt-title">${escapeHtml(t('fillInlineTitle'))}</div>
+        ${meta.hint && meta.hint !== meta.token ? `<div class="fill-label">${escapeHtml(meta.hint)}</div>` : ''}
+        ${placeholderFieldHtml(meta, 'ctx-input', false)}
+        <div class="fill-keys">${escapeHtml(t('fillKeysInline'))}</div>
+        <div class="ctx-prompt-actions">
+          <button class="btn-link" id="ctx-cancel">${escapeHtml(t('cancel_'))}</button>
+          <button class="btn-primary" id="ctx-ok">${escapeHtml(t('ok'))}</button>
+        </div>
+      </div>`;
+    showCenteredMenu();
+    const inp = $('ctx-input');
+    inp.value = initial == null ? '' : String(initial);
+    const done = (v) => {
+      pendingPromptDone = null;
+      hideCtxMenu();
+      menu.innerHTML = '';
+      resolve(v);
+    };
+    pendingPromptDone = done;
+    wirePlaceholderField(inp, () => done(null));
+    inp.focus();
+    inp.select();
+    $('ctx-ok').onclick = () => done(inp.value.trim());
+    $('ctx-cancel').onclick = () => done(null);
+    inp.onkeydown = (e) => {
+      if (e.isComposing) return;   // 输入法选词时的 Enter 是确认候选
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); done(inp.value.trim()); }
+      if (e.key === 'Escape') done(null);
+    };
   });
 }
 
@@ -1536,6 +1683,10 @@ function promptFillPlaceholders(tokens) {
 // 按 token 文本存，不按文件存：[项目技术栈] 在哪个提示词里都是同一件事，
 // 按文件存的话换一个提示词就要重填一遍，这份记忆等于没有。
 const MAX_FILL_MEMORY = 200;
+// 单个值超过这个长度就不记。填写框支持多行之后，常见用法是往里粘一整段报错 /
+// 代码：那是一次性的内容，记下来只会在下次预填一大段过期的日志，而且 200 条
+// 这样的值整体写进 config.json，每次 setConfig 都要序列化几百 KB。
+const MAX_FILL_MEMORY_VALUE = 2000;
 function rememberFillValues(values) {
   if (!state.fillMemory) state.fillMemory = {};
   let changed = false;
@@ -1543,6 +1694,7 @@ function rememberFillValues(values) {
     const v = String(values[k] == null ? '' : values[k]).trim();
     // 空值不记。用户这次故意留空，不该把上次填好的内容抹掉。
     if (!v) continue;
+    if (v.length > MAX_FILL_MEMORY_VALUE) continue;
     if (state.fillMemory[k] === v) continue;
     // 先删再插，让它排到 key 顺序的末尾——下面按"最旧"淘汰靠的就是这个顺序。
     delete state.fillMemory[k];

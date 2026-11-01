@@ -26,6 +26,38 @@
 // 用户填完会得到 `[外面 值 外面]` —— 半截被改写、方括号还留着，看上去就是个 bug；
 // 若按"取最外层"处理，输入框的提示语里会塞进一整段 Markdown。两种都不如原样不动：
 // 保留原文至少让用户看得见、能自己手改，这和"没填的 token 一律原样保留"是同一个取舍。
+//
+// ---- 扩展语法：选项与默认值 ----
+//
+// 先按上面那套规则判定"这对方括号是不是占位符"，判定是之后才解析里面的写法。
+// 也就是说扩展语法**只改变一个已经算数的占位符怎么填**，不会让原来不算数的
+// [...]（链接、勾选框、代码里的）变成算数 —— 唯一的例外是下面的表格规则，它只收紧。
+//
+//   选项   [语言|Python|Go|Rust]   第一段是提示文字，后面每段一个选项。
+//          条件：按 | 切开**至少三段**、每段 trim 后非空、去重后至少两个选项、
+//          里面没有 \|（转义的竖线是用户想写字面量）。
+//          为什么要三段：两段的 [a|b] 在散文里几乎总是"a 或 b"的意思
+//          （[是|否]、[前端|后端] 本来就是旧语法下的普通占位符），把它读成
+//          "提示 a、唯一选项 b"既改了提示语又给出一个只有一项的下拉框。
+//          两段的写法保持旧行为：整段当提示文字，hint 就是 "a|b"。
+//   默认值 [目标=提升性能]           = 左边是提示文字，右边是默认值。
+//          条件：恰好一个 =，紧贴两侧都不是空白，也不是 = ! < > 这几个字符，
+//          两侧 trim 后都非空，且整段不含 ://（URL 的查询串 ?a=1 不是默认值）。
+//          [x = 1]、[a==b]、[a>=b]、[=>]、[a=b=c] 都不满足，保持旧行为。
+//          代价：默认值本身不能含 =；想在占位符提示语里写字面量等号，两侧加空格。
+//   组合   [语言=Go|Python|Go|Rust]  只有第一段（提示段）认默认值；选项段里的 =
+//          是选项文字的一部分。默认值不必是选项之一（选项只是候选，允许自定义）。
+//
+// 表格：GFM 表格行里 | 是单元格分隔符，`| 语言 | [a|b|c] |` 渲染出来根本不是一个
+// 占位符而是被切开的几个单元格。所以位于表格（有表头分隔行 |---| 的那一块）里的
+// [...] 只要含 |，一律不当占位符；不含 | 的照旧认（`| 目标 | [在此填写] |` 是常见写法）。
+// 代价：表格单元格里没法用选项语法。
+//
+// 向后兼容的代价写在这里，免得以后有人当成 bug "修"掉：
+//   - 原来就存在的 [a|b|c]、[k=v] 形状的占位符，token 原文不变（fillMemory 照旧命中），
+//     但 hint 变成第一段 / 等号左边，填写时多了下拉框 / 预填值。
+//   - 预填默认值意味着"不改直接复制"会把默认值填进去，见 withDefaults。
+//   - 同一个 token 原文只解析一次：选项和默认值是 token 原文的函数，同文同义。
 const PLACEHOLDERS = (function () {
   // 用 IIFE 而不是像 frontmatter.js 那样直接写对象字面量：下面这几个 helper 必须
   // 是私有的。渲染进程里这个文件是 <script> 加载的，顶层 function 声明就等于全局
@@ -44,6 +76,64 @@ const PLACEHOLDERS = (function () {
   // 列表项前缀（含有序列表）。只用来算"列表项内容从第几列开始"：任务列表的
   // 勾选框必须正好长在那一列才算勾选框，否则 `- 见 [x] 一节` 也会被误杀。
   const LIST_ITEM = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+/;
+
+  // GFM 表格的表头分隔行：| --- | :---: | 这种。至少要有一个 |，否则 `---` 是分隔线
+  // （或 setext 标题的下划线），不是表格。
+  const TABLE_DELIM = /^ {0,3}\|?[ \t]*:?-+:?[ \t]*(\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
+
+  // 默认值语法里那个 =：前后紧贴的字符不能是空白或 = ! < >。
+  // 用前后环视而不是 split('=')：要同时排除 [x = 1]（散文里的等式）和
+  // [a==b] / [a>=b]（比较），split 之后这些信息就没了。
+  const DEFAULT_EQ = /(?<=[^\s=!<>])=(?=[^\s=!<>])/;
+
+  // 解析一个已经判定为占位符的方括号内文（不含方括号、未 trim）。
+  // 返回 { hint, options, default }：options 没有时是空数组，default 没有时是 null。
+  // 规则和理由见文件头"扩展语法"一节；任何一条不满足都退回旧行为（整段 trim 当 hint）。
+  function parseInner(inner) {
+    const plain = { hint: inner.trim(), options: [], default: null };
+    let head = inner;
+    let options = [];
+    if (inner.includes('|') && !inner.includes('\\|')) {
+      const segs = inner.split('|').map(s => s.trim());
+      // "至少三段"不单独判断：两段只有一个选项，过不了下面"去重后至少两个"那一条。
+      if (segs.every(Boolean)) {
+        const uniq = Array.from(new Set(segs.slice(1)));
+        if (uniq.length >= 2) { head = segs[0]; options = uniq; }
+      }
+    }
+    let hint = head.trim();
+    let def = null;
+    // 两侧非空不用再判：hint 已 trim，DEFAULT_EQ 又要求 = 两侧紧贴非空白字符
+    // （正向环视，字符串开头 / 结尾不满足），[=foo] / [foo=] 在这里就过不去。
+    if (!hint.includes('://') && hint.split('=').length === 2 && DEFAULT_EQ.test(hint)) {
+      const at = hint.indexOf('=');
+      def = hint.slice(at + 1).trim();
+      hint = hint.slice(0, at).trim();
+    }
+    if (!options.length && def === null) return plain;
+    return { hint, options, default: def };
+  }
+
+  // 每一行是否落在 GFM 表格里，按行号给出布尔数组。
+  // 一律看原文：GFM 切单元格时行内代码里的 | 也算数。
+  // 表格 = 一行含 | 的表头 + 紧跟的分隔行 + 之后直到空行 / 围栏行为止的各行。
+  // 围栏块里长得像表格的内容不用另外排除：那几行本来就被掩码，不会产出占位符；
+  // 要防的是表格"漫过"围栏把围栏后面的行也算进去，所以延伸遇到围栏行就停。
+  // 不校验列数是否对得上，也不管中途有没有别的块开始：这条规则只影响含 | 的 [...]，
+  // 多认几行的代价只是那几行里的 [a|b|c] 不当选项用；少认则会把被单元格切开的
+  // 东西当成占位符，后者更坏。
+  function tableRows(olines) {
+    const inTable = olines.map(() => false);
+    for (let k = 1; k < olines.length; k++) {
+      if (!olines[k].includes('|') || !TABLE_DELIM.test(olines[k])) continue;
+      if (!olines[k - 1].includes('|')) continue;
+      inTable[k - 1] = true;
+      let r = k;
+      for (; r < olines.length && olines[r].trim() && !FENCE.test(olines[r]); r++) inTable[r] = true;
+      k = r;
+    }
+    return inTable;
+  }
 
   // [起始下标, 结束下标) 的逐行切片。不用 split('\n') 是因为后面所有判断都按
   // 全文下标走（掩码串和原文共用一套下标），split 之后就得再自己累加偏移。
@@ -116,7 +206,9 @@ const PLACEHOLDERS = (function () {
   //
   // 匹配不跨行：按行扫本身就保证了这一点。跨行的 [ 通常是别的东西写歪了（表格、
   // 没收口的链接），把它当占位符会让 fill 一刀切掉中间好几行内容。
-  function scanLine(oline, mline, base, hits) {
+  //
+  // inTable 为真时这一行在 GFM 表格里，含 | 的 [...] 不算（见文件头"表格"一段）。
+  function scanLine(oline, mline, base, hits, inTable) {
     const listPrefix = oline.match(LIST_ITEM);
     const itemStart = listPrefix ? listPrefix[0].length : -1;
     for (let i = 0; i < mline.length; i++) {
@@ -160,10 +252,15 @@ const PLACEHOLDERS = (function () {
       // 空的或只有空白的：[]、[ ]、[    ]。这些是数组字面量、勾选框、排版，
       // 没有任何提示语可显示，当成空只会给用户一个填不明白的输入框。
       if (!inner.trim()) continue;
+      // 表格单元格里的 |：GFM 先按 | 切单元格，这对方括号在渲染结果里已经不存在了。
+      if (inTable && inner.includes('|')) continue;
 
+      const parsed = parseInner(inner);
       hits.push({
         token: oline.slice(i, j + 1), // 含方括号的完整原文，fill 的 key 就是它
-        hint: inner.trim(),           // 输入框提示语
+        hint: parsed.hint,            // 输入框提示语（选项语法取第一段，默认值语法取 = 左边）
+        options: parsed.options,      // 下拉候选，没有时是 []
+        default: parsed.default,      // 默认值，没有时是 null
         start: base + i,
         end: base + j + 1             // 右开
       });
@@ -175,9 +272,11 @@ const PLACEHOLDERS = (function () {
     const src = String(body == null ? '' : body);
     const masked = maskInert(src);
     const hits = [];
-    for (const span of lineSpans(src)) {
-      scanLine(src.slice(span[0], span[1]), masked.slice(span[0], span[1]), span[0], hits);
-    }
+    const spans = lineSpans(src);
+    const olines = spans.map(sp => src.slice(sp[0], sp[1]));
+    const mlines = spans.map(sp => masked.slice(sp[0], sp[1]));
+    const inTable = tableRows(olines);
+    spans.forEach((sp, k) => scanLine(olines[k], mlines[k], sp[0], hits, inTable[k]));
     return hits;
   }
 
@@ -196,13 +295,19 @@ const PLACEHOLDERS = (function () {
 
   return {
     // 正文里所有真占位符的出现位置，按出现顺序，**不去重**。
-    // 每项 { token, hint, start, end }，end 右开。
+    // 每项 { token, hint, options, default, start, end }，end 右开。
     // fill 需要位置（同名 token 可能一部分在代码块里，只能按位置替换），
     // UI 要做高亮也用得上。
     scan: scanBody,
 
-    // 去重后按首次出现顺序返回 [{ token, hint }]。
-    // token 含方括号（fill 的 key），hint 是里面的文字（已 trim，用作输入框提示语）。
+    // 去重后按首次出现顺序返回 [{ token, hint, options, default }]。
+    //   token   含方括号的原文，fill 的 key，也是 fillMemory 的 key。扩展语法下照样是
+    //           整段原文（[语言|Python|Go|Rust]），不是 hint —— 换成 hint 会让
+    //           [语言|Python|Go] 和 [语言|Go|Rust] 共用一个 key，填一个改俩。
+    //   hint    输入框提示语（已 trim）。旧语法下是方括号里的全部文字。
+    //   options 下拉候选（字符串数组，已去重）。旧语法下是 []。
+    //   default 默认值字符串。旧语法下是 null。
+    // 新增字段对旧调用方是纯追加：只读 token / hint 的代码行为不变。
     // 没有占位符时返回空数组 —— 调用方据此决定要不要弹填充面板。
     extract(body) {
       const seen = new Set();
@@ -210,7 +315,31 @@ const PLACEHOLDERS = (function () {
       for (const hit of scanBody(body)) {
         if (seen.has(hit.token)) continue;
         seen.add(hit.token);
-        out.push({ token: hit.token, hint: hit.hint });
+        out.push({ token: hit.token, hint: hit.hint, options: hit.options.slice(), default: hit.default });
+      }
+      return out;
+    },
+
+    // 把默认值并进 values，返回一个新的普通对象（不改传入的 values）：
+    // 某个 token 在 values 里没填（没这个 key / 空串 / 只有空白，判定和 fill 同一套）
+    // 而它有默认值时，取默认值；填了的一律以填的为准。
+    //
+    // 为什么不让 fill 自己套默认值：fill 的底线是"没填的原样保留"，填充面板的
+    // "直接复制原文"就是传 {} 给 fill，要的正是一字不动。默认值该不该生效是调用方的
+    // 决定（"用户没改直接复制"才生效），所以拆成单独一步，fill 的签名和语义都不变。
+    //
+    // 优先级（从高到低）：values 里这次填的 > 默认值。上次填过的值（fillMemory）
+    // 由调用方在预填时排在默认值前面，见 renderer.js 的 promptFillPlaceholders。
+    withDefaults(body, values) {
+      const out = {};
+      if (values && typeof Map !== 'undefined' && values instanceof Map) {
+        for (const [k, v] of values) out[k] = v;
+      } else if (values) {
+        for (const k of Object.keys(values)) out[k] = values[k];
+      }
+      for (const hit of scanBody(body)) {
+        if (hit.default === null || valueFor(out, hit.token)) continue;
+        out[hit.token] = hit.default;
       }
       return out;
     },

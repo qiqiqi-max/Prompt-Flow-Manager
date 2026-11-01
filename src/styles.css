@@ -358,6 +358,19 @@ body {
 @media (prefers-color-scheme: dark) {
   .preview mark.ph-filled { background: color-mix(in srgb, var(--primary) 26%, transparent); }
 }
+/* 填进去的值可能是多行（粘贴的报错 / 代码），不保留换行的话预览里会挤成一行。 */
+.preview mark.ph-filled { white-space: pre-wrap; }
+/* 有默认值 / 有选项的 chip 带一个小角标。文字来自 data-badge（走 i18n），
+   放在伪元素里而不是 DOM 里：自检按 textContent 比对 chip 显示的值。
+   "/ ''" 是伪元素的替代文本：读屏软件不重复念角标，含义已经写在 title 里。 */
+.preview mark.ph[data-badge]::after {
+  content: attr(data-badge) / '';
+  margin-left: 3px; padding: 0 4px; border-radius: 3px; vertical-align: 1px;
+  font-size: 0.6875rem; line-height: 1.4;
+  background: var(--bg-alt); border: 1px solid var(--border); color: var(--text-muted);
+}
+/* 没填、显示的是默认值：用斜体和"已填"的实底色区分开，一眼看得出不是用户填的。 */
+.preview mark.ph-default:not(.ph-filled) { font-style: italic; }
 .editor-wrap { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 12px 14px; }
 .editor {
   flex: 1; width: 100%; resize: none; border: 1px solid var(--border); border-radius: 6px;
@@ -590,6 +603,16 @@ mark {
   background: var(--bg); color: var(--text); font-size: 0.8125rem; outline: none;
 }
 .ctx-prompt-input:focus { border-color: var(--focus-ring); box-shadow: 0 0 0 2px var(--focus-ring); }
+/* 占位符填写框是 textarea（理由见 renderer.js 的 placeholderFieldHtml）。
+   field-sizing: content 让它随内容自动增高，单行时和 <input> 一样高；
+   max-height 防止粘进一大段日志把弹层顶出视口，超出后框内滚动。 */
+.fill-input {
+  display: block; resize: none; field-sizing: content;
+  min-height: calc(1.5em + 12px); max-height: 40vh; overflow-y: auto;
+  font-family: inherit; line-height: 1.5;
+}
+.fill-select { display: block; margin-bottom: 4px; }
+.fill-keys { margin-top: 6px; font-size: 0.6875rem; color: var(--text-muted); }
 .ctx-prompt-actions {
   display: flex; gap: 6px; justify-content: flex-end; margin-top: 8px;
 }

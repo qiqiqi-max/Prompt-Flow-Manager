@@ -158,7 +158,7 @@ npm run test:sandbox  # 沙箱降级状态机（裸 node，自带两组反向对
 npm run test:sandbox-required # 强制沙箱启动，禁止降级（CI 跑；本机环境不支持沙箱时会红）
 npm run test:update   # 升级检查：版本比较 + 出网约束（裸 node，自带三组反向对照）
 npm run test:contrast # 配色对比度与焦点可见性（裸 node，自带一组反向对照）
-npm run test:placeholders # 占位符提取与填充（裸 node，自带一组反向对照）
+npm run test:placeholders # 占位符提取与填充、选项 / 默认值语法（裸 node，自带两组反向对照：朴素实现 + 逐条变异）
 npm run test:frontmatter # frontmatter 安全生成：用户输入不能改写其他字段（裸 node）
 npm run test:project-types # 项目类型新增、删除和最少保留规则（裸 node）
 npm run test:rule-export # 规则文件导出时保护已有文件（裸 node）

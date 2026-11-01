@@ -650,8 +650,11 @@ section('预览区占位符');
   assert(/state\.previewFills\[/.test(rendererSrc), '就地填写的值有独立存放处');
   assert(/const inline = state\.previewFills\[state\.currentRel\] \|\| \{\};/.test(rendererSrc),
     'copyContent 读就地填写的值');
-  assert(/if \(inlineCount\) \{[\s\S]{0,200}?writeClipboard\(PLACEHOLDERS\.fill\(body, inline\)\)/.test(rendererSrc),
-    '填过就不再弹面板，直接用填好的正文');
+  // 就地填过的值先并上默认值（没点过的默认值 chip 按默认值复制），再填进正文。
+  // 两步要锚在同一个 merged 上：只查 withDefaults 出现过的话，算完不用、
+  // 照旧 fill(body, inline) 也能通过。
+  assert(/if \(inlineCount\) \{\s*const merged = PLACEHOLDERS\.withDefaults\(body, inline\);\s*await writeClipboard\(PLACEHOLDERS\.fill\(body, merged\)\)/.test(rendererSrc),
+    '填过就不再弹面板，直接用填好的正文（没填的按默认值）');
 }
 
 section('原子写的 durability');

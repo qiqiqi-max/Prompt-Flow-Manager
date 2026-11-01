@@ -117,7 +117,17 @@ child.on('exit', (code) => {
     /\[selftest:ui\] PASS 点 chip 会弹出就地填写框/,
     /\[selftest:ui\] PASS 填过的 chip 显示填进去的值/,
     /\[selftest:ui\] PASS 复制用的是填好的正文/,
-    /\[selftest:ui\] PASS 复制不会改动磁盘上的文件/
+    /\[selftest:ui\] PASS 复制不会改动磁盘上的文件/,
+    // 占位符的选项与默认值（种子 部署检查.md）。同样要点名，理由同上。
+    /\[selftest:ui\] PASS 有选项的 chip 带上了"可选"标记/,
+    /\[selftest:ui\] PASS 有默认值的 chip 显示默认值并带上"默认"标记/,
+    /\[selftest:ui\] PASS 就地填写有选项的占位符时出现下拉框，列出全部选项/,
+    /\[selftest:ui\] PASS 在下拉框里选一项会写进填写框/,
+    /\[selftest:ui\] PASS 就地填写框里 Shift\+Enter 不提交/,
+    /\[selftest:ui\] PASS 就地填写框里 Enter 提交，chip 显示选中的值/,
+    /\[selftest:ui\] PASS 复制时没改过的默认值按默认值填入/,
+    /\[selftest:ui\] PASS 复制面板里有默认值的框预填默认值，有选项的带下拉框/,
+    /\[selftest:ui\] PASS 复制面板里上次填过的值优先于默认值/
   ];
   const missing = mustHave.filter(re => !re.test(out));
   if (missing.length) console.error('[test:ui] 缺少必需的检查项: ' + missing.map(String).join(', '));
