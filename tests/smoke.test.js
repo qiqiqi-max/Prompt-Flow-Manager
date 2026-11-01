@@ -650,8 +650,38 @@ section('预览区占位符');
   assert(/state\.previewFills\[/.test(rendererSrc), '就地填写的值有独立存放处');
   assert(/const inline = state\.previewFills\[state\.currentRel\] \|\| \{\};/.test(rendererSrc),
     'copyContent 读就地填写的值');
-  assert(/if \(inlineCount\) \{[\s\S]{0,200}?writeClipboard\(PLACEHOLDERS\.fill\(body, inline\)\)/.test(rendererSrc),
+  // 复制逻辑抽成了 copyPromptBody（主界面和执行模式共用），写剪贴板只在函数末尾一处。
+  // 所以这里查的是"填过的分支用填好的正文、且不进面板分支"，而不是紧跟着的 writeClipboard。
+  const copyFn = (rendererSrc.match(/async function copyPromptBody\(content, opts\) \{([\s\S]*?)\n\}/) || [])[1] || '';
+  assert(/if \(inlineCount\) \{\s*text = PLACEHOLDERS\.fill\(body, inline\);[\s\S]*?\} else \{[\s\S]*?promptFillPlaceholders\(/.test(copyFn),
     '填过就不再弹面板，直接用填好的正文');
+  assert(/await writeClipboard\(text\);\s*toast\(message, 'success'\);\s*return \{ copied: true, values \};\s*$/.test(copyFn),
+    '复制成功只有函数末尾一个出口');
+  assert((copyFn.match(/writeClipboard\(/g) || []).length === 1, 'copyPromptBody 里只写一次剪贴板');
+}
+
+section('工作流执行模式');
+// 执行模式的「复制本步」必须复用主界面那一份复制逻辑，不能另写一份。
+// 行为由 test:ui 覆盖，这里卡住接线：两个调用点都走 copyPromptBody。
+{
+  const fnBody = (name) => (rendererSrc.match(new RegExp('async function ' + name + '\\([^)]*\\) \\{([\\s\\S]*?)\\n\\}')) || [])[1] || '';
+  assert(/copyPromptBody\(state\.currentContent, \{ inline \}\)/.test(fnBody('copyContent')), '主界面复制走 copyPromptBody');
+  assert(/copyPromptBody\(file\.content, \{ prefill: ctx\.run\.values \}\)/.test(fnBody('copyFlowRunStep')),
+    '复制本步走 copyPromptBody，并把本次会话填过的值作为预填');
+  assert(/if \(!res\.copied\) return;[\s\S]*FLOW_RUN\.complete\(/.test(fnBody('copyFlowRunStep')),
+    '复制本步取消时不前进，复制成功才记完成');
+  // 两个入口自己都不碰剪贴板、不自己展开 include / 填占位符：碰了就是第二份复制逻辑。
+  const own = ['copyContent', 'copyFlowRunStep'].filter(n => /writeClipboard\(|navigator\.clipboard|PLACEHOLDERS\.fill\(|INCLUDES\.resolveAsync\(/.test(fnBody(n)));
+  assert(fnBody('copyContent') && fnBody('copyFlowRunStep') && own.length === 0,
+    '两个复制入口都没有自己的一份复制逻辑' + (own.length ? '：' + own.join(', ') : ''));
+  assert(/'flowRuns'/.test(mainSrc.slice(mainSrc.indexOf('const KNOWN_CONFIG_KEYS'), mainSrc.indexOf('const KNOWN_CONFIG_KEYS') + 400)),
+    'flowRuns 在主进程的已知配置键里');
+  const flushBody = (rendererSrc.match(/window\.__pfmFlushPending = async \(\) => \{([\s\S]*?)\n\};/) || [])[1] || '';
+  assert(/saveFlowRunsDebounced/.test(flushBody), '关窗前会把执行进度的防抖写入落盘');
+  const indexHtml = fs.readFileSync(path.join(root, 'src/index.html'), 'utf8');
+  assert(indexHtml.indexOf('src="flow-graph.js"') !== -1 && indexHtml.indexOf('src="flow-graph.js"') < indexHtml.indexOf('src="flow-run.js"')
+    && indexHtml.indexOf('src="flow-run.js"') < indexHtml.indexOf('src="renderer.js"'),
+  'flow-run.js 在 flow-graph.js 之后、renderer.js 之前加载');
 }
 
 section('原子写的 durability');

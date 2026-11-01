@@ -186,6 +186,9 @@ child.on('exit', (code) => {
   // 而 FAIL 那条只能证明"没有失败"，证明不了"这一条真的跑到了"——
   // 断言被整段跳过（比如包在 if 里而条件没成立）时它是绿的。
   const mustHave = [
+    // 执行进度跟随改名 / 删除时清理：主进程那一半没有 UI 断言盯着，必须点名。
+    /\[selftest:fn\] PASS 工作流改名后执行进度跟着走/,
+    /\[selftest:fn\] PASS 工作流删除后执行进度被清掉/,
     // 占位符替换的回显检查。放进清单是因为它包在 if (PFM_SELFTEST_LANG) 里，
     // 环境变量没传时整段跳过，"没有 FAIL"照样是绿的。
     /\[selftest\] PASS lang\.js 的 __LANG__ 占位符全部替换成 en/,

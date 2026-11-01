@@ -72,6 +72,25 @@
       check('工作流引用不误改相近路径和正文', refContent.includes(renamed + '.bak') && refContent.includes('正文保留 ' + renamed), refContent);
       await api.setConfig({ lockedFiles: [] });
 
+      // 6c. 工作流执行进度（config.flowRuns）跟着工作流改名走，删除时清掉。
+      // 和锁一样由主进程在 rename / trash 里改 config：渲染进程那边的 migrateFlowRun
+      // 只同步内存，不经过 UI 的改名（外部工具、IPC 直调）也必须正确。
+      {
+        const runWf = 'workflows/自检执行进度.md';
+        const runWf2 = 'workflows/自检执行进度改名.md';
+        await api.createFile(runWf, '---\ntitle: 自检执行进度\nflow:\n  - id: a\n    prompt: ' + renamed + '\n---\n');
+        const runRec = { v: 1, current: 'a', done: [], skipped: [], history: [], values: { '[x]': '1' }, updatedAt: 1 };
+        await api.setConfig({ flowRuns: { [runWf]: runRec, 'workflows/别的.md': runRec } });
+        await api.rename(runWf, runWf2);
+        let runs = (await api.getConfig()).flowRuns || {};
+        check('工作流改名后执行进度跟着走', !runs[runWf] && !!runs[runWf2] && runs[runWf2].current === 'a'
+          && !!runs['workflows/别的.md'], JSON.stringify(Object.keys(runs)));
+        await api.trash(runWf2);
+        runs = (await api.getConfig()).flowRuns || {};
+        check('工作流删除后执行进度被清掉', !runs[runWf2] && !!runs['workflows/别的.md'], JSON.stringify(Object.keys(runs)));
+        await api.setConfig({ flowRuns: {} });
+      }
+
       // 6d. 配置键闸门：原型链上的键必须被拒，且不能落进 config.json。
       // 先验证前提——这个 patch 是真的带着自有 __proto__ 属性（而不是设了原型），
       // 否则这条用例拦的是一个空对象，什么都证明不了。

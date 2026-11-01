@@ -147,6 +147,10 @@ jobs:
       - name: 工作流图分析
         run: npm run test:flow-graph
 
+      # 工作流执行模式的状态机：候选下一步、汇合点、回退、坏进度修复。自带反向对照。
+      - name: 工作流执行状态机
+        run: npm run test:flow-run
+
       # 只读 MCP server：协议往返、只读边界、返回上限。自带反向对照。
       - name: MCP server
         run: npm run test:mcp

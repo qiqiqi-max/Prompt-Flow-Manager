@@ -39,6 +39,8 @@ const I18N_TABLE = require('./src/i18n.js');
 // frontmatter 解析同样两边共用（src/frontmatter.js 结尾也有 module.exports）。
 const FRONTMATTER = require('./src/frontmatter.js');
 const WORKFLOW_REFS = require('./src/workflow-refs.js');
+// 工作流执行进度（config.flowRuns）的改名跟随 / 删除清理，与渲染进程共用同一份规则。
+const FLOW_RUN = require('./src/flow-run.js');
 const workflowIndex = require('./lib/workflow-index.js');
 const projectTypes = require('./lib/project-types');
 const ruleExport = require('./lib/rule-export');
@@ -817,7 +819,7 @@ ipcMain.handle('rename', async (e, oldRel, newRel) => queueWriteMulti(
     appError,
     onFileMoved: dropFromCache
   });
-  // 锁定标记跟随改名，避免"改名 → 删除"绕过锁。
+  // 锁定标记跟随改名，避免"改名 → 删除"绕过锁。工作流的执行进度（flowRuns）同一次跟着走。
   //
   // 读改写整个塞进 queueConfigWrite：原先是在队列外 loadConfig，再拿这份快照去
   // updateConfig。渲染进程有五个 debounce 在并发写 config（tabs/recent/locked/
@@ -830,10 +832,16 @@ ipcMain.handle('rename', async (e, oldRel, newRel) => queueWriteMulti(
   try {
     await queueConfigWrite(async () => {
       const cur = await loadConfig();
-      if (!Array.isArray(cur.lockedFiles) || !cur.lockedFiles.includes(oldRel)) return;
-      const next = cur.lockedFiles.filter(r => r !== oldRel);
-      if (!next.includes(newRel)) next.push(newRel);
-      const ok = await saveConfig({ ...cur, lockedFiles: next });
+      const patch = {};
+      if (Array.isArray(cur.lockedFiles) && cur.lockedFiles.includes(oldRel)) {
+        const next = cur.lockedFiles.filter(r => r !== oldRel);
+        if (!next.includes(newRel)) next.push(newRel);
+        patch.lockedFiles = next;
+      }
+      const runs = FLOW_RUN.renameRun(cur.flowRuns, oldRel, newRel);
+      if (runs !== cur.flowRuns) patch.flowRuns = runs;
+      if (!Object.keys(patch).length) return;
+      const ok = await saveConfig({ ...cur, ...patch });
       if (!ok) throw appError('E_CONFIG_WRITE', CONFIG_PATH);
     });
   } catch (err) {
@@ -1016,13 +1024,17 @@ ipcMain.handle('trash', async (e, rel) => queueWriteMulti(['ver:' + String(rel),
     versionDir: versionDirFor(rel),
     onFileMoved: dropFromCache
   });
-  // 清掉锁列表里的残留条目。和 rename 同理：读改写整个进配置队列，
+  // 清掉锁列表里的残留条目，以及这个工作流的执行进度。和 rename 同理：读改写整个进配置队列，
   // 失败只记日志——文件已经在回收站里了，抛出去会显示"删除失败"但东西确实删了。
   try {
     await queueConfigWrite(async () => {
       const cur = await loadConfig();
-      if (!Array.isArray(cur.lockedFiles) || !cur.lockedFiles.includes(rel)) return;
-      const ok = await saveConfig({ ...cur, lockedFiles: cur.lockedFiles.filter(r => r !== rel) });
+      const patch = {};
+      if (Array.isArray(cur.lockedFiles) && cur.lockedFiles.includes(rel)) patch.lockedFiles = cur.lockedFiles.filter(r => r !== rel);
+      const runs = FLOW_RUN.dropRun(cur.flowRuns, rel);
+      if (runs !== cur.flowRuns) patch.flowRuns = runs;
+      if (!Object.keys(patch).length) return;
+      const ok = await saveConfig({ ...cur, ...patch });
       if (!ok) throw appError('E_CONFIG_WRITE', CONFIG_PATH);
     });
   } catch (err) {
@@ -1188,7 +1200,7 @@ ipcMain.handle('get-config', async () => loadConfig());
 const KNOWN_CONFIG_KEYS = new Set([
   'theme', 'lang', 'fontScale', 'windowBounds', 'projectTypes', 'lockedFiles',
   'expandedPaths', 'recent', 'fillMemory', 'sidebarWidth', 'tabs', 'activeTab',
-  'updateCheck', 'updateLastCheckedAt', 'updateSkipVersion'
+  'updateCheck', 'updateLastCheckedAt', 'updateSkipVersion', 'flowRuns'
 ]);
 // 原型链上的键。JSON.parse 出来的对象里它们是**自有属性**（不是原型），
 // 展开进配置对象之后会跟着 saveConfig 落盘。

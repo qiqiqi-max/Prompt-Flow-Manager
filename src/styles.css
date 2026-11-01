@@ -487,6 +487,38 @@ mark {
   border: 1px solid var(--danger); font-size: 0.75rem;
 }
 
+/* ===== 工作流执行模式 =====
+   面板在流程图上方。按钮排在正文预览前面：最小窗口（800x500）下预览区只有两百来像素高，
+   按钮放在正文后面就会被挤到视口外。正文预览另外限高，长提示词不至于把流程图推出好几屏。
+   按钮允许换行（flex-wrap），英文文案和 125% 字号下一行放不下时折到第二行，
+   而不是把预览区撑出横向滚动条。配色全部复用已在 tests/contrast.test.js 量过的 token。 */
+.flow-run { max-width: 780px; margin: 0 0 12px; }
+.flow-run:empty { display: none; }
+.flow-run-bar, .flow-run-actions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+}
+.flow-run-head {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 6px;
+}
+.flow-run-title { font-weight: 600; font-size: 0.875rem; color: var(--text); overflow-wrap: anywhere; }
+.flow-run-progress, .flow-run-hint { font-size: 0.75rem; color: var(--text-muted); }
+.flow-run-choices { margin-bottom: 6px; }
+.flow-run-choices .btn-secondary { white-space: normal; text-align: left; max-width: 100%; }
+.flow-run-warn {
+  margin: 0 0 6px; padding: 6px 10px; border-radius: 6px; font-size: 0.75rem;
+  background: var(--diff-del-bg); color: var(--diff-del-text); border: 1px solid var(--danger);
+}
+.flow-run-body {
+  margin-top: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); max-height: min(40vh, 320px); overflow: auto; font-size: 0.8125rem;
+}
+/* 节点上的执行状态。当前步骤加粗边框和外圈，完成的换实底色，跳过的变淡。
+   每种状态都另有一个文字标记（▶ ✓ ↷，带 title / aria-label），不只靠颜色区分。 */
+.flow-node.run-current { border-width: 3px; box-shadow: 0 0 0 3px var(--focus-ring); }
+.flow-node.run-done { background: var(--diff-add-bg); color: var(--diff-add-text); border-color: var(--success-solid); }
+.flow-node.run-skipped { border-style: dotted; color: var(--text-muted); }
+.flow-run-mark { margin-right: 6px; font-size: 0.8125rem; }
+
 /* ===== 抽屉 ===== */
 .drawer {
   position: fixed; top: 0; right: 0; height: 100vh; width: 380px;

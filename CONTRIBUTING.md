@@ -179,6 +179,7 @@ npm run test:draft-store # 草稿按文件独立保存、清除和处理损坏�
 npm run test:config-file # config.json 损坏时改名留档而不是被默认值覆盖（裸 node，自带一组反向对照）
 npm run test:workflow-index # 引用索引：谁在引用这个提示词、悬空引用体检（裸 node，自带一组反向对照）
 npm run test:flow-graph # 工作流图：分层、成环、不可达步骤（裸 node，自带一组反向对照）
+npm run test:flow-run # 工作流执行状态机：候选下一步、汇合点、回退、坏进度修复（裸 node，自带一组反向对照）
 npm run test:mcp          # 只读 MCP server：协议往返、只读边界、返回上限（裸 node，自带一组反向对照）
 npm run test:cache-budget # 正文缓存的两道闸与占用记账（裸 node，自带一组反向对照）
 npm run test:cli          # 命令行入口：只读子命令、退出码、路径边界（裸 node，自带一组反向对照）
