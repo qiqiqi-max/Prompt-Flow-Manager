@@ -42,7 +42,7 @@ const WORKFLOW_REFS = require('./src/workflow-refs.js');
 const workflowIndex = require('./lib/workflow-index.js');
 const projectTypes = require('./lib/project-types');
 const ruleExport = require('./lib/rule-export');
-const { createVersionStore } = require('./lib/version-store');
+const { createVersionStore, normalizeVersionNote, sanitizeVersionIndex, contentHash } = require('./lib/version-store');
 const { createTrashStore } = require('./lib/trash-store');
 const { movePromptWithHistory } = require('./lib/file-move');
 // 滚动文件日志 + 诊断包。两个模块都刻意不 require('electron')：
@@ -757,20 +757,36 @@ async function readPrevContent(full) {
 // 用和 pin-version 相同的 key：saveVersion 里的 pruneVersions 要读版本索引判断
 // 星标，pin-version 要写这份索引，两者必须互斥，否则刚点的星标可能被裁掉。
 // 按 rel 分链，不同文件之间不互相阻塞。
+//
+// options.note 是可选的版本说明，描述的是**这次写进去的新内容**（不是这次生成的快照，
+// 快照装的是旧内容）。它先挂在 index.json 的 current 上，下一次保存或回滚把这份内容
+// 存成快照时才转到那条快照上，见 lib/version-store.js 文件头。
+// 说明在写盘之前校验：太长 / 类型不对时整次保存直接失败，不会出现"正文存了、说明没存"
+// 又报成功的情况。写盘之后记说明失败则不让保存失败（正文已经落盘），只在返回值里
+// 带上 noteError，由渲染进程单独提示。
 ipcMain.handle('save-file', async (e, rel, content, options) => queueWrite('ver:' + String(rel), async () => {
   const full = safeJoinWritable(rel);
   if (typeof content !== 'string') throw appError('E_CONTENT_NOT_STRING', typeof content);
-  const prev = await readPrevContent(full);
   const opts = options && typeof options === 'object' ? options : {};
+  const note = normalizeVersionNote(opts.note, appError);
+  const prev = await readPrevContent(full);
   if (typeof opts.expectedContent === 'string' && prev !== opts.expectedContent && opts.overwrite !== true) {
     throw appError('E_SAVE_CONFLICT', rel);
   }
-  if (prev != null && prev !== content) await saveVersion(rel, prev);
+  const snapshotTaken = prev != null && prev !== content;
+  if (snapshotTaken) await saveVersion(rel, prev);
   const toWrite = bumpAutoFields(content, prev);
   await ensureDir(path.dirname(full));
   await writeFileAtomic(full, toWrite);
   dropFromCache(full);
-  return { content: toWrite, meta: parseFrontmatter(toWrite).meta };
+  const result = { content: toWrite, meta: parseFrontmatter(toWrite).meta };
+  try {
+    await versionStore.recordCurrentNote(rel, toWrite, note, snapshotTaken ? null : prev);
+  } catch (err) {
+    logger.error('[versions] 记录版本说明失败（正文已保存）' + rel + '：' + (err && err.message));
+    result.noteError = String(err && err.message || err);
+  }
+  return result;
 }));
 
 async function createFileAt(rel, content) {
@@ -1137,6 +1153,30 @@ ipcMain.handle('pin-version', async (e, rel, file, pinned) => queueWrite('ver:' 
   versionStore.pinVersion(rel, file, pinned)
 )));
 
+// "当前内容"那一行的说明。只读：按磁盘上的正文算哈希，对不上就当没有说明
+// （外部编辑器改过之后，那句说明描述的已经不是这份内容了）。
+// 读正文走 safeJoinReadable，和 read-file 同一道白名单。
+ipcMain.handle('get-current-note', async (e, rel) => {
+  const full = safeJoinReadable(rel);
+  const content = await readPrevContent(full);
+  if (content == null) return '';
+  return versionStore.getCurrentNote(rel, content);
+});
+
+// 事后编辑某个版本的说明。和 pin-version 同链：两者都是读改写同一份 index.json。
+// file 为 null 表示"当前内容"那一行；否则过 VERSION_FILE_RE，目录过 versionDirFor
+// 的越权校验（都在 versionStore.setVersionNote 里），且快照必须还在。
+// 编辑当前内容的说明要读正文算哈希，所以 rel 先过写入白名单：这是往库里写东西。
+ipcMain.handle('set-version-note', async (e, rel, file, note) => queueWrite('ver:' + String(rel), async () => {
+  if (file == null) {
+    const full = safeJoinWritable(rel);
+    const content = await readPrevContent(full);
+    if (content == null) throw appError('E_VERSION_NOT_FOUND', String(rel));
+    return versionStore.setVersionNote(rel, null, note, content);
+  }
+  return versionStore.setVersionNote(rel, String(file), note);
+}));
+
 // 和 save-file 同链同理由：读 prev → 存快照 → 按 prev 算 version → 写回。
 // 回滚和保存并发（点了回滚又按 Ctrl+S）时，不排队就会两边各写一次，
 // 版本号只涨一次，其中一次的内容彻底消失。
@@ -1149,14 +1189,23 @@ ipcMain.handle('rollback-version', async (e, rel, file) => queueWrite('ver:' + S
   // 回滚这条路径上更要紧——它的全部意义就是"当前内容先存为新版本，不丢失"，
   // 而 prev 被静默吞成 null 时恰好跳过那次 saveVersion，把要保住的内容直接覆盖掉。
   const prev = await readPrevContent(full);
-  // 当前内容先存为新版本（不丢失）
-  if (prev != null && prev !== versionContent) await saveVersion(rel, prev);
+  // 当前内容先存为新版本（不丢失）。它的说明（index.json 的 current）由 saveVersion
+  // 一起转给这条快照，所以回滚之后"回滚前那一版"在历史里仍带着原来的说明。
+  const snapshotTaken = prev != null && prev !== versionContent;
+  if (snapshotTaken) await saveVersion(rel, prev);
   // 回滚写入（作为新一次保存，bump 自动字段）
   const toWrite = bumpAutoFields(versionContent, prev);
   // save-file 有这句，这里原先漏了：目录被外部删掉后回滚会 ENOENT 失败
   await ensureDir(path.dirname(full));
   await writeFileAtomic(full, toWrite);
   dropFromCache(full);
+  // 回滚写进去的内容没有说明。不复制目标快照的说明：那句话描述的是"当初那次保存
+  // 改了什么"，安到这次回滚上会让人以为又做了一遍那个改动。
+  try {
+    await versionStore.recordCurrentNote(rel, toWrite, '', snapshotTaken ? null : prev);
+  } catch (err) {
+    logger.error('[versions] 回滚后整理版本说明失败（正文已回滚）' + rel + '：' + (err && err.message));
+  }
   return { content: toWrite, meta: parseFrontmatter(toWrite).meta };
 }));
 
@@ -1557,14 +1606,26 @@ ipcMain.handle('import-zip', async () => writeGate.exclusive(async () => {
           throw new Error('selftest import failure');
         }
         if (info.file === 'index.json') {
+          // 索引是重建的，不是原样拷贝：外来 JSON 只留 pinned / notes / current 三个
+          // 认得的字段。原先这里只重建 pinned，备份里的版本说明在导入时被整份丢掉。
           const parsed = JSON.parse(entry.content);
-          const pinned = {};
-          for (const [file, value] of Object.entries(parsed && parsed.pinned || {})) {
-            if (value === true && backupVersionForEntry('.versions/' + info.rel + '/' + file)) pinned[file] = true;
+          const index = sanitizeVersionIndex(parsed, file => !!backupVersionForEntry('.versions/' + info.rel + '/' + file));
+          // current 的哈希对应的是备份里那份正文；导入走 createFileAt 会重新 bump
+          // version/updatedAt/createdAt，磁盘上的正文和备份里的不再逐字节相同。
+          // 只有备份里的正文确实就是 current 描述的那份时，才把哈希换成导入后的正文；
+          // 否则丢弃，免得把说明安到别的内容上。
+          if (index.current) {
+            const bodyEntry = contentEntries.find(c => backupRelForEntry(c.path) === info.rel);
+            const written = bodyEntry ? await readPrevContent(safeJoin(targetRel)) : null;
+            if (written != null && contentHash(bodyEntry.content) === index.current.sha256) {
+              index.current = { note: index.current.note, sha256: contentHash(written) };
+            } else {
+              delete index.current;
+            }
           }
           const indexPath = path.join(dir, 'index.json');
           await transaction.snapshot(indexPath);
-          await writeFileAtomic(indexPath, JSON.stringify({ pinned }, null, 2));
+          await writeFileAtomic(indexPath, JSON.stringify(index, null, 2));
         } else {
           const versionPath = path.join(dir, info.file);
           await writeFileExclusive(versionPath, entry.content, targetRel);
@@ -1574,6 +1635,11 @@ ipcMain.handle('import-zip', async () => writeGate.exclusive(async () => {
       } catch (err) {
         await failImport(entry.path, err);
       }
+    }
+    // 第二个注入点：版本快照和索引（含版本说明）都已写完之后才失败。
+    // 上面那个点在写第一条版本之前就抛，覆盖不到"索引已经写进去了，回滚要把它撤掉"。
+    if (process.env.PFM_SELFTEST === '1' && process.env.PFM_SELFTEST_IMPORT_FAIL_AFTER_VERSIONS === '1') {
+      await failImport('.versions', new Error('selftest import failure after versions'));
     }
   }
   if (isAppBackup && configEntry) {

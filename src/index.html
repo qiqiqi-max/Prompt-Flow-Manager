@@ -121,6 +121,12 @@
           <div id="editor-wrap" class="editor-wrap hidden">
             <textarea id="editor" class="editor" spellcheck="false" data-i18n-placeholder="editorPlaceholder" placeholder="在此编辑提示词内容…"></textarea>
             <div class="editor-actions">
+              <!-- 版本说明：可选，不填照常保存，所以 Ctrl+S 的快速保存不受影响。
+                   maxlength 与主进程 MAX_VERSION_NOTE 一致（主进程另有校验）。 -->
+              <input id="version-note-input" class="version-note-input" type="text" maxlength="200" autocomplete="off"
+                data-i18n-placeholder="versionNotePlaceholder" placeholder="版本说明（可选）"
+                data-i18n-title="versionNoteTitle" title="可选：一句话说明这次保存改了什么，随这次保存写入的内容记入历史。Ctrl+Shift+S 聚焦此处，Enter 保存"
+                data-i18n-aria="versionNotePlaceholder" aria-label="版本说明（可选）">
               <button class="btn-primary" id="btn-save" data-i18n="save">保存 (Ctrl+S)</button>
               <button class="btn-secondary" id="btn-cancel" data-i18n="cancel">取消</button>
             </div>

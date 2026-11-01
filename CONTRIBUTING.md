@@ -163,7 +163,7 @@ npm run test:frontmatter # frontmatter 安全生成：用户输入不能改写�
 npm run test:project-types # 项目类型新增、删除和最少保留规则（裸 node）
 npm run test:rule-export # 规则文件导出时保护已有文件（裸 node）
 npm run test:composer-meta # 装配器根据技术栈生成项目类型和标签（裸 node）
-npm run test:version-store # 版本列表、星标、裁剪和路径校验（裸 node）
+npm run test:version-store # 版本列表、星标、版本说明、裁剪和路径校验（裸 node）
 npm run test:trash-store # 回收站索引、存放名校验和部分清空（裸 node）
 npm run test:file-move # 改名时正文和版本历史一起移动，失败时回滚（裸 node）
 npm run test:workflow-refs # 只精确改写 flow 中的 prompt 引用（裸 node）
@@ -183,7 +183,7 @@ npm run test:mcp          # 只读 MCP server：协议往返、只读边界、�
 npm run test:cache-budget # 正文缓存的两道闸与占用记账（裸 node，自带一组反向对照）
 npm run test:cli          # 命令行入口：只读子命令、退出码、路径边界（裸 node，自带一组反向对照）
                           # npm run pfm -- list / search / get / refs / check 是它的日常用法
-npm run test:import-rollback # 真实 Electron 完整备份中途失败后整体撤回
+npm run test:import-rollback # 真实 Electron 完整备份中途失败后整体撤回（两个失败点，含版本说明）
 npm run test:ui-failure # 真实 Electron 配置写入失败时显示提示并恢复界面状态
 npm run test:includes     # 模板包含引擎（裸 node，自带一组反向对照）
 npm run test:reverse  # 把第一节那套流程自动化：逐条改坏源码，验证目标断言真的变红
@@ -272,6 +272,7 @@ postinstall，二进制改成惰性下载，所以干净环境里 `npm ci` 之�
 | `PFM_SANDBOX_REQUIRED=1` | 沙箱启动失败时直接退出，不降级 | 只给 `test:sandbox-required` 使用 |
 | `PFM_SELFTEST_EVAL=<脚本>` | 页面加载后执行一段自检脚本 | 必须配 `PFM_DATA_DIR` |
 | `PFM_SELFTEST_IMPORT_FAIL_AFTER_FILES=1` | 完整备份写入正文后注入失败 | 只在 `PFM_SELFTEST=1` 时生效 |
+| `PFM_SELFTEST_IMPORT_FAIL_AFTER_VERSIONS=1` | 完整备份写完版本快照和索引（含版本说明）后注入失败 | 只在 `PFM_SELFTEST=1` 时生效 |
 | `PFM_SELFTEST_CONFIG_WRITE_FAIL=1` | 让配置写入失败 | 只在 `PFM_SELFTEST=1` 时生效 |
 | `PFM_SELFTEST_ZOOM=<倍数>` | 自检前设置页面缩放，范围 0.5 到 3 | 只给布局测试使用 |
 | `PFM_SELFTEST_CLOSE_UNSAVED=1` | 自定义脚本执行后触发关窗，验证未保存草稿保护 | 必须配 `PFM_DATA_DIR` |

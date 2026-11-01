@@ -1259,6 +1259,9 @@ async function enterEditMode() {
   $('editor-wrap').classList.remove('hidden');
   $('editor').value = state.currentContent;
   state.editBaseline = state.currentContent; // 脏判断的基准
+  // 说明属于"这一次编辑要保存的内容"，上一轮编辑没用掉的说明不能带进来：
+  // 丢弃退出后再进编辑，残留的那句话会被安到一份完全不同的改动上。
+  $('version-note-input').value = '';
   $('editor').focus();
   $('btn-edit').textContent = t('editing');
 }
@@ -1334,13 +1337,20 @@ async function requestReload() {
   await api.reloadWindow();
 }
 
+// 版本说明来自编辑区的可选输入框，空着就是普通保存。Ctrl+S、保存按钮、切文件时
+// 选"保存"、关窗前保存都走这里，所以无论从哪条路保存，填了的说明都不会丢。
+// 说明描述的是这次写进去的内容，主进程先挂在"当前内容"上，下次保存时随这份内容
+// 一起转进历史（见 lib/version-store.js 文件头）。保存成功后清空输入框，
+// 免得下一次 Ctrl+S 把同一句话又记一遍。
 async function saveCurrent() {
   if (!state.currentRel) return false;
   const content = $('editor').value;
+  const noteInput = $('version-note-input');
+  const note = noteInput.value.trim();
   try {
     let result;
     try {
-      result = await api.saveFile(state.currentRel, content, { expectedContent: state.currentContent });
+      result = await api.saveFile(state.currentRel, content, { expectedContent: state.currentContent, note });
     } catch (e) {
       if (!String(e && e.message || e).includes('E_SAVE_CONFLICT')) throw e;
       const latestForDiff = await api.readFile(state.currentRel);
@@ -1364,7 +1374,7 @@ async function saveCurrent() {
         return true;
       }
       if (choice !== 'save') return false;
-      result = await api.saveFile(state.currentRel, content, { expectedContent: state.currentContent, overwrite: true });
+      result = await api.saveFile(state.currentRel, content, { expectedContent: state.currentContent, overwrite: true, note });
     }
     const { content: saved, meta } = result;
     state.currentContent = saved;
@@ -1373,11 +1383,14 @@ async function saveCurrent() {
     // 主进程会回写 version/updatedAt，saved 和输入框内容天生不同，
     // 拿 saved 当基准会让保存后立刻又显示未保存。
     state.editBaseline = content;
+    noteInput.value = '';
     await clearDraft(state.currentRel);
     // 同步到标签
     const tab = state.tabs.find(t => t.rel === state.currentRel);
     if (tab) { tab.content = saved; tab.meta = meta; tab.loaded = true; }
-    toast(t('saved'), 'success');
+    // 说明没记上不算保存失败（正文已经落盘），但要让用户知道，否则他以为历史里有那句话。
+    if (result.noteError) toast(tErr('savedButNoteFailed', new Error(result.noteError)), 'error');
+    else toast(t('saved'), 'success');
     setMetaList(await api.getMetaList());
     renderBreadcrumb();
     renderMetaBar();
@@ -2360,31 +2373,61 @@ function filterTreeRows() {
 // 更可靠的方式：重建树时给每行打上 __rel —— 已在 buildTreeNode 中实现（row.__rel = node.rel）
 
 // ===== 版本历史 =====
+// 列表第一行固定是"当前内容"：它没有快照条目（快照装的是旧内容），但它可能带着
+// 最近一次保存填的说明。不单列这一行的话，那句说明在历史里无处安放——
+// 挂到最新那条快照上又是错的，那条快照是改动之前的内容。
+// 每一行的说明都描述那一行自己的内容，顶部一行提示把这条规则说出来。
 async function openHistory() {
   if (!state.currentRel) return;
   state.historyRel = state.currentRel;
-  const list = await api.listVersions(state.historyRel);
+  const [list, currentNote] = await Promise.all([
+    api.listVersions(state.historyRel),
+    api.getCurrentNote(state.historyRel).catch(() => '')
+  ]);
   const drawer = $('history-drawer');
   drawer.classList.remove('hidden');
   $('version-detail').classList.add('hidden');
   $('version-list').classList.remove('hidden');
   const vl = $('version-list');
-  if (!list.length) {
-    vl.innerHTML = '<div class="search-empty">' + escapeHtml(t('noHistory')) + '</div>';
-    return;
-  }
-  vl.innerHTML = list.map(v => `
+  const noteLine = (note) => note
+    ? `<span class="vi-note" title="${escapeHtml(note)}">${escapeHtml(note)}</span>`
+    : '';
+  const noteBtn = (file) => `<button class="btn-link" data-note="${escapeHtml(file)}" title="${escapeHtml(t('editVersionNote'))}" aria-label="${escapeHtml(t('editVersionNote'))}">✎</button>`;
+  const currentRow = `
+    <div class="version-item current" data-current="1">
+      <span class="vi-time">${escapeHtml(t('currentContentRow'))}${noteLine(currentNote)}</span>
+      <span class="vi-actions">${noteBtn('')}</span>
+    </div>`;
+  const rows = list.map(v => `
     <div class="version-item" data-file="${escapeHtml(v.file)}">
-      <span class="vi-time">${escapeHtml(formatVersionTime(v.timestamp))}<small>${escapeHtml(v.pinned ? t('pinned') : t('versionNth', { n: list.length - list.indexOf(v) }))}</small></span>
+      <span class="vi-time">${escapeHtml(formatVersionTime(v.timestamp))}<small>${escapeHtml(v.pinned ? t('pinned') : t('versionNth', { n: list.length - list.indexOf(v) }))}</small>${noteLine(v.note)}</span>
       <span class="vi-actions">
         <button class="pin-btn ${v.pinned ? 'pinned' : ''}" data-pin="${escapeHtml(v.file)}">${v.pinned ? '⭐' : '☆'}</button>
+        ${noteBtn(v.file)}
         <button class="btn-link" data-view="${escapeHtml(v.file)}">${escapeHtml(t('view'))}</button>
         <button class="btn-link danger" data-roll="${escapeHtml(v.file)}">${escapeHtml(t('rollback'))}</button>
       </span>
     </div>
   `).join('');
-  vl.querySelectorAll('.version-item').forEach(item => {
+  const empty = list.length ? '' : '<div class="search-empty">' + escapeHtml(t('noHistory')) + '</div>';
+  vl.innerHTML = '<div class="version-note-hint">' + escapeHtml(t('versionNoteHint')) + '</div>' + currentRow + rows + empty;
+  const editNote = async (file, current) => {
+    const next = await promptInput(t('editVersionNoteTitle'), t('versionNotePlaceholder'), current);
+    if (next === null) return;
+    try {
+      // file 为 null 表示"当前内容"那一行（主进程按磁盘上的正文算哈希）
+      await api.setVersionNote(state.historyRel, file, next);
+      toast(t('noteSaved'), 'success');
+      openHistory();
+    } catch (err) {
+      toast(tErr('noteFailed', err), 'error');
+    }
+  };
+  vl.querySelector('[data-current] [data-note]').onclick = (e) => { e.stopPropagation(); editNote(null, currentNote); };
+  vl.querySelectorAll('.version-item[data-file]').forEach(item => {
     const file = item.dataset.file;
+    const entry = list.find(v => v.file === file);
+    item.querySelector('[data-note]').onclick = (e) => { e.stopPropagation(); editNote(file, entry ? entry.note : ''); };
     item.querySelector('[data-view]').onclick = () => viewVersion(file);
     item.querySelector('[data-roll]').onclick = async () => {
       if (!(await confirmDialog(t('rollbackConfirm')))) return;
@@ -2752,6 +2795,11 @@ async function setLang(lang) {
     renderMetaBar();
     renderContent();
   }
+  // 历史抽屉开着时重绘：列表里的"当前内容"行、说明提示和"第 N 个"都是动态文案。
+  // 只在列表视图时重绘，正在看 diff 的话不把用户踢回列表。
+  if (!$('history-drawer').classList.contains('hidden') && !$('version-list').classList.contains('hidden')) {
+    openHistory().catch(() => {});
+  }
   updateStatusInfo(t('ready'));
   if (langSaveError) toast(describeError(langSaveError), 'error');
   else toast(t('langSwitched'), 'success');
@@ -3027,6 +3075,13 @@ async function init() {
   // 结果一次点击写两遍盘、多一条无差异快照、version 自增 2。
   $('btn-save').onclick = () => saveCurrent().then(ok => { if (ok) exitEditMode(false); });
   $('btn-cancel').onclick = () => exitEditMode(false);
+  // 说明框里按 Enter 等于 Ctrl+S：保存但留在编辑模式。和保存按钮（保存后退出编辑）
+  // 不同，是因为写完说明按 Enter 的人通常还想接着改，被踢回预览会打断他。
+  $('version-note-input').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    e.preventDefault();
+    if (state.editMode) saveCurrent();
+  });
   $('btn-history').onclick = openHistory;
   $('btn-rename').onclick = renameCurrent;
   $('btn-move').onclick = moveCurrent;
@@ -3168,10 +3223,17 @@ async function init() {
     // 所以 Ctrl+N（新建提示词）和 Ctrl+E（导出）由菜单负责——它们经
     // menu-action IPC 回到这里的 onMenuAction，功能不变。
     // 之前这里也各写了一份，那两个分支实际永远不会执行，属于误导性死代码。
-    // 菜单里没有的键才留在这边：Ctrl+W / Ctrl+S / Ctrl+Shift+F / Ctrl+I / Ctrl+Shift+L。
+    // 菜单里没有的键才留在这边：Ctrl+W / Ctrl+S / Ctrl+Shift+S / Ctrl+Shift+F / Ctrl+I / Ctrl+Shift+L。
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'w') {
       e.preventDefault();
       if (state.activeTab) closeTab(state.activeTab);
+    } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 's') {
+      // 带说明保存：只把焦点移到说明框，写完按 Enter 才保存。
+      // 不直接弹窗：说明是可选的，弹窗会把"想顺手写一句"变成"必须处理一个对话框"。
+      // 必须排在 Ctrl+S 之前——按着 Shift 时 e.key 是大写 'S'，下面那条认不出来，
+      // 但大写锁定打开时不按 Shift 也是 'S'，所以这里要同时判 shiftKey。
+      e.preventDefault();
+      if (state.editMode) { $('version-note-input').focus(); $('version-note-input').select(); }
     } else if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
       if (state.editMode) saveCurrent();

@@ -196,6 +196,11 @@ child.on('exit', (code) => {
     /\[selftest:fn\] PASS 完整备份恢复工作流目录/,
     /\[selftest:fn\] PASS 完整备份恢复模板目录/,
     /\[selftest:fn\] PASS 完整备份恢复版本历史到导入后的文件/,
+    // 版本说明的备份往返。和上面几条同在 if (window.__pfmDialogStubs) 里，
+    // 桩没装上时整段跳过，不点名的话"没有 FAIL"照样是绿的。
+    /\[selftest:fn\] PASS 完整备份往返后版本说明还在/,
+    /\[selftest:fn\] PASS 完整备份往返后当前内容的说明还在/,
+    /\[selftest:fn\] PASS 备份里回收站条目的版本说明往返后还在/,
     /\[selftest:fn\] PASS 完整备份恢复可迁移设置/,
     /\[selftest:fn\] PASS 完整备份恢复回收站条目/,
     /\[selftest:fn\] PASS 导入的回收站条目可恢复且带版本历史/,

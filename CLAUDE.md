@@ -126,6 +126,9 @@ throw appError('E_LOCKED', rel);   // message = "E_LOCKED|prompts/a.md"
 - 保留最近 30 个**未星标**版本；星标（index.json 的 `pinned`）不计入上限、永不自动删。
   配额只按未星标数量算，不要用文件总数。
 - 回滚 = 当前内容先存为新版本（不丢），再写入历史版本并 bump 自动字段。
+- 版本说明挂在**内容**上：保存时填的说明先记在 index.json 的 `current`（带正文 SHA-256），
+  下次把这份内容存成快照时由 `saveVersion` 转进 `notes[<快照名>]`。不要把说明直接挂到
+  这次生成的快照上——那条快照装的是旧内容。语义细节见 `lib/version-store.js` 文件头。
 
 ### 回收站与锁定
 - 删除不真删，移到 `.trash/` 并记 `index.json`；可恢复。清空回收站才真删。

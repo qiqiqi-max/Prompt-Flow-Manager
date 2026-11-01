@@ -367,6 +367,13 @@ body {
 }
 .editor:focus { border-color: var(--focus-ring); box-shadow: 0 0 0 2px var(--focus-ring); }
 .editor-actions { display: flex; gap: 8px; justify-content: flex-end; padding-top: 10px; flex-shrink: 0; }
+/* 版本说明输入框占掉按钮左侧的剩余宽度；min-width: 0 让窄窗口下它先缩，按钮不被挤出去。 */
+.version-note-input {
+  flex: 1 1 auto; min-width: 0; max-width: 420px; padding: 5px 8px;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg); color: var(--text); font-size: 0.8125rem; outline: none;
+}
+.version-note-input:focus { border-color: var(--focus-ring); box-shadow: 0 0 0 2px var(--focus-ring); }
 
 /* ===== Markdown 渲染 ===== */
 .markdown-body { line-height: 1.7; user-select: text; -webkit-user-select: text; }
@@ -508,6 +515,14 @@ mark {
 .version-item .vi-time { flex: 1; font-size: 0.8125rem; }
 .version-item .vi-time small { display: block; color: var(--text-muted); font-size: 0.6875rem; margin-top: 2px; }
 .version-item .vi-actions { display: flex; gap: 4px; }
+/* 版本说明按单行省略显示，全文放在 title 里；min-width: 0 才能让 flex 子项真的省略。 */
+.version-item .vi-time { min-width: 0; }
+.version-item .vi-note {
+  display: block; margin-top: 3px; font-size: 0.75rem; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.version-item.current { border-color: var(--border); }
+.version-note-hint { padding: 4px 12px 8px; font-size: 0.6875rem; color: var(--text-muted); }
 /* 回滚是破坏性操作，要红色警示。同样不能用内联 style（见 .ctx-prompt-actions.stacked）。 */
 .btn-link.danger { color: var(--danger-text); }
 .pin-btn { cursor: pointer; font-size: 1rem; opacity: .85; border: none; background: none; }
