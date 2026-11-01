@@ -336,6 +336,17 @@ body {
 .preview-wrap { flex: 1; overflow-y: auto; padding: 20px 28px; min-height: 0; }
 .preview { max-width: 780px; }
 
+/* 外部改动提示条。不用弹窗：用户可能正打着字，提示不该抢焦点或挡住编辑器。
+   配色沿用 meta-bar 的 bg-alt + text，靠左侧的 danger 色边区分出来。 */
+.external-notice {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px;
+  padding: 6px 14px; flex-shrink: 0; font-size: 0.8125rem;
+  background: var(--bg-alt); color: var(--text);
+  border-bottom: 1px solid var(--border); border-left: 4px solid var(--danger);
+}
+.external-notice-text { flex: 1; min-width: 0; }
+.external-notice-actions { display: flex; gap: 4px; }
+
 /* 占位符提示行。它和正文一起滚动，不吸顶：吸顶会挤掉正文的可视高度，
    而这条提示只在"有占位符且还没填完"时出现，本来就是过渡状态。 */
 .fill-hint-bar {

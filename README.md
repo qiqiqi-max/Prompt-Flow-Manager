@@ -34,6 +34,7 @@ Prompt Flow Manager 用于集中整理项目开发中反复使用的提示词、
 | Markdown 编辑 | 编辑与预览原地切换，支持 `Ctrl+S` 保存、代码块一键复制 |
 | 工作流可视化 | 根据工作流文件自动生成流程图，点击节点即可跳转到对应提示词 |
 | 多标签页 | 同时打开多个提示词，并在重启后恢复上次的标签页和活动状态 |
+| 外部改动感知 | 命令行、MCP、git pull 或外部编辑器改了内容目录时，文件树和已打开的标签页自动刷新；正在编辑且有未保存改动时只显示提示条，由你决定重新加载还是保留自己的版本 |
 | 版本历史 | 每次保存自动生成快照，可星标、查看差异和回滚；保存时可选填一句版本说明，历史里可事后编辑；默认保留最近 30 个未星标版本 |
 | 安全删除 | 文件先进入回收站，可恢复；重要文件可锁定，主进程会强制阻止删除 |
 | 导入与导出 | 导入单个 Markdown 或 ZIP 备份，导出单个提示词或整个内容库 |
@@ -293,6 +294,7 @@ npm run test:close      # 验证关窗落盘握手
 npm run test:close-unsaved # 验证关窗前保护未保存草稿
 npm run test:draft-recovery # 验证意外退出后恢复草稿
 npm run test:save-conflict # 验证保存冲突提示
+npm run test:external-change # 验证应用之外的改动会刷新文件树和已打开的标签页
 npm run test:layout-small # 验证最小窗口在多语言、主题和缩放下的布局
 npm run test:render     # 验证 markdown 渲染成本上限
 npm run test:heal       # 验证启动时的数据目录自愈
@@ -324,6 +326,7 @@ npm run test:ui-failure # 界面保存失败提示
 npm run test:includes   # 模板片段引入与嵌套解析
 npm run test:quick-launch-logic # 全局快捷键校验、注册与回滚
 npm run test:quick-launch # 全局快捷键快速搜索面板（启动真实 Electron）
+npm run test:library-watch # 外部改动的事件合并与自写过滤
 npm run test:reverse    # 反向对照：版本检查的每个修复点撤掉都必须变红
 npm run test:reverse-split # 反向对照：自检模块拆分的每个修复点撤掉都必须变红
 npm run test:quick      # 日常快速检查，不启动 Electron

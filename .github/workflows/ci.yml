@@ -155,6 +155,11 @@ jobs:
       - name: 正文缓存预算
         run: npm run test:cache-budget
 
+      # 外部改动感知：事件合并、自写过滤、路径过滤、导入期间暂停。自带三组反向对照。
+      # 最后一组用真的 fs.watch，所以必须在 Windows 上跑（recursive 的行为按平台不同）。
+      - name: 外部改动感知
+        run: npm run test:library-watch
+
       # 命令行入口：只读子命令、退出码与路径边界。自带反向对照。
       - name: 命令行入口
         run: npm run test:cli
@@ -207,6 +212,9 @@ jobs:
 
       - name: 意外退出后恢复草稿
         run: npm run test:draft-recovery
+
+      - name: 外部改动刷新界面
+        run: npm run test:external-change
 
       - name: 保存冲突检测
         run: npm run test:save-conflict

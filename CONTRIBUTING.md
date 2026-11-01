@@ -150,6 +150,7 @@ npm run test:close    # 关窗落盘握手
 npm run test:close-unsaved # 关窗前询问未保存草稿：取消留窗，保存落盘
 npm run test:draft-recovery # 未保存就退出后，再次打开时恢复草稿
 npm run test:save-conflict # 编辑期间文件被修改时，保存前必须确认
+npm run test:external-change # 应用之外改了内容目录：树和标签页跟上、编辑中挂提示条、自己的写入不算
 npm run test:layout-small # 800x500 最小窗口下覆盖中英文、浅深色和 125%/150% 缩放
 npm run test:render   # markdown 渲染成本上限
 npm run test:heal     # 启动自愈修坏数据目录（自带反向对照）
@@ -183,6 +184,7 @@ npm run test:mcp          # 只读 MCP server：协议往返、只读边界、�
 npm run test:cache-budget # 正文缓存的两道闸与占用记账（裸 node，自带一组反向对照）
 npm run test:cli          # 命令行入口：只读子命令、退出码、路径边界（裸 node，自带一组反向对照）
                           # npm run pfm -- list / search / get / refs / check 是它的日常用法
+npm run test:library-watch # 外部改动感知：事件合并、自写过滤、路径过滤、导入期间暂停（裸 node，自带三组反向对照）
 npm run test:import-rollback # 真实 Electron 完整备份中途失败后整体撤回（两个失败点，含版本说明）
 npm run test:ui-failure # 真实 Electron 配置写入失败时显示提示并恢复界面状态
 npm run test:includes     # 模板包含引擎（裸 node，自带一组反向对照）

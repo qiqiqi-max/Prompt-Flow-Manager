@@ -48,6 +48,9 @@ const { movePromptWithHistory } = require('./lib/file-move');
 // 全局快捷键快速搜索面板的纯逻辑（快捷键校验、注册状态机、设置变更的提交/回滚、居中）。
 // 不 require electron，globalShortcut 由这里传进去，所以能裸 node 单测。
 const quickLaunch = require('./lib/quick-launch');
+// 外部改动感知（CLI / MCP / git pull / 外部编辑器）。同样不 require electron，
+// 自写过滤和事件合并的说明在那个文件头。
+const { createLibraryWatcher } = require('./lib/library-watch');
 // 滚动文件日志 + 诊断包。两个模块都刻意不 require('electron')：
 // 目录、版本号、两个根目录全部由这里传进去，DATA_ROOT / CODE_ROOT 的判断
 // 只允许存在下面那一份（见 123-133 行的说明）。
@@ -943,7 +946,49 @@ function dropWorkflowIndex() {
 function dropFromCache(fullPath) {
   dropFromContentCache(fullPath);
   dropWorkflowIndex();
+  // 自写登记也挂在这一行：调用它的地方正好就是"应用自己刚写完/移完/删完一个文件"，
+  // 外部改动的监视据此把写完后的指纹记进快照，这次写入引起的 fs.watch 事件就不会
+  // 被当成外部修改。外部改动自己走 dropForExternalChange，不经过这里。
+  if (libraryWatcher) libraryWatcher.noteSelfWrite(fullPath);
 }
+
+// ---------- 外部改动感知 ----------
+// 监视 prompts/ workflows/ templates/。比对和自写过滤在 lib/library-watch.js；
+// 这里只负责：作废缓存（与写路径同一个纪律）、通知渲染进程、导入期间暂停。
+let libraryWatcher = null;
+// 渲染进程按 rel 重读，单次推送的条目数要有上限：git checkout 一次能动上千个文件，
+// 全列出来只是白拷一份。超了就标 truncated，渲染进程改成重读全部已打开标签。
+const LIBRARY_CHANGE_MAX = 500;
+function dropForExternalChange(rel) {
+  try { dropFromContentCache(safeJoin(rel)); } catch {}
+}
+function startLibraryWatch() {
+  if (libraryWatcher) return;
+  libraryWatcher = createLibraryWatcher({
+    root: DATA_ROOT,
+    // 完整备份导入独占写入期间不比对：它会写入又可能整批回滚，
+    // 导入结束后一次比对，导入写的文件都已经登记成自写。
+    isPaused: () => writeGate.isExclusive(),
+    log: logger,
+    onChange: (changes) => {
+      for (const c of changes) dropForExternalChange(c.rel);
+      dropWorkflowIndex();
+      logger.info('[watch] 外部改动 ' + changes.length + ' 个文件');
+      if (!win || win.isDestroyed()) return;
+      const truncated = changes.length > LIBRARY_CHANGE_MAX;
+      win.webContents.send('library-changed', {
+        changes: truncated ? changes.slice(0, LIBRARY_CHANGE_MAX) : changes,
+        truncated
+      });
+    }
+  });
+  // start 自己兜住所有异常（目录不存在、EPERM 只记日志），这里不 await：
+  // 初始快照要遍历整库，不该拖慢窗口出来。
+  libraryWatcher.start();
+}
+app.on('will-quit', () => {
+  if (libraryWatcher) { libraryWatcher.close(); libraryWatcher = null; }
+});
 
 // rel 为空时不查单向引用，只做全库悬空体检。
 ipcMain.handle('workflow-references', async (e, rel) => {
@@ -3022,6 +3067,9 @@ app.whenReady().then(async () => {
     // 那时索引应该已经是修好的，否则用户先看到一屏幽灵条目再看到它们消失。
     await runStartupHeal();
     await createWindow();
+    // 放在建窗口之后：渲染进程起来之后的改动才需要推送，之前的改动它首次
+    // listTreeAndMeta 自然会读到。
+    startLibraryWatch();
     // 升级检查故意**不 await**：它要出网，最坏情况是等满 8 秒超时，
     // await 就等于让窗口晚 8 秒出来。runUpdateCheck 内部自己兜住所有异常，
     // 所以这里既不会有未捕获 rejection，也不会把启动失败的锅甩给它。

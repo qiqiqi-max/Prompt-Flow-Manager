@@ -83,6 +83,13 @@ const api = {
     const handler = (e, info) => cb(info);
     ipcRenderer.on('update-available', handler);
     return () => ipcRenderer.removeListener('update-available', handler);
+  },
+  // 内容目录在应用之外被改了（CLI / MCP / git pull / 外部编辑器）。
+  // 只推 { changes: [{ rel, type }], truncated }，不带正文：渲染进程要哪个自己 readFile。
+  onLibraryChanged: (cb) => {
+    const handler = (e, info) => cb(info);
+    ipcRenderer.on('library-changed', handler);
+    return () => ipcRenderer.removeListener('library-changed', handler);
   }
 };
 
