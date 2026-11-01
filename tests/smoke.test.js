@@ -391,10 +391,28 @@ section('ZIP 真实往返（压缩 → 解压）');
   // 一个不落在 safeJoinWritable 白名单内的落盘点。目录由用户弹框确认，
   // 但"写哪个文件名"必须由白名单收紧——否则渲染进程被外部内容劫持后，
   // 这套入口能把它变成任意文件写入器（basename 只能挡 ../，挡不了这个）。
-  assert(/const RULE_EXPORT_ALLOWED = new Set\(\['CLAUDE\.md', '\.cursorrules'\]\)/.test(mainSrc),
-    '导出规则有文件名白名单常量（CLAUDE.md / .cursorrules）');
+  //
+  // 白名单现在是一组带子目录的固定相对路径。这里按**相等**比，不按"包含"比：
+  // 只查"里面有 CLAUDE.md"的话，往集合里多塞一条 '../x' 或 'C:/x' 照样全绿。
+  // 期望值取自 src/rule-targets.js（渲染进程实际会发的路径），所以两个方向都卡：
+  // 渲染进程多了一个目标而白名单没跟上（导出时被静默丢掉），或白名单多出一条
+  // 没人用的路径（多出来的就是给被劫持的渲染进程准备的写入口）。
+  // 集合体里只允许出现单引号字符串，防止有人改成从别的模块展开进来。
+  {
+    const m = mainSrc.match(/const RULE_EXPORT_ALLOWED = new Set\(\[([\s\S]*?)\]\);/);
+    const body = m ? m[1] : '';
+    const literal = /^(\s*'[^'\n]*'\s*,?)*\s*$/.test(body);
+    const allowedPaths = [...body.matchAll(/'([^'\n]*)'/g)].map(x => x[1]).sort();
+    const RULE_TARGETS = require('../src/rule-targets.js');
+    const targetPaths = RULE_TARGETS.list.map(t => t.path).sort();
+    assert(!!m && literal && allowedPaths.length > 0,
+      '导出规则有相对路径白名单常量，且只由字符串字面量组成');
+    const same = JSON.stringify(allowedPaths) === JSON.stringify(targetPaths);
+    assert(same, '导出规则白名单与 src/rule-targets.js 的目标路径完全一致' +
+      (same ? '' : '：main=' + JSON.stringify(allowedPaths) + ' targets=' + JSON.stringify(targetPaths)));
+  }
   const ruleExportSrc = fs.readFileSync(path.join(root, 'lib/rule-export.js'), 'utf8');
-  assert(/ruleExport\.plan\(targetDir, payload\.files, RULE_EXPORT_ALLOWED\)/.test(mainSrc)
+  assert(/ruleExport\.plan\(targetDir, payload\.files, RULE_EXPORT_ALLOWED, \{ appError \}\)/.test(mainSrc)
     && /allowed\.has\(name\)/.test(ruleExportSrc),
   '导出规则 handler 真的校验白名单');
 

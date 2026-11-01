@@ -252,6 +252,12 @@
               <label class="comp-choice"><input type="checkbox" value="prompts/snippets/rules/testing.md" checked><span data-i18n="composerRuleTesting">自动化测试与防回归</span></label>
             </div>
           </div>
+          <div class="composer-field">
+            <label data-i18n="composerExportTargets">导出目标</label>
+            <!-- 选项由 renderer.js 按 src/rule-targets.js 的清单生成，勾选状态存在 config.ruleExportTargets。
+                 不在这里手写：清单和主进程白名单之间已经有一道一致性检查，再多一份 HTML 就是第三份真值。 -->
+            <div class="composer-checks" id="comp-export-targets"></div>
+          </div>
         </div>
         <div class="composer-right">
           <div class="composer-preview-header">
@@ -263,7 +269,7 @@
       <div class="composer-footer">
         <button class="btn-primary" id="btn-comp-copy" data-i18n="composerBtnCopy">复制组装提示词</button>
         <button class="btn-secondary" id="btn-comp-save" data-i18n="composerBtnSave">保存为新提示词</button>
-        <button class="btn-secondary" id="btn-comp-export-rules" data-i18n="composerBtnExportRules">导出项目规则 (CLAUDE.md / .cursorrules)</button>
+        <button class="btn-secondary" id="btn-comp-export-rules" data-i18n="composerBtnExportRules">导出项目规则</button>
       </div>
     </div>
   </div>
@@ -326,6 +332,9 @@
        双用模块，tests/flow-graph.test.js 里 require 同一份文件。 -->
   <script src="flow-graph.js"></script>
   <script src="composer-meta.js"></script>
+  <!-- 规则导出目标清单与内容生成（src/rule-targets.js）。双用模块，
+       tests/rule-export.test.js 里 require 同一份文件。 -->
+  <script src="rule-targets.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

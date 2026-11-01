@@ -33,6 +33,18 @@
   `test:mcp` 扩展了真子进程用例，并逐条做过反向对照（撤掉撞名处理、include 展开、
   fill、frontmatter 剥离、截断、分页等任一处，对应断言都会变红）。
 
+- **导出项目规则支持更多 AI 工具**：装配器除了 `CLAUDE.md` 和 `.cursorrules`，还能导出
+  `AGENTS.md`（Codex 等）、`.github/copilot-instructions.md`（GitHub Copilot）和
+  `.cursor/rules/project-rules.mdc`（Cursor 新格式，Always 类型规则，带 `description` /
+  `globs` / `alwaysApply` frontmatter）。导出哪些由勾选决定，记在 `config.ruleExportTargets`；
+  没存过这个键的老用户照旧只导出原来那两份。`.mdc` 用固定文件名而不从项目名派生：
+  改名后再导出不会留下一份旧规则被 Cursor 一起注入。
+  白名单从"只允许文件名"扩成主进程写死的固定相对路径集合，需要时逐级建出子目录；
+  任何一级目录或目标文件是 symlink / junction 时整次拒绝（`E_RULE_EXPORT_UNSAFE`），
+  写盘前就地再查一遍（覆盖确认框期间目录被换掉也拦得住），确认框之后才冒出来的同名文件按保留处理。
+  目标清单和内容生成独立成 `src/rule-targets.js`；`test:rule-export` 扩展并自带反向对照
+  （19 个变异，各自指定必须变红的那一条），`npm test` 卡主进程白名单与目标清单逐条相等。
+
 - **弹层补上对话框语义与焦点管理**：居中弹层（新建/重命名/填写占位符/工程类型…）
   此前没有 role，Tab 会跑到弹层背后的侧边栏上（弹层还开着、焦点在看不见的地方走），
   关掉之后焦点被丢到 body——键盘用户要重按几十次 Tab 才能回到原位。现在居中弹层读出

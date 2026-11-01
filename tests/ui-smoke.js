@@ -127,7 +127,12 @@ child.on('exit', (code) => {
     /\[selftest:ui\] PASS 就地填写框里 Enter 提交，chip 显示选中的值/,
     /\[selftest:ui\] PASS 复制时没改过的默认值按默认值填入/,
     /\[selftest:ui\] PASS 复制面板里有默认值的框预填默认值，有选项的带下拉框/,
-    /\[selftest:ui\] PASS 复制面板里上次填过的值优先于默认值/
+    /\[selftest:ui\] PASS 复制面板里上次填过的值优先于默认值/,
+    // 装配器导出目标：默认值保证老用户行为不变，勾选落盘并在重开时恢复。
+    /\[selftest:ui\] PASS 装配器列出全部导出目标/,
+    /\[selftest:ui\] PASS 没存过勾选状态时默认只勾 CLAUDE\.md 和 \.cursorrules/,
+    /\[selftest:ui\] PASS 勾选导出目标后写进配置/,
+    /\[selftest:ui\] PASS 重新打开装配器时导出目标按配置恢复/
   ];
   const missing = mustHave.filter(re => !re.test(out));
   if (missing.length) console.error('[test:ui] 缺少必需的检查项: ' + missing.map(String).join(', '));

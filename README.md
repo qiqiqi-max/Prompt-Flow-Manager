@@ -37,6 +37,7 @@ Prompt Flow Manager 用于集中整理项目开发中反复使用的提示词、
 | 版本历史 | 每次保存自动生成快照，可星标、查看差异和回滚；默认保留最近 30 个未星标版本 |
 | 安全删除 | 文件先进入回收站，可恢复；重要文件可锁定，主进程会强制阻止删除 |
 | 导入与导出 | 导入单个 Markdown 或 ZIP 备份，导出单个提示词或整个内容库 |
+| 项目装配 | 组合角色、技术栈与工程规约生成项目启动提示词，可导出为各 AI 工具的规则文件：CLAUDE.md、AGENTS.md、GitHub Copilot 的 .github/copilot-instructions.md、Cursor 的 .cursor/rules/project-rules.mdc 与旧格式 .cursorrules。导出哪些由勾选决定并会记住，默认只导出 CLAUDE.md 和 .cursorrules |
 | 个性化 | 明暗主题、中英文界面、界面字号 60%–125% 七档缩放、自定义工程类型、可调节侧边栏 |
 | 高效操作 | 最近打开、创建副本、文件树键盘导航和常用快捷键 |
 | 启动自愈 | 启动时检查数据目录：摘掉回收站里点不动的幽灵记录、把孤立正文收养回可见状态、清掉写入中断留下的半截临时文件 |
@@ -210,6 +211,8 @@ flowchart LR
 - Markdown 中的 HTTP(S) 链接交给系统浏览器打开，其他外部协议会被拦截。
 - ZIP 导入会过滤非 Markdown 文件、限制单项大小，并对重名文件生成安全的新名称。
 - 配置写入串行化，减少多个界面状态同时保存造成的数据覆盖。
+- 导出项目规则只写主进程写死的几个相对路径，渲染进程传来的其他路径一律丢弃；
+  路径上的任何一级目录或目标文件是符号链接或 junction 时整次拒绝，已有文件先询问再覆盖。
 - 正常运行采用单实例锁，避免两个进程同时修改同一个数据目录。
 - **全程只有一处出网**：启动时向 GitHub 查询最新发布版本号。请求带固定 User-Agent、8 秒超时、
   响应体上限 256 KiB，不携带任何本机标识，失败一律静默；发布页地址是代码里的常量，
@@ -299,7 +302,7 @@ npm run test:contrast   # 逐对计算两套主题的配色对比度与焦点可
 npm run test:placeholders # 占位符提取与填充，含选项 / 默认值语法与判定边界
 npm run test:frontmatter # frontmatter 安全生成与解析
 npm run test:project-types # 项目类型新增、删除和最少保留规则
-npm run test:rule-export # 规则文件导出时保护已有文件
+npm run test:rule-export # 规则文件导出：路径白名单、链接拒绝、保护已有文件（自带反向对照）
 npm run test:composer-meta # 装配器项目类型与标签推断
 npm run test:version-store # 版本历史存储、星标和裁剪规则
 npm run test:trash-store # 回收站索引、存放名校验和部分清空

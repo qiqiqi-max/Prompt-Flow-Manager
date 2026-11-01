@@ -161,7 +161,7 @@ npm run test:contrast # 配色对比度与焦点可见性（裸 node，自带一
 npm run test:placeholders # 占位符提取与填充、选项 / 默认值语法（裸 node，自带两组反向对照：朴素实现 + 逐条变异）
 npm run test:frontmatter # frontmatter 安全生成：用户输入不能改写其他字段（裸 node）
 npm run test:project-types # 项目类型新增、删除和最少保留规则（裸 node）
-npm run test:rule-export # 规则文件导出时保护已有文件（裸 node）
+npm run test:rule-export # 规则文件导出：相对路径白名单、symlink/junction 拒绝、保护已有文件（裸 node，自带反向对照）
 npm run test:composer-meta # 装配器根据技术栈生成项目类型和标签（裸 node）
 npm run test:version-store # 版本列表、星标、裁剪和路径校验（裸 node）
 npm run test:trash-store # 回收站索引、存放名校验和部分清空（裸 node）

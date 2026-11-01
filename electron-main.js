@@ -292,11 +292,21 @@ function safeJoin(relPath) {
 // 这里按顶层目录 + 扩展名双白名单卡死。
 const WRITABLE_TOPS = new Set(['prompts', 'workflows', 'templates']);
 // 导出项目规则的落盘白名单。用户会弹框选项目目录，但写进哪个文件必须由
-// 这个清单决定——渲染进程只传两份固定规则文件的构建内容，即便渲染进程被
-// 外部内容劫持，能覆盖的也只有这两个名字，写不了任意路径。
-// 这条只锁文件名，不锁目标目录（目录由用户每次弹框确认），语义和
+// 这个清单决定——渲染进程只传固定规则文件的构建内容，即便渲染进程被
+// 外部内容劫持，能覆盖的也只有这几个相对路径，写不了任意路径。
+// 这条只锁项目目录内的相对路径，不锁目标目录（目录由用户每次弹框确认），语义和
 // safeJoinWritable 的"数据目录白名单"互补。
-const RULE_EXPORT_ALLOWED = new Set(['CLAUDE.md', '.cursorrules']);
+// 必须在这里写死，不能从 src/rule-targets.js 取：那份清单渲染进程里也有一份，
+// 白名单要是跟着它走，就等于由被防的一方来定规矩。两边是否一致由 npm test 卡。
+// 带子目录的条目（.github/、.cursor/rules/）在 lib/rule-export.js 里逐级 lstat，
+// 任何一级是链接（含 junction）都整次拒绝。
+const RULE_EXPORT_ALLOWED = new Set([
+  'CLAUDE.md',
+  'AGENTS.md',
+  '.github/copilot-instructions.md',
+  '.cursor/rules/project-rules.mdc',
+  '.cursorrules'
+]);
 function contentPathAllowed(resolved, { allowGitkeep }) {
   const rel = path.relative(DATA_ROOT_NORM, resolved).replace(/\\/g, '/');
   const segs = rel.split('/');
@@ -1188,7 +1198,7 @@ ipcMain.handle('get-config', async () => loadConfig());
 const KNOWN_CONFIG_KEYS = new Set([
   'theme', 'lang', 'fontScale', 'windowBounds', 'projectTypes', 'lockedFiles',
   'expandedPaths', 'recent', 'fillMemory', 'sidebarWidth', 'tabs', 'activeTab',
-  'updateCheck', 'updateLastCheckedAt', 'updateSkipVersion'
+  'updateCheck', 'updateLastCheckedAt', 'updateSkipVersion', 'ruleExportTargets'
 ]);
 // 原型链上的键。JSON.parse 出来的对象里它们是**自有属性**（不是原型），
 // 展开进配置对象之后会跟着 saveConfig 落盘。
@@ -1359,8 +1369,9 @@ ipcMain.handle('export-project-rules', async (e, payload) => {
     return { ok: false, canceled: true };
   }
   const targetDir = res.filePaths[0];
-  // 文件名只接受固定白名单，目录由用户选择。已有文件必须由用户决定是否覆盖。
-  const plan = await ruleExport.plan(targetDir, payload.files, RULE_EXPORT_ALLOWED);
+  // 相对路径只接受固定白名单，目录由用户选择。已有文件必须由用户决定是否覆盖。
+  // 路径上有链接时 plan 直接抛 E_RULE_EXPORT_UNSAFE，一个文件都不写。
+  const plan = await ruleExport.plan(targetDir, payload.files, RULE_EXPORT_ALLOWED, { appError });
   let mode = 'overwrite';
   if (plan.existing.length) {
     const answer = await dialog.showMessageBox(win, {
