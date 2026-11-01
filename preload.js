@@ -20,6 +20,12 @@ const api = {
   updateWorkflowRefs: (targets, oldRel, newRel) => ipcRenderer.invoke('update-workflow-refs', targets, oldRel, newRel),
   // 反方向：这个提示词被哪些工作流引用；顺带带上全库悬空引用体检
   workflowReferences: (rel) => ipcRenderer.invoke('workflow-references', rel),
+  // 使用统计与收藏（存在 usage.json，见 lib/usage-store.js）。三个都返回同一个形状：
+  // { favorites: [rel], frequent: [{ rel, count, lastUsedAt, score }] }（frequent 已按常用排好序），
+  // recordUsage 额外带 recorded（文件不存在时为 false，不记账）。
+  recordUsage: (rel) => ipcRenderer.invoke('record-usage', rel),
+  getUsage: () => ipcRenderer.invoke('get-usage'),
+  setFavorite: (rel, on) => ipcRenderer.invoke('set-favorite', rel, on),
   trash: (rel) => ipcRenderer.invoke('trash', rel),
   listTrash: () => ipcRenderer.invoke('list-trash'),
   restore: (id) => ipcRenderer.invoke('restore', id),

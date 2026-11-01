@@ -102,6 +102,10 @@ jobs:
       - name: 回收站存储
         run: npm run test:trash-store
 
+      # 使用统计与收藏：计数、上限淘汰、改名迁移、常用排序、导入闸门。自带反向对照。
+      - name: 使用统计与收藏
+        run: npm run test:usage-store
+
       - name: 改名与版本历史迁移
         run: npm run test:file-move
 

@@ -214,6 +214,36 @@ body {
 .tree-row.dir .name { color: var(--text); font-weight: 500; }
 
 .search-results { padding: 4px 8px; }
+
+/* ===== 侧边栏：收藏 / 常用 ===== */
+/* 高度封顶 + 自己滚动：收藏攒多了也不能把文件树挤没。800x500 最小窗口下
+   侧边栏只有三百来像素高，不封顶的话十几条收藏就把树压成 0 高（.tree 是 flex: 1，
+   min-height 为 0 时会被让到一点不剩），layout-small 盯着这一条。 */
+.usage-panel {
+  flex-shrink: 0; max-height: 35%; display: flex; flex-direction: column;
+  border-bottom: 1px solid var(--border); min-height: 0;
+}
+.usage-tabs { display: flex; gap: 2px; padding: 4px 6px 0; flex-shrink: 0; }
+.usage-tab {
+  flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-muted);
+  font-size: 0.75rem; padding: 3px 4px; cursor: pointer;
+}
+.usage-tab:hover { color: var(--text); }
+.usage-tab.active { color: var(--text); border-bottom-color: var(--primary); font-weight: 500; }
+.usage-tab:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.usage-list { overflow-y: auto; padding: 2px 0 4px; min-height: 0; }
+.usage-item {
+  display: flex; align-items: center; gap: 4px; width: 100%;
+  padding: 3px 8px; background: none; border: none; border-radius: 4px;
+  font-size: 0.8125rem; color: var(--text); text-align: left; cursor: pointer; white-space: nowrap;
+}
+.usage-item:hover { background: var(--hover); }
+.usage-item:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.usage-item .us-icon { width: 16px; text-align: center; flex-shrink: 0; }
+.usage-item .us-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.usage-item .us-count { flex-shrink: 0; font-size: 0.6875rem; color: var(--text-muted); }
+.usage-empty { padding: 4px 10px; font-size: 0.75rem; color: var(--text-muted); white-space: normal; }
 .search-item {
   padding: 6px 8px; border-radius: 4px; cursor: pointer; margin-bottom: 2px;
 }

@@ -71,6 +71,8 @@ async function withStore(fn, rmImpl, writeImpl) {
     const left = (await store.readIndex()).items.map(i => i.id);
     ok(JSON.stringify(result.failedNames) === '["busy.md"]', '清空时报告删不掉的条目', JSON.stringify(result));
     ok(JSON.stringify(left) === '["busy"]', '只保留删不掉的条目，摘掉已删除和损坏条目', JSON.stringify(left));
+    // 调用方按 removed 清使用统计：删失败的 busy 不能出现在里面，否则它恢复回来时统计已经被清掉了
+    ok(JSON.stringify((result.removed || []).map(i => i.id)) === '["ok"]', '清空时报告真正删掉的条目（不含删失败的）', JSON.stringify(result.removed));
     ok(!fs.existsSync(path.join(trashDir, 'ok.md')) && fs.existsSync(path.join(trashDir, 'busy.md')), '只删除成功删除的文件');
   }, async (file, opts) => {
     if (path.basename(file) === 'busy.md') throw Object.assign(new Error('busy'), { code: 'EBUSY' });

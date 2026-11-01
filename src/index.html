@@ -55,6 +55,15 @@
       <!-- 左：文件树 -->
       <aside class="sidebar">
         <div class="sidebar-header" data-i18n="sidebarFiles">文件</div>
+        <!-- 收藏 / 常用。两栏都没有内容时整块隐藏（见 renderUsage），
+             所以新用户的侧边栏和以前一样；有内容时高度封顶，树始终留着大半。 -->
+        <div id="usage-panel" class="usage-panel hidden">
+          <div class="usage-tabs" role="tablist">
+            <button type="button" class="usage-tab" role="tab" data-tab="favorites" data-i18n="favorites">收藏</button>
+            <button type="button" class="usage-tab" role="tab" data-tab="frequent" data-i18n="frequent">常用</button>
+          </div>
+          <div id="usage-list" class="usage-list" role="tabpanel"></div>
+        </div>
         <div id="tree" class="tree"></div>
         <div id="search-results" class="search-results hidden"></div>
       </aside>

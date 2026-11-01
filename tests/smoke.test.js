@@ -709,6 +709,51 @@ section('工作流引用索引');
     '引用查询有切文件守卫');
 }
 
+section('使用统计与收藏');
+// 纯逻辑（计数、淘汰、迁移、排序、闸门）由 test:usage-store 带反向对照验；
+// 点击路径、跟随改名/回收站由 test:ui 验。这里只盯那几处"接错了也不会立刻有测试红"的接线。
+{
+  // 写入必须过 'usage' 队列：queueWrite 里套着导入闸门，传一个直接执行的 queue
+  // 进去，导入期间的统计写入就会插进导入中间（被它的回滚卷走或覆盖）。
+  assert(/createUsageStore\(\{[\s\S]{0,200}?queue: \(fn\) => queueWrite\('usage', fn\)/.test(mainSrc),
+    '统计写入走 usage 队列（因而受导入闸门约束）');
+  // 本机数据，跟 config.json 放一起；放 DATA_ROOT 的话开发模式下会写进仓库根目录
+  assert(/const USAGE_PATH = path\.join\(path\.dirname\(CONFIG_PATH\), 'usage\.json'\)/.test(mainSrc),
+    'usage.json 和 config.json 在同一目录');
+  // 自愈要扫到它的临时文件。开发模式下这个目录不是 DATA_ROOT，test:heal 构造不出那种分叉
+  // （PFM_DATA_DIR 一设两者就重合），所以只能静态卡住。
+  assert(/await walk\(path\.dirname\(USAGE_PATH\), false\)/.test(mainSrc),
+    '启动自愈扫描 usage.json 所在目录的顶层');
+  // 改名后迁移、清空回收站后清理，而且都在各自的锁之外（usage 不嵌套占锁）
+  {
+    const at = mainSrc.indexOf("ipcMain.handle('rename', async (e, oldRel, newRel) => {");
+    const body = at > 0 ? mainSrc.slice(at, at + 600) : '';
+    assert(/await renameLocked\(oldRel, newRel\);[\s\S]*await usageStore\.migrate\(/.test(body),
+      '改名成功后统计和收藏跟着迁移');
+    const et = mainSrc.indexOf("ipcMain.handle('empty-trash'");
+    const ebody = et > 0 ? mainSrc.slice(et, et + 1400) : '';
+    assert(/await queueWrite\('trash', \(\) => trashStore\.empty\(\)\)/.test(ebody)
+      && /removed\.map\(/.test(ebody) && /await usageStore\.forget\(/.test(ebody),
+    '清空回收站后按真正删掉的条目清理统计（在 trash 锁之外）');
+  }
+  for (const k of ['recordUsage', 'getUsage', 'setFavorite']) {
+    assert(new RegExp('\\b' + k + ': ').test(preloadSrc), 'preload 暴露 ' + k);
+  }
+  // copyContent 里每次写剪贴板之后紧跟着记账，且记账只出现在这些位置——
+  // 取消填充面板（return false）那条路上不能有。
+  {
+    const at = rendererSrc.indexOf('async function copyContent()');
+    const end = at > 0 ? rendererSrc.indexOf('\n}\n', at) : -1;
+    const body = end > at ? rendererSrc.slice(at, end) : '';
+    const writes = (body.match(/await writeClipboard\([^;]*\);/g) || []).length;
+    const paired = (body.match(/await writeClipboard\([^;]*\);\s*recordUsage\(rel\);/g) || []).length;
+    const calls = (body.match(/recordUsage\(/g) || []).length;
+    assert(writes >= 3 && paired === writes && calls === writes,
+      'copyContent 每次复制成功都记一次使用，别处不记（' + paired + '/' + writes + '，共 ' + calls + ' 处）');
+    assert(/if \(values === null\) return false;/.test(body), '复制取消仍然返回 false（不记账的那条路还在）');
+  }
+}
+
 section('界面字号缩放');
 // 字号缩放全靠 html 的 font-size 乘 --font-scale，所有 font-size 必须写 rem。
 // 这条断言是这套机制唯一的门禁：随手写一个 font-size: 13px 不会报错、界面看着也正常，

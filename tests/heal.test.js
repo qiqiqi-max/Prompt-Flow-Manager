@@ -41,6 +41,10 @@ const STALE_PART = '.tmp-999999-0-被中断的写入.md.part';
 const CLOSE_TMP = 'config.json.tmp-close';
 // 形态不匹配的 .part：用户自己的半成品文件，绝不能被删。
 const USER_PART = '下载了一半.part';
+// usage.json（使用统计与收藏）的原子写临时文件。它和 config.json 放在同一个目录顶层，
+// 写到一半被杀留下的形状和其他 .part 一样；这里单独点名，免得哪天有人把统计文件
+// 挪到一个自愈不扫的位置还以为它被覆盖着。
+const USAGE_PART = '.tmp-999999-1-usage.json.part';
 
 function makeBrokenDataDir() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pfm-heal-'));
@@ -83,7 +87,7 @@ function makeBrokenDataDir() {
   // 放三个位置，确认扫描覆盖到内容目录、.trash 和数据根。
   // mtime 要往回拨：自愈只清理 60 秒以上没动过的（新的可能是别的进程正在写）。
   const old = Date.now() - 10 * 60 * 1000;
-  for (const rel of ['prompts/testing/' + STALE_PART, '.trash/' + STALE_PART, STALE_PART]) {
+  for (const rel of ['prompts/testing/' + STALE_PART, '.trash/' + STALE_PART, STALE_PART, USAGE_PART]) {
     const p = path.join(dir, rel);
     fs.writeFileSync(p, '半截内容', 'utf8');
     fs.utimesSync(p, new Date(old), new Date(old));
@@ -145,6 +149,7 @@ function snapshot(dir) {
       fs.existsSync(path.join(dir, STALE_PART))
     ],
     closeTmp: fs.existsSync(path.join(dir, CLOSE_TMP)),
+    usagePart: fs.existsSync(path.join(dir, USAGE_PART)),
     freshPart: fs.existsSync(path.join(dir, 'prompts/testing/.tmp-999998-0-刚写的.md.part')),
     userPart: fs.existsSync(path.join(dir, 'prompts/testing/' + USER_PART)),
     partsInContent: listParts('prompts/testing')
@@ -189,6 +194,8 @@ function snapshot(dir) {
     'before=' + before.closeTmp + ' after=' + after.closeTmp);
   push('三处残留 .part 都被清掉', after.staleParts.every(v => v === false),
     'staleParts=' + JSON.stringify(after.staleParts));
+  push('usage.json 写入中断留下的临时文件被清掉', before.usagePart === true && after.usagePart === false,
+    'before=' + before.usagePart + ' after=' + after.usagePart);
   push('刚写的 .part 没被删（可能有进程正在写）', after.freshPart);
   push('用户自己的 .part 没被删（形态不匹配）', after.userPart,
     'partsInContent=' + JSON.stringify(after.partsInContent));
@@ -210,6 +217,7 @@ function snapshot(dir) {
   push('对照：孤立正文仍然没被收养', ctrl.orphanAdopted.length === 0);
   push('对照：残留 .part 原样还在', ctrl.staleParts.every(Boolean));
   push('对照：.tmp-close 原样还在', ctrl.closeTmp === true, 'ctl.closeTmp=' + ctrl.closeTmp);
+  push('对照：usage.json 的临时文件原样还在', ctrl.usagePart === true, 'ctl.usagePart=' + ctrl.usagePart);
   // 这条是整个反向对照的意义：两组必须不同。都绿说明"修好了"不是自愈做的。
   push('两组结果不同 → 测到的是自愈本身',
     !after.hasGhost && ctrl.hasGhost
