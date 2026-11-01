@@ -43,6 +43,7 @@ Prompt Flow Manager 用于集中整理项目开发中反复使用的提示词、
 | 可诊断 | 运行日志滚动写入 `logs/`（单文件 2 MB、最多 5 个），设置里可导出一份脱敏的诊断信息用于报障 |
 | 升级提示 | 启动时查询 GitHub 最新发布版本并在右下角提示。只读版本号，不自动下载安装，不发送任何本机信息，设置里可完全关闭 |
 | 只读 MCP 接口 | 自带一个 stdio 的 MCP server，把提示词库暴露给 Claude Code / Codex 等支持 MCP 的工具查询。**只有读操作**，没有任何写入工具 |
+| 全局快捷键 | 在任何程序里按快捷键（默认 `Ctrl+Alt+Space`，默认关闭）弹出快速搜索框，输入即搜、`Enter` 复制；带占位符的就地填写，`{{include:}}` 自动展开。主窗口最小化时也能用 |
 | 命令行入口 | `npm run pfm -- list / search / get / refs / check`，在终端或流水线里查询、体检提示词库。同样只有读操作；`check` 按退出码报告悬空引用与不可达步骤，可直接当 lint 用 |
 
 应用对大规模提示词库做了针对性优化：文件内容与解析结果按修改时间和大小缓存，目录树与元数据一次遍历返回，搜索时复用正文索引。项目内置的基准脚本可用于复测这些性能路径。
@@ -91,6 +92,7 @@ npm run dist
 | 搜索内容 | 顶部搜索框，`Ctrl+Shift+F` 聚焦 |
 | 编辑与保存 | 内容区“编辑”，`Ctrl+S` 保存 |
 | 复制提示词 | 内容区“复制” |
+| 全局快速搜索 | 工具栏“设置”→“全局快捷键”开启（默认关闭，默认组合键 `Ctrl+Alt+Space`，可改）。按下后输入关键词，`↑` / `↓` 选择，`Enter` 复制，`Esc` 收起 |
 | 创建副本 | 文件树右键“创建副本” |
 | 查看版本 | 内容区“历史”打开版本抽屉 |
 | 重命名、移动、删除 | 内容区操作按钮或文件树右键菜单 |
@@ -275,6 +277,8 @@ npm run test:draft-store # 草稿存储
 npm run test:import-rollback # 完整备份中途失败后整体撤回
 npm run test:ui-failure # 界面保存失败提示
 npm run test:includes   # 模板片段引入与嵌套解析
+npm run test:quick-launch-logic # 全局快捷键校验、注册与回滚
+npm run test:quick-launch # 全局快捷键快速搜索面板（启动真实 Electron）
 npm run test:reverse    # 反向对照：版本检查的每个修复点撤掉都必须变红
 npm run test:reverse-split # 反向对照：自检模块拆分的每个修复点撤掉都必须变红
 npm run test:quick      # 日常快速检查，不启动 Electron
@@ -306,6 +310,7 @@ npm run test:packaged # 对打包产物跑自检（须先 dist）
 Prompt-Flow-Manager/
 ├── electron-main.js         # 主进程、IPC、文件与窗口管理
 ├── preload.js               # contextBridge 白名单接口
+├── quick-launch-preload.js  # 快速搜索面板的最小白名单接口
 ├── lib/
 │   ├── zip-import.js        # ZIP 安全导入逻辑
 │   ├── logger.js            # 滚动文件日志
@@ -314,6 +319,7 @@ Prompt-Flow-Manager/
 │   ├── update-check.js      # 启动时查最新发布版本
 │   ├── library.js          # 内容库数据层：正文缓存、元数据、全文搜索
 │   ├── workflow-index.js   # 工作流引用索引与悬空引用体检
+│   ├── quick-launch.js      # 全局快捷键：组合键校验、注册状态机、居中
 │   └── selftest.js          # 测试专用代码（不参与正常启动路径）
 ├── cli/                     # 命令行入口（只读，复用同一份数据层）
 ├── mcp/                     # 只读 MCP server（stdio，不依赖 electron）
@@ -324,6 +330,7 @@ Prompt-Flow-Manager/
 │   ├── i18n.js              # 中英文文案
 │   ├── frontmatter.js       # frontmatter 解析与自动字段更新
 │   ├── flow-graph.js        # 工作流图：步骤解析、分层、成环、不可达
+│   ├── quick-launch.*       # 全局快捷键呼出的快速搜索面板（独立窗口）
 │   ├── selftest/            # 自检脚本（在页面上下文里执行的真实 .js）
 │   └── vendor/              # 本地化的渲染进程依赖
 ├── prompts/                 # 内置提示词示例

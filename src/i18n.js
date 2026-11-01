@@ -241,6 +241,23 @@ const I18N = {
     settingsUpdate: '升级检查',
     updateCheckLabel: '启动时检查新版本',
     updateCheckDesc: '会连接 GitHub 查询最新发布版本。只查询版本号，不会自动下载或安装，也不会发送任何本机信息。关闭后完全不联网。',
+    // 全局快捷键呼出的快速搜索面板
+    settingsQuickLaunch: '全局快捷键',
+    quickLaunchDesc: '在任何程序里按下快捷键，弹出一个小搜索框：输入即搜，↑↓ 选择，Enter 复制，Esc 收起。主窗口最小化时也能用。',
+    quickLaunchLabel: '启用全局快捷键',
+    quickLaunchShortcutLabel: '快捷键',
+    quickLaunchShortcutPlaceholder: '例如 Ctrl+Alt+Space',
+    quickLaunchApply: '应用',
+    quickLaunchHint: '默认 Ctrl+Alt+Space。全局快捷键会在所有程序里生效，被别的程序占用时会提示注册失败。',
+    quickLaunchStatusOff: '未开启',
+    quickLaunchStatusOn: '已生效：{shortcut}',
+    quickLaunchStatusFailed: '未生效：{reason}',
+    quickLaunchSaved: '全局快捷键已更新',
+    // 快速搜索面板里的文案
+    qlPlaceholder: '搜索提示词（标题/标签/内容）',
+    qlResults: '搜索结果',
+    qlHint: '↑↓ 选择 · Enter 复制 · Esc 收起',
+    qlFillHint: 'Enter 下一项 · Ctrl+Enter 填好并复制 · 留空的原样保留',
     updateNever: '尚未检查过',
     updateLastChecked: '上次检查：{at}',
     updateCurrent: '当前版本 {version}',
@@ -308,6 +325,11 @@ const I18N = {
     // 只有渲染进程传了一个不合法的版本号才会出现。正常界面点不出来，
     // 但错误码露出来就必须有话可说。
     err_E_UPDATE_BAD_VERSION: '版本号不合法，无法记录忽略：{detail}',
+    // 全局快捷键。格式说明要把规则写全：用户只看得到这一句，看不到 lib/quick-launch.js。
+    err_E_SHORTCUT_INVALID: '快捷键格式不对：{detail}。写成「修饰键+主键」，例如 Ctrl+Alt+Space；字母、数字和 Space 至少配两个修饰键，F1–F12 至少配一个 Ctrl/Alt/Win',
+    err_E_SHORTCUT_TAKEN: '全局快捷键 {detail} 注册失败，可能已被其他程序占用。请换一个组合',
+    // 只有不是快速搜索面板的页面去调面板专用的通道才会出现，正常界面点不出来。
+    err_E_QUICK_LAUNCH_SENDER: '只有快速搜索面板可以执行这个操作',
     // 原生菜单。主进程 buildMenu() 用这些键，语言切换时会重建菜单
     // （updateConfig 检测到 lang 变化就调 buildMenu）。
     menuFile: '文件',
@@ -624,6 +646,23 @@ const I18N = {
     settingsUpdate: 'Update Check',
     updateCheckLabel: 'Check for new versions at startup',
     updateCheckDesc: 'Connects to GitHub to look up the latest release. It only reads the version number, never downloads or installs anything, and sends no information about your machine. Turning this off disables all network access.',
+    // 全局快捷键呼出的快速搜索面板
+    settingsQuickLaunch: 'Global Shortcut',
+    quickLaunchDesc: 'Press the shortcut in any program to open a small search box: type to search, ↑↓ to choose, Enter to copy, Esc to close. Works while the main window is minimized.',
+    quickLaunchLabel: 'Enable global shortcut',
+    quickLaunchShortcutLabel: 'Shortcut',
+    quickLaunchShortcutPlaceholder: 'e.g. Ctrl+Alt+Space',
+    quickLaunchApply: 'Apply',
+    quickLaunchHint: 'Default is Ctrl+Alt+Space. A global shortcut works in every program; you will be told if another program already uses it.',
+    quickLaunchStatusOff: 'Off',
+    quickLaunchStatusOn: 'Active: {shortcut}',
+    quickLaunchStatusFailed: 'Not active: {reason}',
+    quickLaunchSaved: 'Global shortcut updated',
+    // 快速搜索面板里的文案
+    qlPlaceholder: 'Search prompts (title / tags / content)',
+    qlResults: 'Search results',
+    qlHint: '↑↓ choose · Enter copy · Esc close',
+    qlFillHint: 'Enter next field · Ctrl+Enter fill and copy · blank fields are kept as-is',
     updateNever: 'Never checked',
     updateLastChecked: 'Last checked: {at}',
     updateCurrent: 'Current version {version}',
@@ -685,6 +724,11 @@ const I18N = {
     // 只有渲染进程传了一个不合法的版本号才会出现。正常界面点不出来，
     // 但错误码露出来就必须有话可说。
     err_E_UPDATE_BAD_VERSION: 'Invalid version number; cannot record the skip: {detail}',
+    // 全局快捷键。格式说明要把规则写全：用户只看得到这一句，看不到 lib/quick-launch.js。
+    err_E_SHORTCUT_INVALID: 'Invalid shortcut: {detail}. Use "modifiers+key", e.g. Ctrl+Alt+Space. Letters, digits and Space need at least two modifiers; F1–F12 need at least one of Ctrl/Alt/Win',
+    err_E_SHORTCUT_TAKEN: 'Could not register the global shortcut {detail}; another program may already be using it. Please pick a different combination',
+    // 只有不是快速搜索面板的页面去调面板专用的通道才会出现，正常界面点不出来。
+    err_E_QUICK_LAUNCH_SENDER: 'Only the quick search panel can do this',
     // 原生菜单。主进程 buildMenu() 用这些键，语言切换时会重建菜单
     // （updateConfig 检测到 lang 变化就调 buildMenu）。
     menuFile: 'File',

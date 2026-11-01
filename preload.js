@@ -65,6 +65,10 @@ const api = {
   openReleasePage: () => ipcRenderer.invoke('open-release-page'),
   // 忽略某个版本（只对这一个版本生效，下一版照常提示）
   skipUpdateVersion: (version) => ipcRenderer.invoke('skip-update-version', version),
+  // 全局快捷键（快速搜索面板）。状态以主进程此刻真正注册着的为准，不是配置里的值；
+  // 设置走单独的通道而不是 setConfig：要先注册成功才落盘（见 lib/quick-launch.js）。
+  getQuickLaunchStatus: () => ipcRenderer.invoke('get-quick-launch-status'),
+  setQuickLaunch: (patch) => ipcRenderer.invoke('set-quick-launch', patch),
   onMenuAction: (cb) => {
     const handler = (e, action) => cb(action);
     ipcRenderer.on('menu-action', handler);

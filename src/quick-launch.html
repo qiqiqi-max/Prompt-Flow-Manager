@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <!-- CSP 必须和 index.html 逐字一致：tests/quick-launch.test.js 会在两个窗口里
+       各读一次实际生效的 meta 内容做比对。这个面板加载的也是库里的内容（标题和正文片段），
+       不能因为"只是个小窗口"就放松。 -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none';">
+  <title>Prompt Flow Manager</title>
+  <!-- 复用 styles.css 的主题变量和 --font-scale，面板与主窗口同一套配色和字号档位 -->
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="quick-launch.css">
+</head>
+<body class="theme-light">
+  <div id="ql-root" class="ql-root">
+    <input type="text" id="ql-input" class="ql-input" autocomplete="off" spellcheck="false" data-i18n-placeholder="qlPlaceholder" data-i18n-aria="qlPlaceholder">
+    <div id="ql-list" class="ql-list" role="listbox" data-i18n-aria="qlResults"></div>
+    <div id="ql-fill" class="ql-fill hidden"></div>
+    <div id="ql-footer" class="ql-footer">
+      <span id="ql-status" class="ql-status" role="status" aria-live="polite"></span>
+      <span id="ql-hint" class="ql-hint" data-i18n="qlHint"></span>
+    </div>
+  </div>
+  <!-- 加载顺序同 index.html：这几个双用模块各自声明一个全局常量
+       （I18N / FRONTMATTER / PLACEHOLDERS / INCLUDES）。quick-launch.js 整个包在
+       IIFE 里，不新增任何顶层声明，所以不会和它们撞名（踩过的坑第 2 条）。 -->
+  <script src="i18n.js"></script>
+  <script src="frontmatter.js"></script>
+  <script src="placeholders.js"></script>
+  <script src="includes.js"></script>
+  <script src="quick-launch.js"></script>
+</body>
+</html>

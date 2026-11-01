@@ -159,6 +159,11 @@ jobs:
       - name: 命令行入口
         run: npm run test:cli
 
+      # 全局快捷键的纯逻辑：快捷键校验、注册状态机、设置变更先注册后落盘与回滚、居中。
+      # 自带两组反向对照（朴素实现 / 先注册但不回滚的半修版本）。
+      - name: 全局快捷键判定
+        run: npm run test:quick-launch-logic
+
       # 纯逻辑测试，不用起 Electron：从 renderer.js 里抠出 debounce 单独验语义。
       # 自带反向对照（旧版一行 debounce 必须失败），所以它不会变成永远绿的空壳。
       - name: debounce 语义
@@ -208,6 +213,11 @@ jobs:
 
       - name: 最小窗口布局
         run: npm run test:layout-small
+
+      # 快速搜索面板：拉起两次 Electron。自检模式下不注册真实系统快捷键（内存替身），
+      # 所以不会和 runner 上别的程序抢键。会写一次真实剪贴板，跑完放回去。
+      - name: 全局快捷键快速搜索面板
+        run: npm run test:quick-launch
 
       # 启动自愈：故意构造一个坏数据目录（幽灵条目 / 孤立正文 / 越界 store /
       # 残留 .part），跑完从进程外读磁盘定论。自带反向对照——同一个坏目录再跑

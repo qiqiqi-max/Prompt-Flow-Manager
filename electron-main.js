@@ -1,6 +1,6 @@
 // Prompt Flow Manager - Electron 主进程
 // 负责窗口、文件系统操作、版本管理、回收站、配置、导出
-const { app, BrowserWindow, ipcMain, dialog, Menu, shell, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, shell, screen, globalShortcut, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const fsp = require('fs/promises');
@@ -45,6 +45,9 @@ const ruleExport = require('./lib/rule-export');
 const { createVersionStore } = require('./lib/version-store');
 const { createTrashStore } = require('./lib/trash-store');
 const { movePromptWithHistory } = require('./lib/file-move');
+// 全局快捷键快速搜索面板的纯逻辑（快捷键校验、注册状态机、设置变更的提交/回滚、居中）。
+// 不 require electron，globalShortcut 由这里传进去，所以能裸 node 单测。
+const quickLaunch = require('./lib/quick-launch');
 // 滚动文件日志 + 诊断包。两个模块都刻意不 require('electron')：
 // 目录、版本号、两个根目录全部由这里传进去，DATA_ROOT / CODE_ROOT 的判断
 // 只允许存在下面那一份（见 123-133 行的说明）。
@@ -619,7 +622,11 @@ async function loadConfig() {
     // 上次检查时刻 + 用户点过"忽略此版本"的那个版本号。两项都由主进程维护，
     // 渲染进程只读。updateSkipVersion 只对那一个版本生效，不是"永久别提醒"。
     updateLastCheckedAt: null,
-    updateSkipVersion: null
+    updateSkipVersion: null,
+    // 全局快捷键呼出快速搜索面板。默认关：全局快捷键会从所有程序手里抢走这个组合，
+    // 不能替用户做这个决定。默认组合键的取舍见 lib/quick-launch.js 的 DEFAULT_ACCELERATOR。
+    quickLaunchEnabled: false,
+    quickLaunchShortcut: quickLaunch.DEFAULT_ACCELERATOR
   };
   const cfg = await readConfigFile(CONFIG_PATH, { logError: (...a) => console.error(...a) });
   if (!cfg) return defaults;
@@ -1188,7 +1195,8 @@ ipcMain.handle('get-config', async () => loadConfig());
 const KNOWN_CONFIG_KEYS = new Set([
   'theme', 'lang', 'fontScale', 'windowBounds', 'projectTypes', 'lockedFiles',
   'expandedPaths', 'recent', 'fillMemory', 'sidebarWidth', 'tabs', 'activeTab',
-  'updateCheck', 'updateLastCheckedAt', 'updateSkipVersion'
+  'updateCheck', 'updateLastCheckedAt', 'updateSkipVersion',
+  'quickLaunchEnabled', 'quickLaunchShortcut'
 ]);
 // 原型链上的键。JSON.parse 出来的对象里它们是**自有属性**（不是原型），
 // 展开进配置对象之后会跟着 saveConfig 落盘。
@@ -1214,6 +1222,13 @@ ipcMain.handle('set-config', async (e, cfg) => {
   const next = await updateConfig(cfg);
   // 语言改了就重建原生菜单（buildMenu 只在启动时调一次，不管这里就永远停在旧语言）
   syncMenuLang(next.lang);
+  // 设置面板改快捷键走的是 set-quick-launch（先注册、成功才落盘）。这里兜的是
+  // 有人直接 setConfig 写了这两个键：不跟着同步的话，磁盘上关了、快捷键还注册着，
+  // 要等重启才对得上。
+  if (cfg && (Object.prototype.hasOwnProperty.call(cfg, 'quickLaunchEnabled')
+    || Object.prototype.hasOwnProperty.call(cfg, 'quickLaunchShortcut'))) {
+    await syncQuickLaunch(next);
+  }
   return next;
 });
 
@@ -2400,7 +2415,10 @@ async function createWindow() {
   attachSandboxProbe(win);
   const selfTest = process.env.PFM_SELFTEST === '1' ? selftest.attachSelfTest(win) : null;
   win.loadFile(path.join(CODE_ROOT, 'src', 'index.html'));
-  if (selfTest) selfTest.run();
+  // 快速搜索面板的自检要模拟按快捷键、读剪贴板、比对两个窗口的 webPreferences，
+  // 这些只有主进程做得到，所以它是一条独立的流程，自己负责退出（见 lib/quick-launch-selftest.js）。
+  if (selfTest && process.env.PFM_SELFTEST_QUICK_LAUNCH) runQuickLaunchSelfTest(win);
+  else if (selfTest) selfTest.run();
 
   // resize / move 会以每秒几十次的频率触发。不防抖会疯狂读写 config.json。
   // 走 updateConfig 而不是自己 loadConfig→saveConfig：后者是一次独立的
@@ -2551,6 +2569,15 @@ async function createWindow() {
   // macOS 下关窗后应用还活着、菜单仍可点，Cmd+N 会打到已销毁对象上
   // 抛 "Object has been destroyed"。
   win.on('closed', () => { win = null; });
+  // 面板是隐藏而不销毁的。主窗口没了它还活着的话，window-all-closed 永远等不到
+  // "零个窗口"，Windows 上关掉主窗口进程却不退。就地降级重建主窗口时也会走到这里，
+  // 那正好：面板下次呼出时按新的 sandboxActive 重建，和主窗口保持同一个沙箱判定。
+  win.on('closed', () => {
+    destroyQuickPanel();
+    // 就地降级时 sandboxActive 已经翻成 false，按新判定把预建的面板补回来；
+    // 否则第一次呼出又要等页面加载（预建的意义就没了）
+    if (sandboxRuntime.rebuilding && shortcutController.current()) ensureQuickPanel();
+  });
 
   // 上次是最大化状态：先按还原尺寸建窗，再最大化，这样"取消最大化"能回到合理尺寸
   if (config.windowBounds && config.windowBounds.maximized) win.maximize();
@@ -2613,6 +2640,249 @@ function syncMenuLang(lang) {
   if (next === menuLang) return;
   menuLang = next;
   buildMenu();
+}
+
+// ---------- 全局快捷键：快速搜索面板 ----------
+// 按下快捷键弹出一个小搜索框（当前显示器居中、置顶、无边框），输入即搜，
+// ↑↓ 选、Enter 复制，Esc / 失焦收起。主窗口最小化时也能用。
+//
+// 纯逻辑（快捷键校验、注册状态机、设置变更的提交顺序、居中）在 lib/quick-launch.js，
+// 这里只放窗口和 Electron API。
+//
+// 面板的安全配置必须和主窗口一致——它显示的也是库里的内容（标题、正文片段），
+// 外部导入的 .md 同样在里面：
+//   contextIsolation / nodeIntegration 同主窗口；
+//   sandbox 取同一个 sandboxActive（沙箱两个半边的判定只有一份，见文件开头）；
+//   CSP 与 index.html 逐字一致；禁止 window.open、只允许停在自己那一页。
+// tests/quick-launch.test.js 会把两个窗口的 webPreferences 逐项比对，多一项少一项都红。
+// 唯一允许不同的是 preload：面板用最小白名单 quick-launch-preload.js（理由见那个文件头）。
+const QUICK_PANEL_URL = pathToFileURL(path.join(CODE_ROOT, 'src', 'quick-launch.html')).href;
+const QUICK_PANEL_SIZE = { width: 640, height: 420 };
+let quickPanel = null;
+let quickPanelReady = null;
+
+// 自检进程不注册真实的全局快捷键：测试会在开发机上并行拉起好几个 Electron，
+// 真注册的话第一个进程抢到键、后面的全部"被占用"；测试跑着的时候开发者按一下
+// Ctrl+Alt+Space 还会呼出测试进程的面板。所以自检换成同形的内存替身，
+// 注册 / 换键 / 回滚的代码路径一行不少，只是不碰系统。
+// PFM_SELFTEST_SHORTCUT_TAKEN 让替身假装某些键已被别的程序占用，走注册失败那条路。
+const shortcutBackend = process.env.PFM_SELFTEST === '1'
+  ? quickLaunch.createFakeGlobalShortcut({
+    taken: String(process.env.PFM_SELFTEST_SHORTCUT_TAKEN || '').split(',').filter(Boolean)
+  })
+  : globalShortcut;
+const shortcutController = quickLaunch.createShortcutController({
+  globalShortcut: shortcutBackend,
+  onTrigger: () => {
+    toggleQuickPanel().catch(e => logger.error('[quick-launch] 呼出面板失败: ' + (e && e.stack ? e.stack : e)));
+  }
+});
+
+// 按配置让注册状态对上。启动时、以及有人直接 setConfig 写了这两个键时调用。
+// 注册失败（被别的程序占用）必须记日志：这是"按了没反应"唯一能查到原因的地方。
+// 用户那边由渲染进程启动时查一次状态、失败就 toast（见 renderer.js 的 checkQuickLaunchAtStartup）。
+async function syncQuickLaunch(cfg) {
+  const s = quickLaunch.resolveSettings(cfg || await loadConfig());
+  if (s.enabled && s.invalid) {
+    shortcutController.apply({ enabled: false, accelerator: null });
+    logger.error('[quick-launch] 配置里的快捷键不合法，未注册: ' + s.raw);
+    return;
+  }
+  const res = shortcutController.apply({ enabled: s.enabled, accelerator: s.accelerator });
+  if (s.enabled && !res.registered) {
+    // 新键注册失败时旧键还留着（状态机的约定），而配置已经不是它了，留着只会让
+    // "按旧键还能呼出"和设置面板里的"未生效"互相矛盾
+    shortcutController.apply({ enabled: false, accelerator: null });
+    logger.error('[quick-launch] 全局快捷键注册失败（可能已被其他程序占用）: ' + s.accelerator
+      + (res.thrown ? '，' + res.thrown : ''));
+  } else if (res.registered) {
+    logger.info('[quick-launch] 已注册全局快捷键 ' + res.accelerator);
+  }
+}
+
+function createQuickPanel() {
+  const panel = new BrowserWindow({
+    ...QUICK_PANEL_SIZE,
+    show: false,
+    frame: false,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    title: 'Prompt Flow Manager',
+    webPreferences: {
+      preload: path.join(CODE_ROOT, 'quick-launch-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: sandboxActive,
+      webgl: false
+    }
+  });
+  // 去掉应用菜单：菜单加速键跟着焦点窗口走，不去掉的话面板里按 Ctrl+R 会触发
+  // 主窗口那套"重新加载"，Ctrl+N 会去主窗口新建提示词。
+  panel.setMenu(null);
+  // 导航：面板只有一页，结果用 textContent 渲染、没有任何链接，所以不像主窗口那样
+  // 把 http(s) 转交系统浏览器——这里出现导航只可能是异常，一律拒绝，不出网。
+  panel.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  panel.webContents.on('will-navigate', (e, url) => {
+    const bare = String(url == null ? '' : url).split('#')[0].split('?')[0];
+    if (bare.toLowerCase() === QUICK_PANEL_URL.toLowerCase()) return;
+    e.preventDefault();
+    console.log('[quick-launch] 已拦截面板内导航: ' + url);
+  });
+  // 失焦即收起。置顶的窗口不收起的话，会一直盖在用户切过去的程序上面。
+  panel.on('blur', () => { if (quickPanel === panel) hideQuickPanel(); });
+  // 渲染进程没了就整个扔掉，下次呼出重建。留着一个死掉的窗口，下次 show 出来是白板。
+  // 只扔自己：沙箱下起不来时主窗口会就地降级并顺手重建面板，这个回调可能晚到，
+  // 用 destroyQuickPanel() 的话会把刚按新判定建好的那个也扔掉。
+  panel.webContents.on('render-process-gone', (e, details) => {
+    logger.error('[quick-launch] 面板渲染进程退出: ' + (details && details.reason));
+    setTimeout(() => {
+      if (quickPanel === panel) destroyQuickPanel();
+      else if (!panel.isDestroyed()) panel.destroy();
+    }, 0);
+  });
+  panel.on('closed', () => {
+    if (quickPanel === panel) { quickPanel = null; quickPanelReady = null; }
+  });
+  quickPanelReady = new Promise((resolve) => {
+    panel.webContents.once('did-finish-load', () => resolve(true));
+    panel.webContents.once('did-fail-load', (e, code, desc) => {
+      logger.error('[quick-launch] 面板页面加载失败: ' + code + ' ' + desc);
+      resolve(false);
+    });
+  });
+  panel.loadFile(path.join(CODE_ROOT, 'src', 'quick-launch.html'));
+  quickPanel = panel;
+  return panel;
+}
+
+function destroyQuickPanel() {
+  const p = quickPanel;
+  quickPanel = null;
+  quickPanelReady = null;
+  if (p && !p.isDestroyed()) p.destroy();
+}
+
+// 面板只建一次，之后隐藏 / 显示复用同一个实例：建窗口 + 加载页面要几百毫秒，
+// 每次按快捷键都等这一下，"快速"就名不副实了。
+function ensureQuickPanel() {
+  if (!quickPanel || quickPanel.isDestroyed()) createQuickPanel();
+  return quickPanel;
+}
+
+async function showQuickPanel() {
+  const panel = ensureQuickPanel();
+  const ready = await quickPanelReady;
+  if (!ready || panel.isDestroyed()) { destroyQuickPanel(); return false; }
+  // 居中到鼠标所在的显示器：这是用户此刻在看的那块屏幕，不是主窗口所在的那块。
+  let workArea = null;
+  try { workArea = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea; } catch {}
+  panel.setBounds(quickLaunch.centerBounds(workArea, QUICK_PANEL_SIZE));
+  // 语言、主题、字号每次都现取：用户可能刚在主窗口里切过。
+  const cfg = await loadConfig();
+  if (panel.isDestroyed()) return false;
+  panel.webContents.send('quick-launch-show', {
+    lang: cfg.lang === 'en' ? 'en' : 'zh',
+    theme: cfg.theme === 'dark' ? 'dark' : 'light',
+    fontScale: cfg.fontScale,
+    fillMemory: cfg.fillMemory && typeof cfg.fillMemory === 'object' && !Array.isArray(cfg.fillMemory) ? cfg.fillMemory : {}
+  });
+  // 置顶级别取 screen-saver：普通 alwaysOnTop 在全屏程序上面盖不住
+  panel.setAlwaysOnTop(true, 'screen-saver');
+  panel.show();
+  panel.focus();
+  return true;
+}
+
+function hideQuickPanel() {
+  if (quickPanel && !quickPanel.isDestroyed() && quickPanel.isVisible()) quickPanel.hide();
+}
+
+// 同一个快捷键再按一次就收起，和系统启动器的习惯一致。
+async function toggleQuickPanel() {
+  if (quickPanel && !quickPanel.isDestroyed() && quickPanel.isVisible() && quickPanel.isFocused()) {
+    hideQuickPanel();
+    return false;
+  }
+  return showQuickPanel();
+}
+
+// 启动时的注册由 bootstrap 发起；渲染进程可能比它先来问状态，所以这里等它跑完。
+let quickLaunchBoot = Promise.resolve();
+ipcMain.handle('get-quick-launch-status', async () => {
+  await quickLaunchBoot;
+  return quickLaunch.statusOf(shortcutController, await loadConfig());
+});
+
+// 设置面板的开关 / 改组合键。连点开关时两次请求必须排队：
+// 各自"注册 → 落盘"交错执行的话，磁盘上留下的和真正注册着的可能是不同的两次。
+let quickLaunchChain = Promise.resolve();
+ipcMain.handle('set-quick-launch', (e, patch) => {
+  const run = quickLaunchChain.then(() => setQuickLaunch(patch));
+  quickLaunchChain = run.then(() => {}, () => {});
+  return run;
+});
+async function setQuickLaunch(patch) {
+  try {
+    const status = await quickLaunch.applySettingsChange(
+      { controller: shortcutController, loadConfig, updateConfig, appError }, patch);
+    logger.info('[quick-launch] 设置已更新: ' + (status.enabled ? '开启 ' + status.shortcut : '关闭'));
+    // 刚打开就预先建好面板，第一次按快捷键不用等页面加载
+    if (status.registered) ensureQuickPanel();
+    else hideQuickPanel();
+    return status;
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    if (/E_SHORTCUT_TAKEN/.test(msg)) logger.error('[quick-launch] 全局快捷键注册失败（可能已被其他程序占用）: ' + msg);
+    throw err;
+  }
+}
+
+// 只认面板自己发来的。preload 白名单已经只把这两个方法给了面板，
+// 但 IPC 通道是全局的，主窗口的页面照样能 invoke 同名通道——复制到剪贴板
+// 加隐藏面板这两件事只对面板有意义，别的来源一律拒绝。
+function isQuickPanelSender(e) {
+  return !!(quickPanel && !quickPanel.isDestroyed() && e && e.sender === quickPanel.webContents);
+}
+
+// 复制成功的唯一出口：写剪贴板、收起面板。将来要在"复制成功"处加统计之类的，
+// 接在这里（rel 是被复制的那个文件），面板页面里不再有第二条复制成功的路径。
+ipcMain.handle('quick-launch-copy', (e, text, _rel) => {
+  if (!isQuickPanelSender(e) || typeof text !== 'string') throw appError('E_QUICK_LAUNCH_SENDER');
+  clipboard.writeText(text);
+  hideQuickPanel();
+  return true;
+});
+ipcMain.handle('quick-launch-hide', (e) => {
+  if (!isQuickPanelSender(e)) throw appError('E_QUICK_LAUNCH_SENDER');
+  hideQuickPanel();
+  return true;
+});
+
+// 退出前注销全部全局快捷键。进程退出时系统也会回收，但 Electron 文档要求在
+// will-quit 里显式注销；不注销的话退出流程卡住的那几秒里键还被占着，
+// 用户按下去既没有面板、别的程序也收不到。
+// 判 isReady：单实例锁没抢到时 app.quit() 发生在 ready 之前，这时调 globalShortcut 会抛。
+app.on('will-quit', () => {
+  if (!app.isReady()) return;
+  shortcutController.unregisterAll();
+  logger.info('[quick-launch] 已注销全部全局快捷键');
+});
+
+// 自检入口：PFM_SELFTEST_QUICK_LAUNCH。步骤和断言在 lib/quick-launch-selftest.js，
+// 这里只把它要用的东西传进去（和 selftest.init 同一个思路：模块不自己 require electron）。
+function runQuickLaunchSelfTest(targetWin) {
+  require('./lib/quick-launch-selftest').run({
+    app, screen, clipboard, ipcMain, fs, DATA_ROOT, CONFIG_PATH,
+    mainWin: targetWin,
+    backend: shortcutBackend,
+    showQuickPanel,
+    getQuickPanel: () => (quickPanel && !quickPanel.isDestroyed() ? quickPanel : null),
+    searchAll
+  });
 }
 
 // ---------- 单实例 ----------
@@ -2679,6 +2949,11 @@ app.whenReady().then(async () => {
     // await 就等于让窗口晚 8 秒出来。runUpdateCheck 内部自己兜住所有异常，
     // 所以这里既不会有未捕获 rejection，也不会把启动失败的锅甩给它。
     runUpdateCheck();
+    // 全局快捷键同样不挡窗口。get-quick-launch-status 会等 quickLaunchBoot，
+    // 渲染进程先来问也拿得到注册之后的真实状态。开着的话顺手把面板预先建好。
+    quickLaunchBoot = syncQuickLaunch().then(() => {
+      if (shortcutController.current()) ensureQuickPanel();
+    }).catch(e => logger.error('[quick-launch] 启动时注册失败: ' + (e && e.stack ? e.stack : e)));
   } catch (e) {
     logger.error('[bootstrap] 启动失败:', e && e.stack ? e.stack : e);
     // 至少让用户知道是哪里出了问题、数据目录在哪，而不是对着一个不存在的窗口。

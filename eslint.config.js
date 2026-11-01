@@ -142,7 +142,7 @@ module.exports = [
   },
   {
     // 主进程、测试、构建脚本：Node CommonJS
-    files: ['electron-main.js', 'preload.js', 'lib/**/*.js', 'tests/**/*.js', 'scripts/**/*.js', 'eslint.config.js'],
+    files: ['electron-main.js', 'preload.js', 'quick-launch-preload.js', 'lib/**/*.js', 'tests/**/*.js', 'scripts/**/*.js', 'eslint.config.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'commonjs',
@@ -155,6 +155,18 @@ module.exports = [
     // sourceType 必须是 script 而不是 module —— 这几个文件是靠 <script> 标签
     // 加载的，顶层的 const 就是全局声明，不是模块作用域。
     files: ['src/renderer.js'],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'script',
+      globals: { ...globals.browser, ...rendererGlobals }
+    },
+    rules: correctnessRules
+  },
+  {
+    // 快速搜索面板的页面脚本：和 renderer.js 一样是浏览器 + script，依赖同一批
+    // <script> 全局。单独一段而不是并进 renderer.js 那段：smoke 测试按
+    // files: ['src/renderer.js'] 这个字面量定位 renderer 的配置块。
+    files: ['src/quick-launch.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',

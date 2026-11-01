@@ -569,6 +569,8 @@ mark {
 }
 .settings-toggle input { cursor: pointer; }
 .settings-hint { font-size: 0.6875rem; color: var(--text-muted); margin: 8px 0 0; }
+/* 全局快捷键注册失败（被别的程序占用）时状态行变红：这条必须一眼看得出来 */
+.settings-hint.error { color: var(--danger-text); }
 .types-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
 .type-tag {
   display: flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 10px;
