@@ -533,24 +533,36 @@
       // 那次保存写进去的内容，所以第一句先在"当前内容"行，第二次保存后要跟着那份
       // 内容挪到快照行，不能留在当前内容上，也不能挂到装着更旧内容的那条快照上。
       //
-      // 等待一律用"轮询 IPC 直到条件成立"，不用 sleep：窗口在后台时 Chromium 把计时器
-      // 节流到约 1 秒一次，这一段原先按 sleep 写要 13 秒，把整个 UI 自检顶过了 120 秒上限
-      // （实测）。IPC 往返不受节流，条件一成立就往下走。
+      // getRoot 只返回路径，不是保存屏障；固定次数的 IPC 轮询可能在落盘前就耗尽。
+      // 按实际时间等待并显式报超时，避免拿到说明刚转进快照、当前说明还没写入的中间态。
+      // 自检执行期间已关闭后台计时器限速，所以短间隔不会被放大到秒级。
       {
         const noteRel = 'prompts/testing/' + newName + '.md';
         const api = window.promptFlowApi;
         const until = async (cond) => {
-          for (let i = 0; i < 300; i++) {
+          const deadline = Date.now() + 5000;
+          while (Date.now() < deadline) {
             if (await cond()) return true;
-            await api.getRoot();
+            await sleep(25);
           }
-          return false;
+          throw new Error('Version note UI condition timed out');
         };
         await openFile(noteRel);
         document.getElementById('btn-edit').click();
         const noteInput = document.getElementById('version-note-input');
         const editor = document.getElementById('editor');
         const ctrlKey = (target, key, shift) => target.dispatchEvent(new KeyboardEvent('keydown', { key, ctrlKey: true, shiftKey: !!shift, bubbles: true, cancelable: true }));
+        // 保留真实键盘事件入口，但等待保存的全部异步收尾，而不只等正文落盘。
+        const triggerSave = async (trigger) => {
+          const original = saveCurrent;
+          let pending;
+          saveCurrent = (...args) => { pending = original(...args); return pending; };
+          try {
+            trigger();
+            if (!pending) throw new Error('Save shortcut did not invoke saveCurrent');
+            if (!(await pending)) throw new Error('Save shortcut failed');
+          } finally { saveCurrent = original; }
+        };
         const historyRows = () => ({
           current: (document.querySelector('#version-list .version-item.current .vi-note') || {}).textContent || '',
           snapshots: Array.from(document.querySelectorAll('#version-list .version-item[data-file]'))
@@ -570,9 +582,9 @@
         editor.dispatchEvent(new Event('input', { bubbles: true }));
         noteInput.value = 'UI自检说明一';
         const v0 = (await api.listVersions(noteRel)).length;
-        ctrlKey(editor, 's');
-        await until(async () => noteInput.value === '' && !isDirty());
+        await triggerSave(() => ctrlKey(editor, 's'));
         check('Ctrl+S 带说明保存后清空说明框且留在编辑模式', noteInput.value === '' && state.editMode
+          && editor.offsetParent !== null && noteInput.offsetParent !== null
           && (await api.readFile(noteRel)).content.includes('UI 自检第一处改动'), 'note=' + noteInput.value);
 
         await openDrawer(v0 + 1);
@@ -593,14 +605,19 @@
         editor.value = editor.value + '\nUI 自检第二处改动';
         editor.dispatchEvent(new Event('input', { bubbles: true }));
         noteInput.value = 'UI自检说明二';
-        noteInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
-        await until(async () => noteInput.value === '' && !isDirty());
+        await triggerSave(() => noteInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })));
         await openDrawer(v1 + 1);
         rows = historyRows();
         check('说明框里 Enter 保存，上一句说明随它描述的内容进入历史',
-          rows.current === 'UI自检说明二' && rows.snapshots[0] === 'UI自检说明一' && !rows.snapshots.slice(1).includes('UI自检说明一'),
+          editor.offsetParent !== null && noteInput.offsetParent !== null
+          && rows.current === 'UI自检说明二' && rows.snapshots[0] === 'UI自检说明一' && !rows.snapshots.slice(1).includes('UI自检说明一'),
           JSON.stringify(rows));
         document.getElementById('btn-history-close').click();
+        editor.value += '\nUI 自检保存退出后的正文';
+        editor.dispatchEvent(new Event('input', { bubbles: true }));
+        await exitEditMode(true);
+        check('保存并退出编辑后预览显示最新正文', !state.editMode
+          && document.getElementById('preview').textContent.includes('UI 自检保存退出后的正文'));
         // 收尾前把编辑器复位到基准：上面任一次保存没成功的话编辑器还是脏的，
         // 点取消会弹原生确认框，UI 自检里没人去点，整段自检挂到超时，前面的
         // 失败信息也一条都输出不出来。

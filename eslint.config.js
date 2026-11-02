@@ -54,6 +54,8 @@ const selftestRendererGlobals = {
   state: 'readonly',          // renderer.js: const state = { ... }
   openFile: 'readonly',
   enterEditMode: 'readonly',
+  exitEditMode: 'readonly',
+  saveCurrent: 'writable',   // UI 自检包装真实保存入口，等待其全部异步收尾
   isDirty: 'readonly',
   describeError: 'readonly',
   renderMarkdown: 'readonly',

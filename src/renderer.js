@@ -1804,6 +1804,7 @@ async function exitEditMode(save, opts) {
   $('preview-wrap').classList.remove('hidden');
   $('editor-wrap').classList.add('hidden');
   $('btn-edit').textContent = t('edit');
+  renderContent();
   renderExternalNotice();
   return true;
 }
@@ -1905,7 +1906,8 @@ async function saveCurrent() {
     setMetaList(await api.getMetaList());
     renderBreadcrumb();
     renderMetaBar();
-    renderContent();
+    // Ctrl+S / 说明框 Enter 要留在编辑器；预览渲染会隐藏编辑区域并丢掉焦点。
+    if (!state.editMode) renderContent();
     renderTabs();
     // 只更新当前行在文件树中的显示标题，不整树重建（保留滚动/展开状态）
     document.querySelectorAll('.tree-row.file').forEach(r => {
