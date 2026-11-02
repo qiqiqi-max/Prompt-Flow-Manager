@@ -194,7 +194,7 @@ const FLOW_RUN = (function () {
   //   - 同一步既算完成又算跳过：以完成为准
   //   - 结算过但不在 history 里的步骤补到 history 前面（按拓扑顺序），回退仍然撤得到
   //   - current 已经结算过：清掉，按规则重新推进
-  //   - 剔完之后什么都不剩：当没有进度
+  //   - 剔完之后什么都不剩：当没有进度；合法的初始入口选择状态保留
   function restore(graph, raw) {
     if (!isObj(raw) || raw.v !== SCHEMA) return null;
     const valid = (id) => typeof id === 'string' && graph.byId.has(id);
@@ -209,7 +209,10 @@ const FLOW_RUN = (function () {
     let current = valid(raw.current) && !settled.has(raw.current) ? raw.current : null;
     const values = cleanValues(raw.values);
     const updatedAt = Number.isFinite(raw.updatedAt) ? raw.updatedAt : 0;
-    if (!current && !history.length && !Object.keys(values).length) return null;
+    // 多入口刚开始时没有 current，也还没结算任何步骤；这不是坏进度。
+    const fresh = raw.current === null && isObj(raw.values) && Object.keys(raw.values).length === 0
+      && ['done', 'skipped', 'history'].every(key => Array.isArray(raw[key]) && raw[key].length === 0);
+    if (!current && !history.length && !Object.keys(values).length && !fresh) return null;
     return advance(graph, { v: SCHEMA, current, done, skipped, history, values, updatedAt });
   }
 

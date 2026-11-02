@@ -384,6 +384,9 @@
   <!-- 工作流图分析（src/flow-graph.js）：分层、成环、不可达。
        双用模块，tests/flow-graph.test.js 里 require 同一份文件。 -->
   <script src="flow-graph.js"></script>
+  <!-- 工作流执行模式的状态机（src/flow-run.js）：双用模块，声明全局 FLOW_RUN，
+       依赖上面 flow-graph.js 的分析结果。tests/flow-run.test.js 里 require 同一份文件。 -->
+  <script src="flow-run.js"></script>
   <script src="composer-meta.js"></script>
   <!-- 规则导出目标清单与内容生成（src/rule-targets.js）。双用模块，
        tests/rule-export.test.js 里 require 同一份文件。 -->

@@ -150,8 +150,12 @@ jobs:
       # 工作流图语义：分层、成环、不可达步骤。自带反向对照。
       - name: 工作流图分析
         run: npm run test:flow-graph
+      # 工作流执行模式的状态机：候选下一步、汇合点、回退、坏进度修复。自带反向对照。
       - name: 工作流执行状态机
         run: npm run test:flow-run
+
+      - name: 工作流复制期间切换状态
+        run: npm run test:flow-run-copy
 
       # 只读 MCP server：协议往返、只读边界、返回上限。自带反向对照。
       - name: MCP server
@@ -210,6 +214,9 @@ jobs:
 
       - name: UI 点击自检 + 只读体检
         run: npm run test:ui
+
+      - name: 工作流执行跨进程恢复与功能集成
+        run: npm run test:flow-run-integration
 
       - name: 标签页恢复
         run: npm run test:tabs

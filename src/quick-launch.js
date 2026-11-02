@@ -236,7 +236,8 @@
       const label = document.createElement('label');
       label.htmlFor = 'ql-fill-' + i;
       label.textContent = it.hint || it.token;
-      const input = document.createElement('input');
+      const input = document.createElement('textarea');
+      input.rows = 2;
       input.id = 'ql-fill-' + i;
       input.dataset.token = it.token;
       input.placeholder = it.token;
@@ -245,10 +246,35 @@
       // 这里只读不写：两个窗口各自防抖写同一个 fillMemory 键会互相覆盖（各自读的是
       // 旧快照），而主窗口那份是有上限和淘汰顺序的，交给它一处维护。
       const memo = view.fillMemory[it.token];
-      input.value = typeof memo === 'string' ? memo : '';
+      input.value = typeof memo === 'string' && memo.trim() ? memo : (it.default != null ? it.default : '');
       row.appendChild(label);
+      const resize = () => {
+        input.style.height = 'auto';
+        input.style.height = Math.min(160, input.scrollHeight) + 'px';
+      };
+      input.addEventListener('input', resize);
+      if (it.options && it.options.length) {
+        const select = document.createElement('select');
+        select.setAttribute('aria-label', t('fillOptionsLabel') + ' · ' + (it.hint || it.token));
+        for (const [value, text] of [['', t('fillCustomOption')], ...it.options.map(value => [value, value])]) {
+          const option = document.createElement('option');
+          option.value = value;
+          option.textContent = text;
+          select.appendChild(option);
+        }
+        const sync = () => { select.value = it.options.includes(input.value) ? input.value : ''; };
+        sync();
+        select.addEventListener('change', () => {
+          if (select.value) input.value = select.value;
+          resize();
+          input.focus();
+        });
+        input.addEventListener('input', sync);
+        row.appendChild(select);
+      }
       row.appendChild(input);
       box.appendChild(row);
+      requestAnimationFrame(resize);
       return input;
     });
     const actions = document.createElement('div');
@@ -287,6 +313,7 @@
       inp.addEventListener('keydown', (e) => {
         if (e.isComposing || e.keyCode === 229) return;   // 输入法正在选词
         if (e.key !== 'Enter') return;
+        if (e.shiftKey && !e.ctrlKey && !e.metaKey) return;
         e.preventDefault();
         // Ctrl+Enter 提交，和主窗口填充面板一致。裸 Enter 跳下一项、最后一项落到
         // 「填好并复制」按钮上：这里通常有好几个空，拿裸 Enter 提交会填到一半就送出去。

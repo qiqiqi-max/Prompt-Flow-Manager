@@ -92,6 +92,10 @@ const BRANCH = () => graphOf([step('a', ['b', 'c']), step('b', ['d']), step('c',
   const r = FLOW_RUN.start(g);
   const st = FLOW_RUN.status(g, r);
   ok(r.current === null && st.mode === 'choose' && J(st.options) === '["a","b"]', '多个入口时开始就让用户选', J(st));
+  const restored = FLOW_RUN.restore(g, FLOW_RUN.serialize(r));
+  ok(restored && FLOW_RUN.status(g, restored).mode === 'choose'
+    && J(FLOW_RUN.status(g, restored).options) === '["a","b"]'
+    && FLOW_RUN.choose(g, restored, 'b').current === 'b', '多个入口的初始选择状态经过持久化后仍可继续', J(restored));
   // 全图成环：没有入口，退回第一步
   const gc = graphOf([step('a', ['b']), step('b', ['a'])]);
   ok(J(FLOW_RUN.entries(gc)) === '["a"]' && FLOW_RUN.start(gc).current === 'a', '全图成环时从书写顺序的第一步开始');

@@ -42,7 +42,7 @@ html, body { background: var(--bg); }
 .ql-fill-hint { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 8px; }
 .ql-fill-row { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; }
 .ql-fill-row label { font-size: 0.8125rem; color: var(--text); }
-.ql-fill-row input {
+.ql-fill-row textarea, .ql-fill-row select {
   padding: 5px 8px;
   font-size: 0.875rem;
   font-family: var(--font);
@@ -51,7 +51,8 @@ html, body { background: var(--bg); }
   border: 1px solid var(--border-strong);
   border-radius: 4px;
 }
-.ql-fill-row input:focus { outline: 2px solid var(--focus-ring); outline-offset: 0; }
+.ql-fill-row textarea { min-height: 3rem; max-height: 160px; resize: vertical; }
+.ql-fill-row textarea:focus, .ql-fill-row select:focus { outline: 2px solid var(--focus-ring); outline-offset: 0; }
 .ql-fill-actions { display: flex; justify-content: flex-end; gap: 8px; margin: 4px 0 10px; }
 .ql-fill-actions button {
   padding: 5px 12px;

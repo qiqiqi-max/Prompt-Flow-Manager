@@ -101,7 +101,9 @@ const state = {
   usage: { favorites: [], frequent: [] },
   usagePanelTab: null,        // 侧边栏收藏/常用区当前显示哪一栏；null = 自动挑有内容的那栏
   treeSelection: TREE_SELECTION.empty(), // 文件树多选：{ selected: Set<rel>, anchor }，见 syncTreeSelection
-  batchRunning: false         // 批量操作进行中（禁止重复触发，见 runBatch）
+  batchRunning: false,        // 批量操作进行中（禁止重复触发，见 runBatch）
+  flowRuns: {},               // 工作流执行进度：工作流 rel -> 执行记录（落盘格式见 src/flow-run.js 文件头）
+  flowRunActive: null         // 此刻处于执行模式的工作流 rel（不落盘，退出执行只收起面板）
 };
 
 // ===== 工具 =====
@@ -613,6 +615,7 @@ function onTreeFileClick(e, rel) {
 
 // ===== 打开文件 =====
 async function openFile(rel) {
+  flowRunRevision++;
   if (!rel) return;
   if (state.editMode && !(await leaveEditForSwitch())) return;
   try {
@@ -707,6 +710,7 @@ function renderTabs() {
 }
 
 async function switchTab(rel) {
+  flowRunRevision++;
   if (state.editMode && !(await leaveEditForSwitch())) return;
   const tab = state.tabs.find(t => t.rel === rel);
   if (!tab) return;
@@ -1241,7 +1245,10 @@ function renderWorkflowPreview() {
   const preview = $('preview');
   let flowHtml = '';
   if (steps.length) {
-    flowHtml = renderFlowDiagram(steps, meta.title);
+    // 执行面板的容器放在流程图上方，内容由 refreshFlowRun 单独填：
+    // 执行中的每次操作只重画面板和节点状态，不重建整个预览。
+    flowHtml = `<div id="flow-run" class="flow-run" role="region" aria-label="${escapeHtml(t('flowRunRegion'))}"></div>`
+      + renderFlowDiagram(steps, meta.title);
   }
   preview.innerHTML = flowHtml + renderMarkdown(body);
   enhanceCodeBlocks(preview);
@@ -1264,6 +1271,7 @@ function renderWorkflowPreview() {
       if (p) openFile(p);
     });
   });
+  if (steps.length) refreshFlowRun();
   // 布局后绘制连线（等一帧，确保 DOM 已布局出尺寸）
   requestAnimationFrame(drawFlowEdges);
   if (flowResizeObserver) {
@@ -1406,6 +1414,273 @@ function drawFlowEdges() {
     el.setAttribute('class', 'flow-edge');
     svg.appendChild(el);
   }
+}
+
+// ===== 工作流执行模式 =====
+//
+// 打开工作流时流程图上方有一块执行面板：开始执行后高亮当前步骤、给已完成的打勾，
+// 面板里显示当前步骤的提示词正文，「复制本步」复制完就记完成并前进。
+// 此前流程图只是一张可点的图，"走到哪一步了"全靠用户自己记。
+//
+// 规则全在 src/flow-run.js（裸 node 可测，见 test:flow-run）：入口、候选、汇合点、
+// 回退、坏进度修复。这里只做两件事——把状态画出来，把按钮接到状态机上。
+//
+// 进度存在 config.flowRuns[<工作流 rel>]，按工作流区分，重启后能继续。
+// state.flowRunActive 是"此刻是否处于执行模式"，不落盘：退出执行只是收起面板，
+// 进度留着，下次打开显示「继续执行」。
+
+// 界面状态发生变化就使旧复制请求失效；同一步骤 ID 在重新开始后也属于新的一次执行。
+let flowRunRevision = 0;
+const saveFlowRunsDebounced = debounce(async () => {
+  try { await api.setConfig({ flowRuns: state.flowRuns }); }
+  catch (e) { reportBackgroundSaveError(e); }
+}, 500);
+
+// 当前打开的工作流的执行上下文。graph 每次重新分析：工作流可能刚被编辑过，
+// 拿旧的图去校验进度，删掉的步骤会一直留在进度里。
+function flowRunContext() {
+  const rel = state.currentRel;
+  if (!rel || !rel.startsWith('workflows/')) return null;
+  const steps = parseWorkflowFlow(state.currentContent);
+  const graph = FLOW_GRAPH.analyze(steps);
+  const run = loadFlowRun(rel, graph);
+  return { rel, steps, graph, run, active: state.flowRunActive === rel && !!run };
+}
+
+// 读出一个工作流的进度并按当前的图修一遍。修过（删掉的步骤、坏字段）就写回，
+// 否则坏数据每次打开都要重修，而且永远留在 config 里。
+function loadFlowRun(rel, graph) {
+  const raw = state.flowRuns[rel];
+  if (raw === undefined) return null;
+  const run = FLOW_RUN.restore(graph, raw);
+  if (!run) setFlowRun(rel, null);
+  else if (!FLOW_RUN.equal(run, raw)) setFlowRun(rel, run);
+  return run;
+}
+
+function setFlowRun(rel, run) {
+  flowRunRevision++;
+  const next = { ...state.flowRuns };
+  if (run) next[rel] = FLOW_RUN.serialize(run);
+  else delete next[rel];
+  state.flowRuns = FLOW_RUN.cleanRuns(next);
+  saveFlowRunsDebounced();
+}
+
+// 工作流改名 / 移动时进度跟着走，删除时清掉（同 migrateLock）。主进程的 rename /
+// trash 也会改 config，这里同步内存里那份——不改的话下一次防抖写盘会把旧键写回去。
+function migrateFlowRun(oldRel, newRel) {
+  if (state.flowRunActive === oldRel) state.flowRunActive = newRel;
+  const next = newRel ? FLOW_RUN.renameRun(state.flowRuns, oldRel, newRel) : FLOW_RUN.dropRun(state.flowRuns, oldRel);
+  if (next === state.flowRuns) return;
+  flowRunRevision++;
+  state.flowRuns = next;
+  saveFlowRunsDebounced();
+}
+
+// 步骤为什么不能复制。null = 能复制。
+// 存在性查 state.metaByRel，理由同 auditFlowRefs：不为每次重画发一轮 IPC。
+function flowRunStepIssue(step) {
+  if (!step) return null;
+  if (!step.prompt) return t('flowNoPrompt');
+  if (!state.metaByRel.has(step.prompt)) return t('flowMissingFile', { path: step.prompt });
+  return null;
+}
+
+function flowStepLabel(graph, id) {
+  const s = graph.byId.get(id);
+  return (s && (s.label || s.id)) || id;
+}
+
+// 只重画面板和节点状态，不重建整个预览（流程图连线、正文都不动）。
+// focus 为 true 时把焦点放到面板第一个按钮上：点过的按钮被重画掉了，
+// 不接住的话焦点掉到 body，键盘用户要从界面开头重新 Tab 过来。
+function refreshFlowRun(focus) {
+  const box = $('flow-run');
+  if (!box) return;
+  const ctx = flowRunContext();
+  if (!ctx) { box.innerHTML = ''; return; }
+  decorateFlowRunNodes(ctx);
+  box.innerHTML = renderFlowRunPanel(ctx);
+  if (ctx.active && ctx.run.current) loadFlowRunBody(ctx);
+  // 节点加了标记后尺寸会变，连线要按新位置重画
+  requestAnimationFrame(drawFlowEdges);
+  if (focus) {
+    const first = box.querySelector('button:not([disabled])');
+    if (first) first.focus();
+  }
+}
+
+function flowRunButton(act, label, opts) {
+  const o = opts || {};
+  return `<button class="${o.primary ? 'btn-primary' : 'btn-secondary'}" data-run-act="${escapeHtml(act)}"`
+    + (o.id ? ` data-run-id="${escapeHtml(o.id)}"` : '') + (o.disabled ? ' disabled' : '')
+    + `>${escapeHtml(label)}</button>`;
+}
+
+function renderFlowRunPanel(ctx) {
+  const { graph, run } = ctx;
+  if (!ctx.active) {
+    if (!run) {
+      return `<div class="flow-run-bar">${flowRunButton('start', t('flowRunStart'), { primary: true })}`
+        + `<span class="flow-run-hint">${escapeHtml(t('flowRunStartHint'))}</span></div>`;
+    }
+    const st = FLOW_RUN.status(graph, run);
+    return `<div class="flow-run-bar">${flowRunButton('resume', t('flowRunResume'), { primary: true })}`
+      + flowRunButton('restart', t('flowRunRestart'))
+      + `<span class="flow-run-hint">${escapeHtml(t('flowRunProgress', { done: st.settled, total: st.total }))}</span></div>`;
+  }
+  const st = FLOW_RUN.status(graph, run);
+  const progress = `<span class="flow-run-progress">${escapeHtml(t('flowRunProgress', { done: st.settled, total: st.total }))}</span>`;
+  const back = flowRunButton('back', t('flowRunBack'), { disabled: !FLOW_RUN.canBack(run) });
+  const exit = flowRunButton('exit', t('flowRunExit'));
+  if (st.mode === 'step') {
+    const step = graph.byId.get(run.current);
+    const issue = flowRunStepIssue(step);
+    const warn = issue
+      ? `<div class="flow-run-warn" role="alert">⚠ ${escapeHtml(issue)}${escapeHtml(t('sep'))}${escapeHtml(t('flowRunBrokenHint'))}</div>`
+      : '';
+    // 按钮排在正文预览前面：最小窗口下预览区很矮，按钮放在正文后面就会被挤出视口。
+    return `<div class="flow-run-head">${progress}<span class="flow-run-title">${escapeHtml(t('flowRunCurrent', { label: flowStepLabel(graph, run.current) }))}</span></div>`
+      + warn
+      + `<div class="flow-run-actions">${flowRunButton('copy', t('flowRunCopy'), { primary: true, disabled: !!issue })}`
+      + flowRunButton('skip', t('flowRunSkip')) + back + exit + '</div>'
+      + (issue ? '' : `<div id="flow-run-body" class="flow-run-body markdown-body" aria-live="polite">${escapeHtml(t('flowRunLoading'))}</div>`);
+  }
+  if (st.mode === 'choose') {
+    const choices = st.options.map(id => flowRunButton('choose', flowStepLabel(graph, id), { id })).join('');
+    return `<div class="flow-run-head">${progress}<span class="flow-run-title">${escapeHtml(t('flowRunChoose'))}</span></div>`
+      + `<div class="flow-run-actions flow-run-choices">${choices}</div>`
+      + `<div class="flow-run-actions">${back}${exit}</div>`;
+  }
+  return `<div class="flow-run-head">${progress}<span class="flow-run-title">${escapeHtml(t('flowRunFinished'))}</span></div>`
+    + `<div class="flow-run-actions">${flowRunButton('restart', t('flowRunRestart'), { primary: true })}${back}${exit}</div>`;
+}
+
+// 节点上的执行状态。只在执行模式里画：退出之后流程图回到普通的样子。
+// 状态用 class + 一个带文字说明的小标记，不改节点自身的文字（只读体检按节点数核对流程图）。
+function decorateFlowRunNodes(ctx) {
+  const nodes = document.querySelectorAll('#preview .flow-node');
+  const run = ctx.active ? ctx.run : null;
+  const done = new Set(run ? run.done : []);
+  const skipped = new Set(run ? run.skipped : []);
+  nodes.forEach(n => {
+    const id = n.dataset.id;
+    const isCurrent = !!run && run.current === id;
+    n.classList.toggle('run-current', isCurrent);
+    n.classList.toggle('run-done', done.has(id));
+    n.classList.toggle('run-skipped', skipped.has(id));
+    if (isCurrent) n.setAttribute('aria-current', 'step');
+    else n.removeAttribute('aria-current');
+    const old = n.querySelector('.flow-run-mark');
+    if (old) old.remove();
+    // 键写全而不是拼接：npm test 按字面量核对 t() 用到的键都存在，拼出来的键它看不见。
+    const kind = isCurrent ? ['▶', 'flowRunNodeCurrent'] : done.has(id) ? ['✓', 'flowRunNodeDone']
+      : skipped.has(id) ? ['↷', 'flowRunNodeSkipped'] : null;
+    if (!kind) return;
+    const mark = document.createElement('span');
+    mark.className = 'flow-run-mark';
+    mark.textContent = kind[0];
+    mark.title = t(kind[1]);
+    mark.setAttribute('aria-label', t(kind[1]));
+    n.prepend(mark);
+  });
+}
+
+// 当前步骤正文的预览（展开 include，和「复制本步」复制出去的是同一份正文）。
+// 序号守卫同 refreshReferences：读文件期间用户可能已经前进或切走了。
+let flowRunBodySeq = 0;
+async function loadFlowRunBody(ctx) {
+  const seq = ++flowRunBodySeq;
+  const id = ctx.run.current;
+  const step = ctx.graph.byId.get(id);
+  let html;
+  try {
+    const res = await api.readFile(step.prompt);
+    const body = await expandIncludes(parseFrontmatter(res.content).body);
+    html = renderMarkdown(body);
+  } catch (e) {
+    html = `<div class="flow-run-warn">${escapeHtml(tErr('openFailed', e))}</div>`;
+  }
+  if (seq !== flowRunBodySeq || state.currentRel !== ctx.rel) return;
+  const el = $('flow-run-body');
+  const now = state.flowRuns[ctx.rel];
+  if (!el || !now || now.current !== id) return;
+  el.innerHTML = html;
+  enhanceCodeBlocks(el);
+}
+
+// 「复制本步」：复用主界面的 copyPromptBody（include 展开、填充面板、填充记忆都是同一套），
+// 面板预填本次执行会话里填过的值。复制成功才记完成并前进；取消时什么都不动。
+async function copyFlowRunStep() {
+  const ctx = flowRunContext();
+  if (!ctx || !ctx.active || !ctx.run.current) return;
+  const id = ctx.run.current;
+  const step = ctx.graph.byId.get(id);
+  const issue = flowRunStepIssue(step);
+  if (issue) { toast(issue, 'error'); return; }
+  const revision = ++flowRunRevision;
+  const content = state.currentContent;
+  const isCurrent = () => {
+    const now = flowRunContext();
+    return revision === flowRunRevision && state.currentContent === content
+      && now && now.active && now.rel === ctx.rel && now.run.current === id;
+  };
+  let res;
+  try {
+    const file = await api.readFile(step.prompt);
+    if (!isCurrent()) return;
+    res = await copyPromptBody(file.content, { prefill: ctx.run.values, isCurrent });
+  } catch (e) {
+    toast(tErr('openFailed', e), 'error');
+    return;
+  }
+  if (!res.copied) return;
+  recordUsage(step.prompt);
+  // 复制期间（填写面板开着时）文件不会被切走，但工作流可能刚被外部改过：
+  // 按此刻的状态重新取一遍，当前步骤已经不是这一步就不再推进。
+  const now = flowRunContext();
+  if (!isCurrent()) return;
+  const run = FLOW_RUN.complete(now.graph, FLOW_RUN.mergeValues(now.run, res.values));
+  setFlowRun(now.rel, run);
+  refreshFlowRun(true);
+}
+
+async function flowRunAction(act, id) {
+  const ctx = flowRunContext();
+  if (!ctx) return;
+  const { rel, graph } = ctx;
+  if (act !== 'copy') flowRunRevision++;
+  if (act === 'start' || act === 'restart') {
+    setFlowRun(rel, FLOW_RUN.start(graph));
+    state.flowRunActive = rel;
+  } else if (act === 'resume') {
+    if (!ctx.run) setFlowRun(rel, FLOW_RUN.start(graph));
+    state.flowRunActive = rel;
+  } else if (act === 'exit') {
+    state.flowRunActive = null;
+  } else if (!ctx.active) {
+    return;
+  } else if (act === 'copy') {
+    await copyFlowRunStep();
+    return;
+  } else if (act === 'skip') {
+    setFlowRun(rel, FLOW_RUN.skip(graph, ctx.run));
+  } else if (act === 'back') {
+    setFlowRun(rel, FLOW_RUN.back(graph, ctx.run));
+  } else if (act === 'choose') {
+    setFlowRun(rel, FLOW_RUN.choose(graph, ctx.run, id));
+  }
+  refreshFlowRun(true);
+}
+
+// 面板按钮的点击走委托：面板每次操作都整块重画，逐个绑定等于每次重画都要重挂一遍。
+{
+  $('preview').addEventListener('click', (e) => {
+    const btn = e.target.closest && e.target.closest('#flow-run button[data-run-act]');
+    if (!btn || btn.disabled) return;
+    flowRunAction(btn.dataset.runAct, btn.dataset.runId);
+  });
 }
 
 // ===== 编辑模式 =====
@@ -1827,68 +2102,90 @@ async function writeClipboard(text) {
   }
 }
 
-// 复制正文。正文里有 [占位符] 就先弹面板让用户填。
+// {{include:}} 的读取器。复制和执行面板的正文预览共用：读不到的片段交给
+// INCLUDES 按它自己的规则标出来，这里不抛。
+async function readIncludeContent(r) {
+  try {
+    const res = await api.readFile(r);
+    return res ? res.content : null;
+  } catch {
+    return null;
+  }
+}
+
+async function expandIncludes(body) {
+  return INCLUDES.hasInclude(body) ? INCLUDES.resolveAsync(body, readIncludeContent) : body;
+}
+
+// 复制一份提示词正文：展开 include → 有 [占位符] 就先弹面板让用户填 → 写剪贴板 → 提示。
 //
 // templates/prompt-template.md 从一开始就用 [提示文字] 标出"这里要换成你的内容"，
-// 但复制一直是原样进剪贴板，用户粘到对话框里再手改一遍。这个面板把那一步
+// 但复制一直是原样进剪贴板，用户粘到对话框里再手改一遍。填写面板把那一步
 // 挪到复制之前——约定本来就在，只是一直没有实现它的代码。
+//
+// 主界面的「复制」和工作流执行模式的「复制本步」走的都是这一个函数，
+// 不各写一份：include 展开、就地填写优先、面板预填、填充记忆这几条规则
+// 只要两边分叉一次，用户就会遇到"同一个提示词在两处复制出来不一样"。
 //
 // 必须先 parseFrontmatter 再扫：PLACEHOLDERS 不认识 yaml，把整个文件喂进去的话
 // `tags: [编码, 实现]` 看起来就是个占位符，填进去会把 frontmatter 改坏
 // （见 src/placeholders.js 文件头）。
 //
-// 返回是否真的复制了。调用点靠这个返回值决定要不要给"已复制"的反馈——
-// 取消也闪一下"已复制"的话，那句反馈就是假的。
+// 参数：
+//   content  文件原文（含 frontmatter）
+//   inline   预览区就地填过的值（token -> 值）。有任何一个填过就不弹面板
+//   prefill  面板的预填值，优先于 fillMemory（执行模式传本次会话填过的值）
+//
+// 返回 { copied, values }。copied 是剪贴板真的被写了：取消时为 false，
+// 调用点靠它决定要不要给"已复制"的反馈、执行模式靠它决定要不要前进。
+// values 是这次实际用来填的值（没有占位符或直接复制原文时是 {}）。
+// 成功只有函数末尾一个出口，"复制成功"之后要追加的动作接在那里即可。
+async function copyPromptBody(content, opts) {
+  const o = opts || {};
+  const body = await expandIncludes(parseFrontmatter(content).body);
+  const canceled = () => o.isCurrent && !o.isCurrent();
+  if (canceled()) return { copied: false, values: {} };
+  const tokens = PLACEHOLDERS.extract(body);
+  let text = body;
+  let values = {};
+  let message = t('copySuccess');
+  // 没有占位符就保持原来的一步到位。为此多弹一个空面板只是多一次点击。
+  if (tokens.length) {
+    // 预览区已经点着填过的，直接用填好的结果，不再弹面板：用户刚刚就在正文里
+    // 逐处填过，再让他面对一张列着同一批 token 的表，等于把同一件事做两遍。
+    // 想改的话回预览里点那个 chip（点上就是改）。
+    const inline = o.inline || {};
+    const inlineCount = tokens.filter(it => String(inline[it.token] == null ? '' : inline[it.token]).trim()).length;
+    if (inlineCount) {
+      const merged = PLACEHOLDERS.withDefaults(body, inline);
+      text = PLACEHOLDERS.fill(body, merged);
+      values = merged;
+      const count = tokens.filter(it => String(merged[it.token] == null ? '' : merged[it.token]).trim()).length;
+      const missing = tokens.length - count;
+      message = missing ? t('fillDonePartial', { count, missing }) : t('fillDone', { count });
+    } else {
+      const picked = await promptFillPlaceholders(tokens, { prefill: o.prefill });
+      if (picked === null || canceled()) return { copied: false, values: {} };   // 取消：不碰剪贴板
+      text = PLACEHOLDERS.fill(body, picked);
+      values = picked;
+      rememberFillValues(picked);
+      const count = tokens.filter(it => String(picked[it.token] == null ? '' : picked[it.token]).trim()).length;
+      if (count) message = t('fillDone', { count });
+    }
+  }
+  await writeClipboard(text);
+  toast(message, 'success');
+  return { copied: true, values };
+}
+
+// 主界面的「复制」：复制当前打开的文件。返回是否真的复制了。
 async function copyContent() {
   if (!state.currentRel) return false;
-  // 记账用的 rel 在第一个 await 之前取：填占位符面板开着的时候 currentRel 理论上不会变，
-  // 但统计记到哪个文件上不该依赖这一点。
   const rel = state.currentRel;
-  let { body } = parseFrontmatter(state.currentContent);
-  if (INCLUDES.hasInclude(body)) {
-    body = await INCLUDES.resolveAsync(body, async (r) => {
-      try {
-        const res = await api.readFile(r);
-        return res ? res.content : null;
-      } catch {
-        return null;
-      }
-    });
-  }
-  const tokens = PLACEHOLDERS.extract(body);
-  // 没有占位符就保持原来的一步到位。为此多弹一个空面板只是多一次点击。
-  if (!tokens.length) {
-    await writeClipboard(body);
-    recordUsage(rel);
-    toast(t('copySuccess'), 'success');
-    return true;
-  }
-  // 预览区已经点着填过的，直接用填好的结果，不再弹面板：用户刚刚就在正文里
-  // 逐处填过，再让他面对一张列着同一批 token 的表，等于把同一件事做两遍。
-  // 想改的话回预览里点那个 chip（点上就是改）。
-  //
-  // 没点过的 chip 若有默认值，按默认值填（README「文件格式」写明的行为）：
-  // 预览里没填的默认值 chip 显示的就是默认值，复制出去的应当和看到的一致。
   const inline = state.previewFills[state.currentRel] || {};
-  const inlineCount = tokens.filter(it => String(inline[it.token] == null ? '' : inline[it.token]).trim()).length;
-  if (inlineCount) {
-    const merged = PLACEHOLDERS.withDefaults(body, inline);
-    await writeClipboard(PLACEHOLDERS.fill(body, merged));
-    recordUsage(rel);
-    const count = tokens.filter(it => String(merged[it.token] == null ? '' : merged[it.token]).trim()).length;
-    const missing = tokens.length - count;
-    toast(missing ? t('fillDonePartial', { count, missing }) : t('fillDone', { count }), 'success');
-    return true;
-  }
-  const values = await promptFillPlaceholders(tokens);
-  if (values === null) return false;   // 取消：不碰剪贴板
-  const filled = PLACEHOLDERS.fill(body, values);
-  rememberFillValues(values);
-  const count = tokens.filter(it => String(values[it.token] == null ? '' : values[it.token]).trim()).length;
-  await writeClipboard(filled);
-  recordUsage(rel);
-  toast(count ? t('fillDone', { count }) : t('copySuccess'), 'success');
-  return true;
+  const res = await copyPromptBody(state.currentContent, { inline });
+  if (res.copied) recordUsage(rel);
+  return res.copied;
 }
 
 // 占位符填充面板。每个占位符一行输入框，标签是方括号里的文字。
@@ -1911,11 +2208,15 @@ async function copyContent() {
 // token 原文就变了，旧记忆自然不再命中，不会出现"改了默认值却一直预填旧值"。
 // 预填进框里的默认值被用户清空的话，就按"留空原样保留"处理 —— 面板上看得见的
 // 就是会生效的，不在背后再套一次默认值。
-function promptFillPlaceholders(tokens) {
+// 本次工作流执行填过的值优先于全局记忆和默认值。
+function promptFillPlaceholders(tokens, opts) {
+  const prefill = (opts && opts.prefill) || {};
   return new Promise(resolve => {
     const menu = $('ctx-menu');
-    const initial = tokens.map(it =>
-      (state.fillMemory && state.fillMemory[it.token]) || (it.default != null ? it.default : ''));
+    const initial = tokens.map(it => {
+      const session = typeof prefill[it.token] === 'string' && prefill[it.token].trim() ? prefill[it.token] : '';
+      return session || (state.fillMemory && state.fillMemory[it.token]) || (it.default != null ? it.default : '');
+    });
     const rows = tokens.map((it, i) => {
       // hint 为空（`[]` 之类）时退回显示 token 本身，
       // 否则标签是一片空白，用户不知道这一行对应正文里的哪处。
@@ -2515,6 +2816,7 @@ async function renameCurrent() {
   try {
     await api.rename(oldRel, newRel);
     migrateLock(oldRel, newRel);
+    migrateFlowRun(oldRel, newRel);
     // 同步标签
     const tab = state.tabs.find(t => t.rel === oldRel);
     if (tab) tab.rel = newRel;
@@ -2553,6 +2855,7 @@ async function deleteCurrent() {
     const idx = state.tabs.findIndex(t => t.rel === delRel);
     if (idx !== -1) state.tabs.splice(idx, 1);
     state.lockedFiles.delete(delRel);
+    migrateFlowRun(delRel, null);
     const next = state.tabs[idx] || state.tabs[idx - 1] || null;
     if (next) {
       await switchTab(next.rel);
@@ -2613,6 +2916,7 @@ if (newRel === srcRel) { toast(t('alreadyInDir'), 'error'); return; }
   try {
     await api.rename(srcRel, newRel);
     migrateLock(srcRel, newRel);
+    migrateFlowRun(srcRel, newRel);
     // 迁移标签
     const tab = state.tabs.find(t => t.rel === srcRel);
     if (tab) tab.rel = newRel;
@@ -2945,7 +3249,10 @@ async function batchTagsSelected() {
 // 当前标签被删时切到相邻的那个，没有了就回到空状态。
 async function closeTrashedTabs(removed) {
   const set = new Set(removed);
-  for (const rel of removed) state.lockedFiles.delete(rel);
+  for (const rel of removed) {
+    state.lockedFiles.delete(rel);
+    migrateFlowRun(rel, null);
+  }
   const activeIdx = state.tabs.findIndex(tb => tb.rel === state.activeTab);
   const activeRemoved = state.activeTab != null && set.has(state.activeTab);
   let next = null;
@@ -3883,6 +4190,9 @@ async function init() {
   if (state.config.fillMemory && typeof state.config.fillMemory === 'object' && !Array.isArray(state.config.fillMemory)) {
     state.fillMemory = state.config.fillMemory;
   }
+  // 执行进度同理要卡类型：cleanRuns 只留 workflows/ 下的键和对象值，步骤级的修复
+  // 留到打开那个工作流时按当时的图做（见 loadFlowRun）。
+  state.flowRuns = FLOW_RUN.cleanRuns(state.config.flowRuns);
   // 加载标签页（config 里只存 rel，正文等首次切过去时再读）。
   // loaded:false 是关键标记——openFile/switchTab 靠它判断要不要补读，
   // 少了它正文会一直是空串，保存时反而把文件清空。
@@ -3909,6 +4219,15 @@ async function init() {
   // 恢复上次打开的标签（过滤掉已不存在的文件）
   const allRels = new Set(state.metaList.map(m => m.rel));
   state.tabs = state.tabs.filter(t => allRels.has(t.rel));
+  // 工作流在应用外被删 / 改名时，它的进度没人清：按库里还在的工作流过滤一遍。
+  // 和 config 里原来的键数比，cleanRuns 丢掉的坏键也算改动，一起写回。
+  {
+    const kept = {};
+    for (const k of Object.keys(state.flowRuns)) if (allRels.has(k)) kept[k] = state.flowRuns[k];
+    const rawCount = state.config.flowRuns && typeof state.config.flowRuns === 'object' ? Object.keys(state.config.flowRuns).length : 0;
+    state.flowRuns = kept;
+    if (Object.keys(kept).length !== rawCount) saveFlowRunsDebounced();
+  }
   if (state.activeTab && !allRels.has(state.activeTab)) state.activeTab = null;
   if (state.tabs.length) {
     const target = state.activeTab && allRels.has(state.activeTab) ? state.activeTab : state.tabs[0].rel;
@@ -4150,6 +4469,7 @@ async function init() {
   // 外部改动。挂在首次 refreshTree 和恢复标签之后：在那之前的改动，
   // 首次读树、读正文时已经是最新的了。
   api.onLibraryChanged((info) => { onLibraryChanged(info); });
+  api.onUsageChanged(() => { refreshUsage(); });
 
   $('btn-empty-trash').onclick = async () => {
     if (await confirmDialog(t('emptyTrashConfirm'))) {
@@ -4278,7 +4598,8 @@ window.__pfmFlushPending = async () => {
     saveRecentDebounced,
     saveLockedDebounced,
     saveSidebarWidthDebounced,
-    saveFillMemoryDebounced
+    saveFillMemoryDebounced,
+    saveFlowRunsDebounced
   ];
   // allSettled 而不是 all：单个失败（磁盘满/配置被占）不该让其余四个不落盘。
   await Promise.allSettled(all.map(d => d.flush()));

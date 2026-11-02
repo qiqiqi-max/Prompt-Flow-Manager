@@ -668,11 +668,38 @@ section('预览区占位符');
   assert(/state\.previewFills\[/.test(rendererSrc), '就地填写的值有独立存放处');
   assert(/const inline = state\.previewFills\[state\.currentRel\] \|\| \{\};/.test(rendererSrc),
     'copyContent 读就地填写的值');
-  // 就地填过的值先并上默认值（没点过的默认值 chip 按默认值复制），再填进正文。
-  // 两步要锚在同一个 merged 上：只查 withDefaults 出现过的话，算完不用、
-  // 照旧 fill(body, inline) 也能通过。
-  assert(/if \(inlineCount\) \{\s*const merged = PLACEHOLDERS\.withDefaults\(body, inline\);\s*await writeClipboard\(PLACEHOLDERS\.fill\(body, merged\)\)/.test(rendererSrc),
-    '填过就不再弹面板，直接用填好的正文（没填的按默认值）');
+  // 复制逻辑抽成了 copyPromptBody（主界面和执行模式共用），写剪贴板只在函数末尾一处。
+  // 所以这里查的是"填过的分支用填好的正文、且不进面板分支"，而不是紧跟着的 writeClipboard。
+  const copyFn = (rendererSrc.match(/async function copyPromptBody\(content, opts\) \{([\s\S]*?)\n\}/) || [])[1] || '';
+  assert(/if \(inlineCount\) \{\s*const merged = PLACEHOLDERS\.withDefaults\(body, inline\);\s*text = PLACEHOLDERS\.fill\(body, merged\);[\s\S]*?\} else \{[\s\S]*?promptFillPlaceholders\(/.test(copyFn),
+    '填过就不再弹面板，直接用填好的正文');
+  assert(/await writeClipboard\(text\);\s*toast\(message, 'success'\);\s*return \{ copied: true, values \};\s*$/.test(copyFn),
+    '复制成功只有函数末尾一个出口');
+  assert((copyFn.match(/writeClipboard\(/g) || []).length === 1, 'copyPromptBody 里只写一次剪贴板');
+}
+
+section('工作流执行模式');
+// 执行模式的「复制本步」必须复用主界面那一份复制逻辑，不能另写一份。
+// 行为由 test:ui 覆盖，这里卡住接线：两个调用点都走 copyPromptBody。
+{
+  const fnBody = (name) => (rendererSrc.match(new RegExp('async function ' + name + '\\([^)]*\\) \\{([\\s\\S]*?)\\n\\}')) || [])[1] || '';
+  assert(/copyPromptBody\(state\.currentContent, \{ inline \}\)/.test(fnBody('copyContent')), '主界面复制走 copyPromptBody');
+  assert(/copyPromptBody\(file\.content, \{ prefill: ctx\.run\.values, isCurrent \}\)/.test(fnBody('copyFlowRunStep')),
+    '复制本步走 copyPromptBody，并把本次会话填过的值作为预填');
+  assert(/if \(!res\.copied\) return;[\s\S]*FLOW_RUN\.complete\(/.test(fnBody('copyFlowRunStep')),
+    '复制本步取消时不前进，复制成功才记完成');
+  // 两个入口自己都不碰剪贴板、不自己展开 include / 填占位符：碰了就是第二份复制逻辑。
+  const own = ['copyContent', 'copyFlowRunStep'].filter(n => /writeClipboard\(|navigator\.clipboard|PLACEHOLDERS\.fill\(|INCLUDES\.resolveAsync\(/.test(fnBody(n)));
+  assert(fnBody('copyContent') && fnBody('copyFlowRunStep') && own.length === 0,
+    '两个复制入口都没有自己的一份复制逻辑' + (own.length ? '：' + own.join(', ') : ''));
+  assert(/'flowRuns'/.test(mainSrc.slice(mainSrc.indexOf('const KNOWN_CONFIG_KEYS'), mainSrc.indexOf('const KNOWN_CONFIG_KEYS') + 400)),
+    'flowRuns 在主进程的已知配置键里');
+  const flushBody = (rendererSrc.match(/window\.__pfmFlushPending = async \(\) => \{([\s\S]*?)\n\};/) || [])[1] || '';
+  assert(/saveFlowRunsDebounced/.test(flushBody), '关窗前会把执行进度的防抖写入落盘');
+  const indexHtml = fs.readFileSync(path.join(root, 'src/index.html'), 'utf8');
+  assert(indexHtml.indexOf('src="flow-graph.js"') !== -1 && indexHtml.indexOf('src="flow-graph.js"') < indexHtml.indexOf('src="flow-run.js"')
+    && indexHtml.indexOf('src="flow-run.js"') < indexHtml.indexOf('src="renderer.js"'),
+  'flow-run.js 在 flow-graph.js 之后、renderer.js 之前加载');
 }
 
 section('原子写的 durability');
@@ -764,18 +791,16 @@ section('使用统计与收藏');
   for (const k of ['recordUsage', 'getUsage', 'setFavorite']) {
     assert(new RegExp('\\b' + k + ': ').test(preloadSrc), 'preload 暴露 ' + k);
   }
-  // copyContent 里每次写剪贴板之后紧跟着记账，且记账只出现在这些位置——
-  // 取消填充面板（return false）那条路上不能有。
+  // 剪贴板写入收拢在 copyPromptBody；两个入口只在 copied 为真时给对应提示词记账。
+  // 真实复制、取消及次数由 test:flow-run-integration 验证。
   {
     const at = rendererSrc.indexOf('async function copyContent()');
     const end = at > 0 ? rendererSrc.indexOf('\n}\n', at) : -1;
     const body = end > at ? rendererSrc.slice(at, end) : '';
-    const writes = (body.match(/await writeClipboard\([^;]*\);/g) || []).length;
-    const paired = (body.match(/await writeClipboard\([^;]*\);\s*recordUsage\(rel\);/g) || []).length;
     const calls = (body.match(/recordUsage\(/g) || []).length;
-    assert(writes >= 3 && paired === writes && calls === writes,
-      'copyContent 每次复制成功都记一次使用，别处不记（' + paired + '/' + writes + '，共 ' + calls + ' 处）');
-    assert(/if \(values === null\) return false;/.test(body), '复制取消仍然返回 false（不记账的那条路还在）');
+    assert(calls === 1 && /if \(res\.copied\) recordUsage\(rel\);/.test(body),
+      'copyContent 只在复制成功后记一次使用');
+    assert(/return res\.copied;/.test(body), '复制取消仍然返回 false（透传复制结果）');
   }
 }
 

@@ -162,7 +162,8 @@ check('降级提示文案走 i18n（t(\'renderDegraded\')）',
 // 软砖循环：init() 里恢复标签的自动打开必须被隔离，
 // 单个文件出问题不能让整个 init() 中断（否则工具栏都绑不上，界面全废）。
 check('init() 恢复标签时自动打开被 try 包住（软砖循环已隔离）',
-  /恢复上次打开的标签[\s\S]{0,900}?try\s*\{[\s\S]{0,300}?await openFile\(target\)/.test(rendererSrc));
+  /try\s*\{\s*await openFile\(target\);\s*\}\s*catch\s*\(/.test(
+    rendererSrc.slice(rendererSrc.indexOf('async function init()'))));
 
 let passed = true;
 for (const [name, ok, detail] of results) {
