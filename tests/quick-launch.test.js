@@ -34,7 +34,7 @@ function makeDataDir() {
   fs.writeFileSync(path.join(testing, 'ql-plain.md'),
     '---\ntitle: QL Plain\nstage: testing\ntags: [ql]\n---\nQLPLAIN-BODY-7731\nsecond line\n', 'utf8');
   fs.writeFileSync(path.join(testing, 'ql-fill.md'),
-    '---\ntitle: QL Fill\nstage: testing\ntags: [ql]\n---\nQLFILL 目标：[QL目标]\n备注：[QL备注]\n{{include: prompts/snippets/ql-snippet.md}}\n', 'utf8');
+    '---\ntitle: QL Fill\nstage: testing\ntags: [ql]\n---\nQLFILL 目标：[QL目标]\n备注：[QL备注]\n语言：[QL语言=Go|Python|Go]\n{{include: prompts/snippets/ql-snippet.md}}\n', 'utf8');
   fs.writeFileSync(path.join(snippets, 'ql-snippet.md'),
     '---\ntitle: QL Snippet\n---\nSNIPPET-INCLUDED-5521\n', 'utf8');
   // 英文 + 深色：面板要跟着这两项走。fillMemory 是主窗口记住的填充值，面板要拿来预填。
@@ -104,10 +104,17 @@ const FULL_MUST = [
   /PASS 搜索结果乱序返回时，旧查询的结果不会盖掉新查询/,
   /PASS Enter 把选中的提示词正文（不含 frontmatter）写进剪贴板/,
   /PASS 复制成功后面板隐藏/,
+  /PASS 快速面板复制成功只记一次使用/,
+  /PASS 快速面板复制后主窗口常用列表自动更新/,
+  /PASS 快速面板取消填写不增加使用次数/,
   /PASS 隐藏而不是销毁：再次呼出复用同一个面板实例/,
   /PASS ↑↓ 移动选中项，到头回绕/,
   /PASS 有占位符时在面板内弹出填空表单，先不复制/,
   /PASS 填空表单预填了主窗口记住的值/,
+  /PASS 快速面板预填占位符默认值/,
+  /PASS 快速面板选择选项会填入对应的值/,
+  /PASS 快速面板 Shift\+Enter 保留换行行为且不提交/,
+  /PASS 快速面板复制保留多行填写内容/,
   /PASS Ctrl\+Enter 填好后复制：\{\{include:\}\} 已展开、占位符已替换/,
   /PASS Esc 收起面板/,
   /PASS 填空表单里按 Esc 也能收起/,

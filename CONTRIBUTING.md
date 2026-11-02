@@ -182,6 +182,8 @@ npm run test:config-file # config.json 损坏时改名留档而不是被默认�
 npm run test:workflow-index # 引用索引：谁在引用这个提示词、悬空引用体检（裸 node，自带一组反向对照）
 npm run test:flow-graph # 工作流图：分层、成环、不可达步骤（裸 node，自带一组反向对照）
 npm run test:flow-run    # 工作流执行：分支选择、汇合点结算、进度持久化（裸 node，自带一组反向对照）
+npm run test:flow-run-copy # 读盘或填写期间切换执行状态，旧请求不复制、不推进（裸 node）
+npm run test:flow-run-integration # 两次真实启动：执行进度恢复、占位符默认值、复制统计与批量删除
 npm run test:mcp          # 只读 MCP server：协议往返、只读边界、返回上限、prompts 斜杠命令（裸 node，自带反向对照）
 npm run test:cache-budget # 正文缓存的两道闸与占用记账（裸 node，自带一组反向对照）
 npm run test:cli          # 命令行入口：只读子命令、退出码、路径边界（裸 node，自带一组反向对照）

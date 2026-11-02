@@ -1,6 +1,10 @@
 (async () => {
     const out = [];
-    const check = (name, ok, detail) => out.push([name, !!ok, detail || '']);
+    const check = (name, ok, detail) => {
+      out.push([name, !!ok, detail || '']);
+      // 即时打印进度，某一步等待弹层卡住时可以定位最后跑到哪里。
+      console.log('[selftest:ui:progress] ' + name + ': ' + (ok ? 'ok' : 'failed'));
+    };
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     const menu = () => document.getElementById('ctx-menu');
     // 弹层"可见"的判定：没有 hidden、有尺寸、且矩形落在视口内。
@@ -529,24 +533,36 @@
       // 那次保存写进去的内容，所以第一句先在"当前内容"行，第二次保存后要跟着那份
       // 内容挪到快照行，不能留在当前内容上，也不能挂到装着更旧内容的那条快照上。
       //
-      // 等待一律用"轮询 IPC 直到条件成立"，不用 sleep：窗口在后台时 Chromium 把计时器
-      // 节流到约 1 秒一次，这一段原先按 sleep 写要 13 秒，把整个 UI 自检顶过了 120 秒上限
-      // （实测）。IPC 往返不受节流，条件一成立就往下走。
+      // getRoot 只返回路径，不是保存屏障；固定次数的 IPC 轮询可能在落盘前就耗尽。
+      // 按实际时间等待并显式报超时，避免拿到说明刚转进快照、当前说明还没写入的中间态。
+      // 自检执行期间已关闭后台计时器限速，所以短间隔不会被放大到秒级。
       {
         const noteRel = 'prompts/testing/' + newName + '.md';
         const api = window.promptFlowApi;
         const until = async (cond) => {
-          for (let i = 0; i < 300; i++) {
+          const deadline = Date.now() + 5000;
+          while (Date.now() < deadline) {
             if (await cond()) return true;
-            await api.getRoot();
+            await sleep(25);
           }
-          return false;
+          throw new Error('Version note UI condition timed out');
         };
         await openFile(noteRel);
         document.getElementById('btn-edit').click();
         const noteInput = document.getElementById('version-note-input');
         const editor = document.getElementById('editor');
         const ctrlKey = (target, key, shift) => target.dispatchEvent(new KeyboardEvent('keydown', { key, ctrlKey: true, shiftKey: !!shift, bubbles: true, cancelable: true }));
+        // 保留真实键盘事件入口，但等待保存的全部异步收尾，而不只等正文落盘。
+        const triggerSave = async (trigger) => {
+          const original = saveCurrent;
+          let pending;
+          saveCurrent = (...args) => { pending = original(...args); return pending; };
+          try {
+            trigger();
+            if (!pending) throw new Error('Save shortcut did not invoke saveCurrent');
+            if (!(await pending)) throw new Error('Save shortcut failed');
+          } finally { saveCurrent = original; }
+        };
         const historyRows = () => ({
           current: (document.querySelector('#version-list .version-item.current .vi-note') || {}).textContent || '',
           snapshots: Array.from(document.querySelectorAll('#version-list .version-item[data-file]'))
@@ -566,9 +582,9 @@
         editor.dispatchEvent(new Event('input', { bubbles: true }));
         noteInput.value = 'UI自检说明一';
         const v0 = (await api.listVersions(noteRel)).length;
-        ctrlKey(editor, 's');
-        await until(async () => noteInput.value === '' && !isDirty());
+        await triggerSave(() => ctrlKey(editor, 's'));
         check('Ctrl+S 带说明保存后清空说明框且留在编辑模式', noteInput.value === '' && state.editMode
+          && editor.offsetParent !== null && noteInput.offsetParent !== null
           && (await api.readFile(noteRel)).content.includes('UI 自检第一处改动'), 'note=' + noteInput.value);
 
         await openDrawer(v0 + 1);
@@ -589,14 +605,19 @@
         editor.value = editor.value + '\nUI 自检第二处改动';
         editor.dispatchEvent(new Event('input', { bubbles: true }));
         noteInput.value = 'UI自检说明二';
-        noteInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
-        await until(async () => noteInput.value === '' && !isDirty());
+        await triggerSave(() => noteInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })));
         await openDrawer(v1 + 1);
         rows = historyRows();
         check('说明框里 Enter 保存，上一句说明随它描述的内容进入历史',
-          rows.current === 'UI自检说明二' && rows.snapshots[0] === 'UI自检说明一' && !rows.snapshots.slice(1).includes('UI自检说明一'),
+          editor.offsetParent !== null && noteInput.offsetParent !== null
+          && rows.current === 'UI自检说明二' && rows.snapshots[0] === 'UI自检说明一' && !rows.snapshots.slice(1).includes('UI自检说明一'),
           JSON.stringify(rows));
         document.getElementById('btn-history-close').click();
+        editor.value += '\nUI 自检保存退出后的正文';
+        editor.dispatchEvent(new Event('input', { bubbles: true }));
+        await exitEditMode(true);
+        check('保存并退出编辑后预览显示最新正文', !state.editMode
+          && document.getElementById('preview').textContent.includes('UI 自检保存退出后的正文'));
         // 收尾前把编辑器复位到基准：上面任一次保存没成功的话编辑器还是脏的，
         // 点取消会弹原生确认框，UI 自检里没人去点，整段自检挂到超时，前面的
         // 失败信息也一条都输出不出来。
@@ -941,6 +962,131 @@
         state.lockedFiles = new Set();
         clearTreeSelection();
       }
+
+      // ---- 工作流执行模式 ----
+      // 关键路径：开始 → 复制本步后前进 → 分支处选择 → 同名占位符预填 → 退出后继续执行
+      // → 坏引用步骤可跳过、汇合点等两条分支都结算。
+      // 夹具自己造而不是用种子工作流：种子提示词之间没有同名占位符，验不了"后续步骤预填"；
+      // 坏引用也得故意造一个。
+      {
+        const wfRel = 'workflows/自检执行模式.md';
+        const shared = '[自检共享项]';
+        const onlyLeft = '[自检左支独有]';
+        // i18n-exempt-start: 写进夹具文件的内容，不是界面文案
+        await window.promptFlowApi.createFile('prompts/testing/自检执行起点.md',
+          '---\ntitle: 自检执行起点\n---\n起点正文 ' + shared + '\n');
+        await window.promptFlowApi.createFile('prompts/testing/自检执行左支.md',
+          '---\ntitle: 自检执行左支\n---\n左支正文 ' + shared + ' ' + onlyLeft + '\n');
+        await window.promptFlowApi.createFile('prompts/testing/自检执行汇合.md',
+          '---\ntitle: 自检执行汇合\n---\n汇合正文\n');
+        await window.promptFlowApi.createFile(wfRel, [
+          '---', 'title: 自检执行模式', 'flow:',
+          '  - id: s', '    prompt: prompts/testing/自检执行起点.md', '    label: 起点', '    next: [left, right]',
+          '  - id: left', '    prompt: prompts/testing/自检执行左支.md', '    label: 左支', '    next: end',
+          '  - id: right', '    prompt: prompts/testing/不存在的提示词.md', '    label: 右支', '    next: end',
+          '  - id: end', '    prompt: prompts/testing/自检执行汇合.md', '    label: 汇合',
+          '---', '', '执行模式自检夹具', ''
+        ].join('\n'));
+        // i18n-exempt-end
+        await refreshTree();
+        const runBtn = (act, id) => document.querySelector('#flow-run button[data-run-act="' + act + '"]'
+          + (id ? '[data-run-id="' + id + '"]' : ''));
+        const node = (id) => document.querySelector('#preview .flow-node[data-id="' + id + '"]');
+        const waitFor = async (fn, ms) => { for (let i = 0; i < (ms || 2000) / 50 && !fn(); i++) await sleep(50); return !!fn(); };
+        const origWrite = navigator.clipboard.writeText.bind(navigator.clipboard);
+        let copied = null;
+        navigator.clipboard.writeText = async (text) => { copied = text; };
+        // 点「复制本步」，弹出填写面板时按 fill 处理（fill 为 null 表示取消面板）。
+        // 返回面板里各输入框弹出时的预填值，供断言"预填"用。
+        const copyStep = async (fill) => {
+          copied = null;
+          await realClick(runBtn('copy'));
+          const shown = await waitFor(() => document.getElementById('fill-ok'), 2000);
+          const seen = {};
+          if (shown) {
+            for (const inp of menu().querySelectorAll('[data-token]')) {
+              seen[inp.dataset.token] = inp.value;
+              if (fill && fill[inp.dataset.token] != null) inp.value = fill[inp.dataset.token];
+            }
+            if (fill) await realClick(document.getElementById('fill-ok'));
+            else if (pendingPromptDone) pendingPromptDone(null);
+          }
+          await sleep(300);
+          return { shown, seen };
+        };
+        try {
+          await openFile(wfRel);
+          await sleep(300);
+          check('打开工作流时流程图上方有「开始执行」', !!runBtn('start') && !runBtn('resume'),
+            (document.getElementById('flow-run') || {}).textContent || '(没有执行面板)');
+          await realClick(runBtn('start'));
+          check('开始执行后入口步骤高亮为当前步骤', node('s') && node('s').classList.contains('run-current')
+            && node('s').getAttribute('aria-current') === 'step', node('s') ? node('s').className : '(没有节点)');
+          const bodyOk = await waitFor(() => (document.getElementById('flow-run-body') || {}).textContent
+            && document.getElementById('flow-run-body').textContent.includes('起点正文'));
+          check('执行面板显示当前步骤的提示词正文', bodyOk,
+            (document.getElementById('flow-run-body') || {}).textContent || '(没有正文预览)');
+
+          // 复制本步：填一个值 → 剪贴板拿到填好的正文 → 起点打勾 → 停在分支处
+          state.fillMemory = {};
+          const c1 = await copyStep({ [shared]: '共享值甲' });
+          check('复制本步走填写面板并写进剪贴板', c1.shown && !!copied && copied.includes('起点正文 共享值甲'),
+            String(copied).slice(0, 80));
+          check('复制本步后这一步标记完成', node('s').classList.contains('run-done') && !node('s').classList.contains('run-current'),
+            node('s').className);
+          check('遇到分支时列出可前往的步骤让用户选', !!runBtn('choose', 'left') && !!runBtn('choose', 'right')
+            && !runBtn('choose', 'end') && !runBtn('copy'), (document.getElementById('flow-run') || {}).textContent);
+
+          // 选左支；左支里有同名占位符，面板应该预填本次会话的值。
+          // 先清空 fillMemory：它也会预填同一个值，不清的话分不清是谁填的。
+          await realClick(runBtn('choose', 'left'));
+          check('选择分支后它成为当前步骤', node('left').classList.contains('run-current'), node('left').className);
+          state.fillMemory = {};
+          const c2 = await copyStep(null);
+          check('同一次执行里填过的同名占位符在后续步骤预填', c2.shown && c2.seen[shared] === '共享值甲' && c2.seen[onlyLeft] === '',
+            JSON.stringify(c2.seen));
+          check('取消填写面板时不前进', node('left').classList.contains('run-current') && copied === null, node('left').className);
+
+          // 退出执行 → 显示继续执行；进度已经落盘
+          await realClick(runBtn('exit'));
+          check('退出执行后显示「继续执行」和「重新开始」', !!runBtn('resume') && !!runBtn('restart')
+            && !document.querySelector('#preview .flow-node.run-current'), (document.getElementById('flow-run') || {}).textContent);
+          await saveFlowRunsDebounced.flush();
+          const saved = ((await window.promptFlowApi.getConfig()).flowRuns || {})[wfRel];
+          check('执行进度按工作流写进 config', !!saved && saved.current === 'left' && JSON.stringify(saved.done) === '["s"]'
+            && saved.values && saved.values[shared] === '共享值甲', JSON.stringify(saved));
+
+          // 模拟重启：内存里的进度换成磁盘上读回来的那份，重新打开工作流
+          state.flowRuns = FLOW_RUN.cleanRuns((await window.promptFlowApi.getConfig()).flowRuns);
+          state.flowRunActive = null;
+          await openFile('prompts/testing/自检执行汇合.md');
+          await openFile(wfRel);
+          await sleep(300);
+          await realClick(runBtn('resume'));
+          check('继续执行回到上次的步骤，已完成的仍打勾', node('left').classList.contains('run-current')
+            && node('s').classList.contains('run-done'), node('left').className + ' / ' + node('s').className);
+
+          // 左支完成后汇合点还不能进：右支没结算，而右支是坏引用
+          await copyStep({ [onlyLeft]: '左支值' });
+          check('汇合点等另一条分支：完成左支后转到右支', node('right').classList.contains('run-current')
+            && !node('end').classList.contains('run-current'), node('right').className);
+          check('坏引用步骤给出提示且不能复制', !!document.querySelector('#flow-run .flow-run-warn')
+            && !!runBtn('copy') && runBtn('copy').disabled && !!runBtn('skip'),
+          (document.getElementById('flow-run') || {}).textContent);
+          await realClick(runBtn('skip'));
+          check('跳过坏引用步骤后进入汇合点', node('end').classList.contains('run-current')
+            && node('right').classList.contains('run-skipped'), node('end').className);
+          await realClick(runBtn('back'));
+          check('回退回到上一步', node('right').classList.contains('run-current') && !node('right').classList.contains('run-skipped'),
+            node('right').className);
+          await realClick(runBtn('exit'));
+        } finally {
+          navigator.clipboard.writeText = origWrite;
+          if (pendingPromptDone) pendingPromptDone(null);
+          state.flowRunActive = null;
+        }
+      }
+      // ---- 工作流执行模式 end ----
 
       // ---- 右键菜单 ----
       const fileRow = document.querySelector('#tree .tree-row.file') || document.querySelector('#tree .tree-row');

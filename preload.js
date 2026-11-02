@@ -101,6 +101,12 @@ const api = {
     const handler = (e, info) => cb(info);
     ipcRenderer.on('library-changed', handler);
     return () => ipcRenderer.removeListener('library-changed', handler);
+  },
+  // 快速面板复制后主窗口刷新统计；不把底层 IPC event 暴露给页面。
+  onUsageChanged: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on('usage-changed', handler);
+    return () => ipcRenderer.removeListener('usage-changed', handler);
   }
 };
 

@@ -33,7 +33,9 @@ const rendererGlobals = {
   // src/flow-graph.js 声明的常量（renderer.js 里只读）
   FLOW_GRAPH: 'readonly',
   // src/tree-selection.js 声明的文件树多选模型
-  TREE_SELECTION: 'readonly'
+  TREE_SELECTION: 'readonly',
+  // src/flow-run.js 声明的常量（工作流执行模式的状态机）
+  FLOW_RUN: 'readonly'
 };
 
 // src/selftest/*.js 是由主进程读成文本、丢进页面上下文执行的，所以 renderer.js
@@ -52,6 +54,8 @@ const selftestRendererGlobals = {
   state: 'readonly',          // renderer.js: const state = { ... }
   openFile: 'readonly',
   enterEditMode: 'readonly',
+  exitEditMode: 'readonly',
+  saveCurrent: 'writable',   // UI 自检包装真实保存入口，等待其全部异步收尾
   isDirty: 'readonly',
   describeError: 'readonly',
   renderMarkdown: 'readonly',
@@ -76,7 +80,9 @@ const selftestRendererGlobals = {
   batchMoveSelected: 'readonly',
   // 自检要能取消当前弹层（fillPlaceholderInline 弹的输入框没人点就会挂住），
   // 这是 renderer.js 里"当前弹层的 resolve 入口"，自检通过它收尾。
-  pendingPromptDone: 'writable'
+  pendingPromptDone: 'writable',
+  // 执行模式的 UI 自检要清掉夹具进度、立刻落盘再回读 config 核对
+  saveFlowRunsDebounced: 'readonly'
 };
 
 // 只保留能指向真实缺陷的规则。每条都注明了它在这个项目里能抓到什么。
@@ -209,7 +215,7 @@ module.exports = [
   {
     // 双用模块：浏览器里当 <script>，主进程里被 require。
     // 两套 global 都要给，否则结尾那句 typeof module !== 'undefined' 会报 no-undef。
-    files: ['src/i18n.js', 'src/frontmatter.js', 'src/placeholders.js', 'src/includes.js', 'src/composer-meta.js', 'src/rule-targets.js', 'src/workflow-refs.js', 'src/flow-graph.js', 'src/tree-selection.js'],
+    files: ['src/i18n.js', 'src/frontmatter.js', 'src/placeholders.js', 'src/includes.js', 'src/composer-meta.js', 'src/rule-targets.js', 'src/workflow-refs.js', 'src/flow-graph.js', 'src/tree-selection.js', 'src/flow-run.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',

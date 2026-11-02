@@ -79,12 +79,16 @@ const cleanup = () => { try { fs.rmSync(dataDir, { recursive: true, force: true 
 // 一百多步真实点击，每步都带等待，实测已经到 60 秒上下，而 CI 机器更慢。
 // 第一版上限 60 秒时，新增的占位符点击段把它顶过了线，报出来的是"超时"
 // 而不是任何一条失败的断言——超时值要留出余量，否则它自己会变成假故障源。
+// 加上工作流执行模式那一段（十来次点击 + 造夹具 + 两次读写 config）之后，
+// 在多个 Electron 测试并行的高负载机器上实测 119 秒才跑完，又贴着线了，所以放到 180 秒。
+const UI_TIMEOUT_MS = 180000;
+const startedAt = Date.now();
 const timeout = setTimeout(() => {
-  console.error('\n[test:ui] 超时：120 秒内没完成自检，判定失败');
+  console.error('\n[test:ui] 超时：' + (UI_TIMEOUT_MS / 1000) + ' 秒内没完成自检，判定失败');
   child.kill();
   cleanup();
   process.exit(1);
-}, 120000);
+}, UI_TIMEOUT_MS);
 
 child.on('exit', (code) => {
   clearTimeout(timeout);
@@ -138,6 +142,7 @@ child.on('exit', (code) => {
     /\[selftest:ui\] PASS 带说明保存后历史抽屉里能看到说明/,
     /\[selftest:ui\] PASS Ctrl\+Shift\+S 聚焦说明框且不触发保存/,
     /\[selftest:ui\] PASS 说明框里 Enter 保存，上一句说明随它描述的内容进入历史/,
+    /\[selftest:ui\] PASS 保存并退出编辑后预览显示最新正文/,
     // 预览区就地填占位符。这几条要显式点名：整段包在 if (marks().length) 里，
     // 种子内容改了导致标记不上时，段里一条都不会输出，而"没有 FAIL"照样是绿的。
     /\[selftest:ui\] PASS 预览区把 \[占位符\] 标成了可点的 chip/,
@@ -192,7 +197,25 @@ child.on('exit', (code) => {
     /\[selftest:ui\] PASS 批量打标签：当前打开的标签页重读了磁盘/,
     /\[selftest:ui\] PASS 批量删除：结果汇总列出被跳过的锁定文件及原因/,
     /\[selftest:ui\] PASS 批量删除：锁定的文件还在/,
-    /\[selftest:ui\] PASS 批量删除：被删文件的标签页关掉了，当前标签切到相邻的那个/
+    /\[selftest:ui\] PASS 批量删除：被删文件的标签页关掉了，当前标签切到相邻的那个/,
+    // 工作流执行模式的关键路径。整段在一个块里顺序依赖（前一步没走到，后面的断言
+    // 就测的是别的状态），点名每一条，防止中途断掉时剩下的静静消失。
+    /\[selftest:ui\] PASS 打开工作流时流程图上方有「开始执行」/,
+    /\[selftest:ui\] PASS 开始执行后入口步骤高亮为当前步骤/,
+    /\[selftest:ui\] PASS 执行面板显示当前步骤的提示词正文/,
+    /\[selftest:ui\] PASS 复制本步走填写面板并写进剪贴板/,
+    /\[selftest:ui\] PASS 复制本步后这一步标记完成/,
+    /\[selftest:ui\] PASS 遇到分支时列出可前往的步骤让用户选/,
+    /\[selftest:ui\] PASS 选择分支后它成为当前步骤/,
+    /\[selftest:ui\] PASS 同一次执行里填过的同名占位符在后续步骤预填/,
+    /\[selftest:ui\] PASS 取消填写面板时不前进/,
+    /\[selftest:ui\] PASS 退出执行后显示「继续执行」和「重新开始」/,
+    /\[selftest:ui\] PASS 执行进度按工作流写进 config/,
+    /\[selftest:ui\] PASS 继续执行回到上次的步骤，已完成的仍打勾/,
+    /\[selftest:ui\] PASS 汇合点等另一条分支：完成左支后转到右支/,
+    /\[selftest:ui\] PASS 坏引用步骤给出提示且不能复制/,
+    /\[selftest:ui\] PASS 跳过坏引用步骤后进入汇合点/,
+    /\[selftest:ui\] PASS 回退回到上一步/
   ];
   const missing = mustHave.filter(re => !re.test(out));
   if (missing.length) console.error('[test:ui] 缺少必需的检查项: ' + missing.map(String).join(', '));
@@ -205,6 +228,8 @@ child.on('exit', (code) => {
     && missing.length === 0
     && dialogsOk
     && !/FAIL/.test(out);
-  console.log('\n[test:ui] ' + (passed ? '通过' : '失败（exit=' + code + '）'));
+  // 打出耗时：离上限还有多远要看得见，否则下一次又是贴着线跑到超时才发现。
+  console.log('\n[test:ui] ' + (passed ? '通过' : '失败（exit=' + code + '）')
+    + '，整段耗时 ' + Math.round((Date.now() - startedAt) / 1000) + ' 秒（上限 ' + (UI_TIMEOUT_MS / 1000) + ' 秒）');
   process.exit(passed ? 0 : 1);
 });
