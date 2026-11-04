@@ -139,6 +139,9 @@ jobs:
       - name: 多 key 写入队列
         run: npm run test:write-queue
 
+      - name: 工作区服务、文件生命周期与 IPC
+        run: npm run test:workspace-service
+
       - name: 单文件安全导出
         run: npm run test:export-file
 

@@ -12,6 +12,7 @@
 // 安全配置（contextIsolation / nodeIntegration / sandbox）与主窗口相同，
 // 由 tests/quick-launch.test.js 逐项比对两个窗口的 webPreferences。
 const { contextBridge, ipcRenderer } = require('electron');
+let showToken = null;
 
 const quickLaunchApi = {
   // 复用主窗口那条 search：同一份 searchAll、同一份正文缓存
@@ -20,11 +21,14 @@ const quickLaunchApi = {
   readFile: (rel) => ipcRenderer.invoke('read-file', rel),
   // 复制成功的唯一出口：主进程写剪贴板并隐藏面板。rel 一并传过去，
   // 将来要在"复制成功"处统计用量的话，主进程那一处就够了。
-  copy: (text, rel) => ipcRenderer.invoke('quick-launch-copy', text, rel),
+  copy: (text, rel, token = showToken) => ipcRenderer.invoke('quick-launch-copy', text, rel, token),
   hide: () => ipcRenderer.invoke('quick-launch-hide'),
   // 每次呼出前主进程推一次当前语言 / 主题 / 填充记忆
   onShow: (cb) => {
-    const handler = (e, info) => cb(info);
+    const handler = (e, info) => {
+      showToken = { showGeneration: info.showGeneration, workspaceRevision: info.workspaceRevision };
+      cb(info);
+    };
     ipcRenderer.on('quick-launch-show', handler);
     return () => ipcRenderer.removeListener('quick-launch-show', handler);
   }

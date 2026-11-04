@@ -30,6 +30,12 @@ const { summarizeBackupEntries } = require('./lib/backup-preview');
 const { sha256, buildManifest, verifyManifest } = require('./lib/backup-manifest');
 const { createImportTransaction } = require('./lib/import-transaction');
 const { createWriteGate } = require('./lib/write-gate');
+const { createWriteQueue } = require('./lib/write-queue');
+const { createProjectStore } = require('./lib/project-store');
+const { createRunStore } = require('./lib/run-store');
+const { createWorkspaceService } = require('./lib/workspace-service');
+const PROJECT_CONTEXT = require('./src/project-context');
+const FLOW_GRAPH = require('./src/flow-graph');
 const { safeExportName, writeExportFile } = require('./lib/export-file');
 const { createDraftStore } = require('./lib/draft-store');
 const { readConfigFile } = require('./lib/config-file');
@@ -39,8 +45,6 @@ const I18N_TABLE = require('./src/i18n.js');
 // frontmatter 解析同样两边共用（src/frontmatter.js 结尾也有 module.exports）。
 const FRONTMATTER = require('./src/frontmatter.js');
 const WORKFLOW_REFS = require('./src/workflow-refs.js');
-// 工作流执行进度（config.flowRuns）的改名跟随 / 删除清理，与渲染进程共用同一份规则。
-const FLOW_RUN = require('./src/flow-run.js');
 const workflowIndex = require('./lib/workflow-index.js');
 const projectTypes = require('./lib/project-types');
 const ruleExport = require('./lib/rule-export');
@@ -180,6 +184,8 @@ const LOGS_DIR = path.join(DATA_ROOT, 'logs');
 // 配置默认放 userData（不污染提示词目录）；设了 PFM_DATA_DIR 时跟着走，
 // 否则测试改语言/主题会写进用户真实配置。
 const CONFIG_PATH = path.join(process.env.PFM_DATA_DIR ? DATA_ROOT : app.getPath('userData'), 'config.json');
+const PROJECTS_PATH = path.join(DATA_ROOT, 'projects.json');
+const RUNS_PATH = path.join(DATA_ROOT, 'workflow-runs.json');
 const DRAFTS_DIR = path.join(path.dirname(CONFIG_PATH), 'drafts');
 // 使用统计与收藏（复制次数、最后使用时间、收藏列表）。和 config.json 放在一起而不是
 // DATA_ROOT：它和草稿一样是本机数据，开发模式下不该落进仓库根目录；打包后两处是同一个目录。
@@ -680,17 +686,10 @@ async function saveConfig(cfg) {
 //   trash       连续删两个文件时，第二条 unshift 基于旧快照，第一条记录直接消失，
 //               而文件已经躺在 .trash 里成了孤儿（磁盘占着，UI 看不到，也删不掉）。
 //   version:<rel> 快速连点星标会丢 pin 状态。按 rel 分链，不同文件互不阻塞。
-const writeChains = new Map();
 const writeGate = createWriteGate();
+const writeQueue = createWriteQueue(writeGate);
 function queueWrite(key, fn) {
-  const prev = writeChains.get(key) || Promise.resolve();
-  const run = prev.then(() => writeGate.shared(fn), () => writeGate.shared(fn));
-  // 链条本身不能因为某次失败而断掉，否则后续写入全被拒绝
-  const guard = run.then(() => {}, () => {});
-  writeChains.set(key, guard);
-  // 链尾自清理，避免 version:<rel> 这类动态 key 让 Map 无限增长
-  guard.then(() => { if (writeChains.get(key) === guard) writeChains.delete(key); });
-  return run;
+  return writeQueue.run([key], fn);
 }
 function queueConfigWrite(fn) {
   return queueWrite('config', fn);
@@ -699,21 +698,12 @@ function queueConfigWrite(fn) {
 // 一次占多个 key。rename 要同时动源和目标两个文件（各自还有版本目录），
 // 只占一个 key 的话另一侧仍可能被并发的 save-file 插进来。
 //
-// 多 key 必须按固定顺序获取，否则会死锁：A 占了 ver:x 等 ver:y、B 占了 ver:y 等
-// ver:x，两边都不会释放。这里先排序再逐个嵌套，所有多 key 调用方的获取顺序就一致了，
-// 环也就构造不出来。
-//
-// 全局约定的获取顺序（跨 key 类别）：ver:*（组内按字典序） → trash → config。
-// 当前所有调用方都符合：save-file/pin/rollback 只占 ver:<rel>；trash 和 restore
-// 占 ver:<rel> 后再占 trash（trash 内部还会再占 config）；empty-trash 只占 trash；
-// set-config/项目类型只占 config；rename 占两个 ver:* 后再占 config。
-// 没有任何一处反向获取，所以无环。新增写操作时若要占多个 key，必须沿用这个顺序。
-// 排序不能用裸字典序：'config' < 'trash' < 'ver:'，正好和真实获取顺序相反。
-// 只有 ver:* 一类多 key 时（rename）碰不出问题，一旦有人同时占 ver:* 和 trash，
-// 字典序就会把 trash 排到前面，和 trash handler 内部"ver → trash → config"的
-// 嵌套顺序对着来，环就出现了。所以先按类别 rank 排，再在类别内按字典序。
+// 在进入 shared 之前同步预留全部 key，不能持有 shared 再等待另一个普通队列。
+// exclusive 导入可能已经排在那个队列前面；递归占 shared 会让导入与外层操作互等。
+// 分类顺序保留为 ver:* → trash → workspace → config，所有 Locked 内部直接执行。
 function lockRank(key) {
-  if (key === 'config') return 2;
+  if (key === 'config') return 3;
+  if (key === 'workspace') return 2;
   if (key === 'trash') return 1;
   return 0; // ver:<rel>
 }
@@ -721,8 +711,73 @@ function queueWriteMulti(keys, fn) {
   const uniq = Array.from(new Set(keys)).sort(
     (a, b) => (lockRank(a) - lockRank(b)) || (a < b ? -1 : a > b ? 1 : 0)
   );
-  const acquire = (i) => (i >= uniq.length ? fn() : queueWrite(uniq[i], () => acquire(i + 1)));
-  return acquire(0);
+  return writeQueue.run(uniq, fn);
+}
+
+const projectStore = createProjectStore({ file: PROJECTS_PATH, writeFileAtomic: writeWorkspaceAtomic, appError });
+const runStore = createRunStore({ file: RUNS_PATH, writeFileAtomic: writeWorkspaceAtomic, appError });
+let workspaceCounts = { projects: 0, runs: 0 };
+const workspaceService = createWorkspaceService({ projects: projectStore, runs: runStore, queue: writeQueue, loadConfig, appError,
+  readWorkflow: async rel => { const content = await fsp.readFile(safeJoinReadable(rel), 'utf8'); return { steps: FLOW_GRAPH.parseSteps(content), hash: contentHash(content) }; },
+  notify: state => {
+    workspaceCounts = { projects: state.projects.projects.length, runs: state.runs.runs.length };
+    hideQuickPanel();
+    if (win && !win.isDestroyed()) win.webContents.send('workspace-changed', { projectsRevision: state.projects.revision, runsRevision: state.runs.revision });
+  }
+});
+async function writeWorkspaceAtomic(file, raw) {
+  if (process.env.PFM_SELFTEST === '1' && process.env.PFM_DATA_DIR && process.env.PFM_SELFTEST_WORKSPACE_WRITE_FAIL === '1') throw appError('E_WORKSPACE_WRITE', path.basename(file));
+  return writeFileAtomic(file, raw);
+}
+ipcMain.handle('workspace-get', () => workspaceService.getState());
+ipcMain.handle('project-action', (e, action, payload) => workspaceService.projectAction(action, payload));
+ipcMain.handle('run-action', (e, action, payload) => workspaceService.runAction(action, payload));
+
+// Snapshot both version trees: a rename may merge histories into an existing target directory.
+// Tracking only the body would lose source versions and retain newly merged files after a later index failure.
+async function createLifecycleTransaction(files, directories, appendDirectories = []) {
+  const transaction = createImportTransaction(); const known = new Set(); const addedDirs = new Set();
+  async function scan(dir, capture, appendOnly = false) {
+    const absolute = path.resolve(dir); const root = path.resolve(DATA_ROOT);
+    if (!absolute.startsWith(root + path.sep)) throw appError('E_WORKSPACE_INVALID', 'transaction path');
+    let stat;
+    try { stat = await fsp.lstat(absolute); } catch (error) { if (error.code === 'ENOENT') { if (capture) await transaction.trackDir(absolute); return; } throw error; }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw appError('E_WORKSPACE_LINK', absolute);
+    if (appendOnly) {
+      if (capture) known.add(absolute);
+      else if (!known.has(absolute)) addedDirs.add(absolute);
+    }
+    for (const entry of await fsp.readdir(absolute, { withFileTypes: true })) {
+      const file = path.join(absolute, entry.name);
+      if (entry.isSymbolicLink()) throw appError('E_WORKSPACE_LINK', file);
+      if (entry.isDirectory()) {
+        if (appendOnly && capture) known.add(file);
+        else if (!appendOnly || !known.has(file)) await scan(file, capture, appendOnly);
+      }
+      else if (capture) { known.add(file); if (!appendOnly) await transaction.snapshot(file); }
+      else if (!known.has(file)) transaction.trackFile(file);
+    }
+  }
+  for (const file of files) await transaction.snapshot(file);
+  for (const dir of directories) await scan(dir, true);
+  // Existing trash bodies never change during append; snapshot their names rather than reading the entire trash into memory.
+  for (const dir of appendDirectories) await scan(dir, true, true);
+  return { async rollback() {
+    for (const dir of directories) await scan(dir, false);
+    for (const dir of appendDirectories) await scan(dir, false, true);
+    const result = await transaction.rollback(); workspaceService.invalidate();
+    for (const dir of [...addedDirs].sort((a, b) => b.length - a.length)) {
+      try { await fsp.rmdir(dir); } catch (error) { if (error.code !== 'ENOENT') { result.ok = false; result.errors.push(dir + ': ' + error.message); } }
+    }
+    for (const file of files) dropFromCache(file);
+    return result;
+  } };
+}
+async function rollbackLifecycle(transaction, error) {
+  let result;
+  try { result = await transaction.rollback(); } catch (rollback) { result = { ok: false, errors: [rollback.message] }; }
+  if (!result.ok) throw appError('E_WORKSPACE_ROLLBACK', result.errors.join('; ') + '; ' + error.message);
+  throw error;
 }
 
 // ---------- 使用统计与收藏 ----------
@@ -888,7 +943,7 @@ ipcMain.handle('rename', async (e, oldRel, newRel) => renameEntry(oldRel, newRel
 // 具名出来是为了让批量移动走同一条路（版本历史跟随、锁跟随、统计跟随、清缓存都在这里），
 // 而不是在 batch-move 里再抄一份四步磁盘操作。
 async function renameEntry(oldRel, newRel) {
-  await queueWriteMulti(['ver:' + String(oldRel), 'ver:' + String(newRel)], () => renameEntryLocked(oldRel, newRel));
+  await queueWriteMulti(['ver:' + String(oldRel), 'ver:' + String(newRel), 'workspace', 'config'], () => renameEntryLocked(oldRel, newRel));
   // 使用统计和收藏跟着文件走（同锁定标记，"改名 → 删除 → 清空回收站"要清的是新路径）。
   // 放在 ver:* 锁**之外**：'usage' 不嵌套占锁，见 usageStore 定义处的说明。
   // 失败只记日志，理由和锁定标记那段一样：文件已经改名成功了。
@@ -900,51 +955,26 @@ async function renameEntry(oldRel, newRel) {
   return true;
 }
 
-// 调用方必须已经占住 ver:<oldRel> 和 ver:<newRel>。
+// 调用方已经预留 ver:<oldRel>、ver:<newRel>、workspace 与 config。
 async function renameEntryLocked(oldRel, newRel) {
-  // 两侧都过写入白名单：源要被移走（等于删），目标要被写入，
-  // 任一侧落在 .versions/.trash/config.json 上都不行。
   const oldFull = safeJoinWritable(oldRel);
   const newFull = safeJoinWritable(newRel);
-  await movePromptWithHistory({
-    oldRel,
-    newRel,
-    oldFull,
-    newFull,
-    oldVersionDir: versionDirFor(oldRel),
-    newVersionDir: versionDirFor(newRel),
-    appError,
-    onFileMoved: dropFromCache
-  });
-  // 锁定标记跟随改名，避免"改名 → 删除"绕过锁。工作流的执行进度（flowRuns）同一次跟着走。
-  //
-  // 读改写整个塞进 queueConfigWrite：原先是在队列外 loadConfig，再拿这份快照去
-  // updateConfig。渲染进程有五个 debounce 在并发写 config（tabs/recent/locked/
-  // sidebarWidth/expandedPaths），只要在这两步之间插进来一次 lockedFiles 写入，
-  // 就会被这里的旧快照整个覆盖——症状是刚锁的文件莫名解锁。
-  //
-  // updateConfig 现在会因写盘失败抛错，但这里必须吞掉：文件已经 rename 完了，
-  // 抛出去渲染进程会显示"重命名失败"，而树刷新后文件明明已经改名。锁列表是
-  // 事后记账，权威的失败信号走用户主动触发的 set-config。
+  const workspace = oldRel.startsWith('workflows/');
+  if (workspace) await workspaceService.exportDataLocked();
+  const transaction = await createLifecycleTransaction(
+    [oldFull, newFull, CONFIG_PATH, ...(workspace ? [RUNS_PATH] : [])],
+    [versionDirFor(oldRel), versionDirFor(newRel)]);
   try {
-    await queueConfigWrite(async () => {
-      const cur = await loadConfig();
-      const patch = {};
-      if (Array.isArray(cur.lockedFiles) && cur.lockedFiles.includes(oldRel)) {
-        const next = cur.lockedFiles.filter(r => r !== oldRel);
-        if (!next.includes(newRel)) next.push(newRel);
-        patch.lockedFiles = next;
-      }
-      const runs = FLOW_RUN.renameRun(cur.flowRuns, oldRel, newRel);
-      if (runs !== cur.flowRuns) patch.flowRuns = runs;
-      if (!Object.keys(patch).length) return;
-      const ok = await saveConfig({ ...cur, ...patch });
-      if (!ok) throw appError('E_CONFIG_WRITE', CONFIG_PATH);
-    });
-  } catch (err) {
-    console.error('锁定标记跟随改名失败（文件已改名）:', oldRel, '->', newRel, err.message);
-  }
-  return true;
+    await movePromptWithHistory({ oldRel, newRel, oldFull, newFull,
+      oldVersionDir: versionDirFor(oldRel), newVersionDir: versionDirFor(newRel), appError, onFileMoved: dropFromCache });
+    const cur = await loadConfig();
+    if (Array.isArray(cur.lockedFiles) && cur.lockedFiles.includes(oldRel)) {
+      const next = { ...cur, lockedFiles: [...new Set(cur.lockedFiles.map(rel => rel === oldRel ? newRel : rel))] };
+      if (!await saveConfig(next)) throw appError('E_CONFIG_WRITE', CONFIG_PATH);
+    }
+    if (workspace) await workspaceService.relocateWorkflowLocked(oldRel, newRel);
+    return true;
+  } catch (error) { await rollbackLifecycle(transaction, error); }
 }
 
 // 工作流引用同步：`workflows/*.md` 的 flow[].prompt 指向 prompts/ 下的文件，
@@ -1031,6 +1061,13 @@ const LIBRARY_CHANGE_MAX = 500;
 function dropForExternalChange(rel) {
   try { dropFromContentCache(safeJoin(rel)); } catch {}
 }
+async function invalidateWorkspaceForExternalChange(changes) {
+  hideQuickPanel();
+  const removals = changes.filter(change => change.type === 'removed' && change.rel.startsWith('workflows/'));
+  const results = await Promise.allSettled(removals.map(change => queueWriteMulti(['ver:' + change.rel, 'workspace', 'config'], () => workspaceService.removeWorkflowLocked(change.rel))));
+  const failed = results.find(result => result.status === 'rejected');
+  if (failed) throw failed.reason;
+}
 function startLibraryWatch() {
   if (libraryWatcher) return;
   libraryWatcher = createLibraryWatcher({
@@ -1042,6 +1079,7 @@ function startLibraryWatch() {
     onChange: (changes) => {
       for (const c of changes) dropForExternalChange(c.rel);
       dropWorkflowIndex();
+      invalidateWorkspaceForExternalChange(changes).catch(error => logger.error('[workspace] ' + error.message));
       logger.info('[watch] 外部改动 ' + changes.length + ' 个文件');
       if (!win || win.isDestroyed()) return;
       const truncated = changes.length > LIBRARY_CHANGE_MAX;
@@ -1124,13 +1162,10 @@ ipcMain.handle('update-workflow-refs', async (e, targets, oldRel, newRel) => {
 // 这里读到的就是没有该文件的旧快照，于是锁形同虚设，文件照样进回收站。
 // 排进队列后读到的是"此刻队列里所有已排队写入都完成后"的状态。
 //
-// 在 trash handler（持有 trash key）里再占 config 是允许的：
-// 全局顺序是 ver:* → trash → config，config 永远最后占，构造不出环。
-async function isLocked(rel) {
-  return queueConfigWrite(async () => {
-    const cfg = await loadConfig();
-    return Array.isArray(cfg.lockedFiles) && cfg.lockedFiles.includes(rel);
-  });
+// trash 的外层入口已经预留 config；这里不能再等待普通配置队列。
+async function isLockedLocked(rel) {
+  const cfg = await loadConfig();
+  return Array.isArray(cfg.lockedFiles) && cfg.lockedFiles.includes(rel);
 }
 
 // 整个 handler 排进 trash 链：中间的 readTrashIndex → unshift → writeTrashIndex
@@ -1141,52 +1176,29 @@ async function isLocked(rel) {
 // 只占 ver:<rel>，两边原先在同一个文件上完全不互斥。删除进行中发起的保存
 // （Ctrl+S、切文件时的自动保存都会）会读到删除前的 prev、写回同一个路径，
 // 然后被这里的 fsp.rename 一起卷进 .trash：保存返回成功，内容却不在树里了。
-// 顺序由 queueWriteMulti 统一排（ver:* → trash），内部再占 config 也不成环。
+// 同一次预留 ver:*、trash、workspace 与 config，内部不重新排队。
 ipcMain.handle('trash', async (e, rel) => trashEntry(rel));
 
 // 具名出来给批量删除复用：锁定校验、目录拒绝、回收站索引都只有这一份。
 function trashEntry(rel) {
-  return queueWriteMulti(['ver:' + String(rel), 'trash'], () => trashEntryLocked(rel));
+  return queueWriteMulti(['ver:' + String(rel), 'trash', 'workspace', 'config'], () => trashEntryLocked(rel));
 }
 
 async function trashEntryLocked(rel) {
-  // 删除同样是改动库内容：不加白名单就能把 config.json 移进回收站
   const full = safeJoinWritable(rel);
-  if (await isLocked(rel)) throw appError('E_LOCKED', rel);
-  if (!fs.existsSync(full)) return true;
-  // 目录整棵搬进回收站后，empty-trash 用 unlink 删不掉（EPERM），却会无条件清空
-  // 索引，结果整棵树永久留在 .trash 里、UI 再也看不到。回收站的语义只覆盖单个
-  // .md 文件，这里直接拒绝目录。
+  if (await isLockedLocked(rel)) throw appError('E_LOCKED', rel);
   let st;
   try { st = await fsp.stat(full); }
-  catch (err) {
-    if (err && err.code === 'ENOENT') return true;
-    throw appError('E_TRASH_STAT', rel);
-  }
+  catch (error) { if (error.code === 'ENOENT') return true; throw appError('E_TRASH_STAT', rel); }
   if (st.isDirectory()) throw appError('E_TRASH_DIR_UNSUPPORTED', rel);
-  await trashStore.moveToTrash({
-    rel,
-    fullPath: full,
-    versionDir: versionDirFor(rel),
-    onFileMoved: dropFromCache
-  });
-  // 清掉锁列表里的残留条目，以及这个工作流的执行进度。和 rename 同理：读改写整个进配置队列，
-  // 失败只记日志——文件已经在回收站里了，抛出去会显示"删除失败"但东西确实删了。
+  const workspace = rel.startsWith('workflows/');
+  if (workspace) await workspaceService.exportDataLocked();
+  const transaction = await createLifecycleTransaction([full, path.join(trashStore.trashDir, 'index.json'), ...(workspace ? [RUNS_PATH] : [])], [versionDirFor(rel)], [trashStore.trashDir]);
   try {
-    await queueConfigWrite(async () => {
-      const cur = await loadConfig();
-      const patch = {};
-      if (Array.isArray(cur.lockedFiles) && cur.lockedFiles.includes(rel)) patch.lockedFiles = cur.lockedFiles.filter(r => r !== rel);
-      const runs = FLOW_RUN.dropRun(cur.flowRuns, rel);
-      if (runs !== cur.flowRuns) patch.flowRuns = runs;
-      if (!Object.keys(patch).length) return;
-      const ok = await saveConfig({ ...cur, ...patch });
-      if (!ok) throw appError('E_CONFIG_WRITE', CONFIG_PATH);
-    });
-  } catch (err) {
-    console.error('清理锁定标记失败（文件已移入回收站）:', rel, err.message);
-  }
-  return true;
+    await trashStore.moveToTrash({ rel, fullPath: full, versionDir: versionDirFor(rel), onFileMoved: dropFromCache });
+    if (workspace) await workspaceService.removeWorkflowLocked(rel);
+    return true;
+  } catch (error) { await rollbackLifecycle(transaction, error); }
 }
 
 // ---------- 文件树批量操作 ----------
@@ -1287,6 +1299,7 @@ function diagnosticsContext() {
     dirs: TOP_DIRS,
     healReport: lastHealReport,
     configPath: CONFIG_PATH,
+    workspace: { ...workspaceCounts },
     // 沙箱是否真的开着，以及为什么。这一项必须在诊断包里：降级是自动发生的，
     // 用户界面上看不出任何差别，不报出来就没人知道自己在不安全模式下跑了几个月。
     //
@@ -1478,7 +1491,7 @@ const KNOWN_CONFIG_KEYS = new Set([
   'theme', 'lang', 'fontScale', 'windowBounds', 'projectTypes', 'lockedFiles',
   'expandedPaths', 'recent', 'fillMemory', 'sidebarWidth', 'tabs', 'activeTab',
   'updateCheck', 'updateLastCheckedAt', 'updateSkipVersion', 'ruleExportTargets',
-  'quickLaunchEnabled', 'quickLaunchShortcut', 'flowRuns'
+  'quickLaunchEnabled', 'quickLaunchShortcut'
 ]);
 // 原型链上的键。JSON.parse 出来的对象里它们是**自有属性**（不是原型），
 // 展开进配置对象之后会跟着 saveConfig 落盘。
@@ -1488,12 +1501,15 @@ function updateConfig(patch) {
   const incoming = Object.keys(patch || {});
   const bad = incoming.filter(k => DANGEROUS_CONFIG_KEYS.has(k));
   if (bad.length) throw appError('E_CONFIG_BAD_KEY', bad.join(', '));
+  // Old renderer debounce requests must not overwrite the immutable migration backup.
+  const safePatch = Object.fromEntries(Object.entries(patch || {}).filter(([key]) => key !== 'flowRuns'));
   for (const k of incoming) {
+    if (k === 'flowRuns') continue;
     if (!KNOWN_CONFIG_KEYS.has(k)) console.error('[config] 未知配置键（已写入，可能该同步 KNOWN_CONFIG_KEYS）: ' + k);
   }
   return queueConfigWrite(async () => {
     const cur = await loadConfig();
-    const next = { ...cur, ...(patch || {}) };
+    const next = { ...cur, ...safePatch };
     const ok = await saveConfig(next);
     if (!ok) throw appError('E_CONFIG_WRITE', CONFIG_PATH);
     return next;
@@ -1895,7 +1911,7 @@ ipcMain.handle('import-zip', async () => writeGate.exclusive(async () => {
     try {
       const parsed = JSON.parse(configEntry.content);
       if (!parsed || parsed.schema !== 1 || !parsed.config) throw appError('E_BACKUP_CONFIG_INVALID');
-      await queueConfigWrite(async () => {
+      await writeQueue.runLocked(['config'], async () => {
         const cur = await loadConfig();
         const next = backupConfig.mergePortable(cur, parsed.config, restoredRels);
         const ok = await saveConfig(next);
@@ -1939,7 +1955,7 @@ ipcMain.handle('import-zip', async () => writeGate.exclusive(async () => {
           versionIndex
         };
       });
-      const res = await queueWrite('trash', () => trashStore.importItems(items, {
+      const res = await writeQueue.runLocked(['trash'], () => trashStore.importItems(items, {
         isAllowedRel: (rel) => {
           try { safeJoinWritable(rel); return true; } catch { return false; }
         },
@@ -2965,6 +2981,7 @@ const QUICK_PANEL_URL = pathToFileURL(path.join(CODE_ROOT, 'src', 'quick-launch.
 const QUICK_PANEL_SIZE = { width: 640, height: 420 };
 let quickPanel = null;
 let quickPanelReady = null;
+let quickShowGeneration = 0;
 
 // 自检进程不注册真实的全局快捷键：测试会在开发机上并行拉起好几个 Electron，
 // 真注册的话第一个进程抢到键、后面的全部"被占用"；测试跑着的时候开发者按一下
@@ -3079,6 +3096,7 @@ function ensureQuickPanel() {
 }
 
 async function showQuickPanel() {
+  const showGeneration = ++quickShowGeneration;
   const panel = ensureQuickPanel();
   const ready = await quickPanelReady;
   if (!ready || panel.isDestroyed()) { destroyQuickPanel(); return false; }
@@ -3087,14 +3105,24 @@ async function showQuickPanel() {
   try { workArea = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea; } catch {}
   panel.setBounds(quickLaunch.centerBounds(workArea, QUICK_PANEL_SIZE));
   // 语言、主题、字号每次都现取：用户可能刚在主窗口里切过。
-  const cfg = await loadConfig();
-  if (panel.isDestroyed()) return false;
-  panel.webContents.send('quick-launch-show', {
+  const info = await writeQueue.run(['workspace', 'config'], async () => {
+    const state = await workspaceService.exportDataLocked();
+    const cfg = await loadConfig();
+    const projectId = state.projects.activeProjectId;
+    const project = state.projects.projects.find(project => project.id === projectId);
+    return {
     lang: cfg.lang === 'en' ? 'en' : 'zh',
     theme: cfg.theme === 'dark' ? 'dark' : 'light',
     fontScale: cfg.fontScale,
-    fillMemory: cfg.fillMemory && typeof cfg.fillMemory === 'object' && !Array.isArray(cfg.fillMemory) ? cfg.fillMemory : {}
+    fillMemory: PROJECT_CONTEXT.cleanValues(cfg.fillMemory),
+    contextSnapshot: project ? PROJECT_CONTEXT.snapshot(project) : null,
+    projectId,
+    workspaceRevision: state.projects.revision,
+    showGeneration
+    };
   });
+  if (panel.isDestroyed() || showGeneration !== quickShowGeneration) return false;
+  panel.webContents.send('quick-launch-show', info);
   // 置顶级别取 screen-saver：普通 alwaysOnTop 在全屏程序上面盖不住
   panel.setAlwaysOnTop(true, 'screen-saver');
   panel.show();
@@ -3103,6 +3131,7 @@ async function showQuickPanel() {
 }
 
 function hideQuickPanel() {
+  quickShowGeneration++;
   if (quickPanel && !quickPanel.isDestroyed() && quickPanel.isVisible()) quickPanel.hide();
 }
 
@@ -3155,10 +3184,14 @@ function isQuickPanelSender(e) {
 
 // 复制成功的唯一出口：写剪贴板、收起面板，然后给被复制的文件记账。
 // 统计写入失败不能把已经完成的复制变成失败，主窗口通过通知重新读取最新统计。
-ipcMain.handle('quick-launch-copy', async (e, text, rel) => {
+ipcMain.handle('quick-launch-copy', async (e, text, rel, token) => {
   if (!isQuickPanelSender(e) || typeof text !== 'string') throw appError('E_QUICK_LAUNCH_SENDER');
-  clipboard.writeText(text);
-  hideQuickPanel();
+  await writeQueue.run(['workspace', 'config'], async () => {
+    const state = await workspaceService.exportDataLocked();
+    if (!token || token.showGeneration !== quickShowGeneration || token.workspaceRevision !== state.projects.revision) throw appError('E_QUICK_LAUNCH_STALE');
+    clipboard.writeText(text);
+    hideQuickPanel();
+  });
   try {
     await recordPromptUsage(rel);
     if (win && !win.isDestroyed()) win.webContents.send('usage-changed');
@@ -3255,6 +3288,13 @@ app.whenReady().then(async () => {
     // 自愈必须在 createWindow 之前：窗口一出来渲染进程就会 list-trash / listTree，
     // 那时索引应该已经是修好的，否则用户先看到一屏幽灵条目再看到它们消失。
     await runStartupHeal();
+    try {
+      const workspace = await workspaceService.initialize();
+      workspaceCounts = { projects: workspace.projects.projects.length, runs: workspace.runs.runs.length };
+    } catch (error) {
+      // A damaged business file is surfaced through workspace IPC; the content library remains usable.
+      logger.error('[workspace] ' + error.message);
+    }
     await createWindow();
     // 放在建窗口之后：渲染进程起来之后的改动才需要推送，之前的改动它首次
     // listTreeAndMeta 自然会读到。

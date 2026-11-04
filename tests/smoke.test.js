@@ -427,8 +427,8 @@ section('ZIP 真实往返（压缩 → 解压）');
 
   section('锁定与配置');
   // 防回归：锁定只存在渲染进程内存里，主进程照删不误
-  assert(/async function isLocked\(/.test(mainSrc), '主进程有 isLocked');
-  assert(/if \(await isLocked\(rel\)\) throw appError\('E_LOCKED'/.test(mainSrc), 'trash 在主进程强制校验锁');
+  assert(/async function isLockedLocked\(/.test(mainSrc), '主进程有已预留 config 的锁定检查');
+  assert(/if \(await isLockedLocked\(rel\)\) throw appError\('E_LOCKED'/.test(mainSrc), 'trash 在主进程强制校验锁');
   assert(/lockedFiles: \[\]/.test(mainSrc), 'loadConfig 默认值含 lockedFiles');
   // 防回归：resize/move 每次触发都读写 config.json
   assert(/setTimeout\(flushBounds/.test(mainSrc), '窗口尺寸保存做了防抖');
@@ -692,8 +692,8 @@ section('工作流执行模式');
   const own = ['copyContent', 'copyFlowRunStep'].filter(n => /writeClipboard\(|navigator\.clipboard|PLACEHOLDERS\.fill\(|INCLUDES\.resolveAsync\(/.test(fnBody(n)));
   assert(fnBody('copyContent') && fnBody('copyFlowRunStep') && own.length === 0,
     '两个复制入口都没有自己的一份复制逻辑' + (own.length ? '：' + own.join(', ') : ''));
-  assert(/'flowRuns'/.test(mainSrc.slice(mainSrc.indexOf('const KNOWN_CONFIG_KEYS'), mainSrc.indexOf('const KNOWN_CONFIG_KEYS') + 400)),
-    'flowRuns 在主进程的已知配置键里');
+  assert(!/'flowRuns'/.test(mainSrc.slice(mainSrc.indexOf('const KNOWN_CONFIG_KEYS'), mainSrc.indexOf('const KNOWN_CONFIG_KEYS') + 400)),
+    'flowRuns 是只读迁移备份，不接受配置回写');
   const flushBody = (rendererSrc.match(/window\.__pfmFlushPending = async \(\) => \{([\s\S]*?)\n\};/) || [])[1] || '';
   assert(/saveFlowRunsDebounced/.test(flushBody), '关窗前会把执行进度的防抖写入落盘');
   const indexHtml = fs.readFileSync(path.join(root, 'src/index.html'), 'utf8');

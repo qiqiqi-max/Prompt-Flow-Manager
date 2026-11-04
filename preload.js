@@ -46,6 +46,14 @@ const api = {
   search: (q) => ipcRenderer.invoke('search', q),
   getConfig: () => ipcRenderer.invoke('get-config'),
   setConfig: (cfg) => ipcRenderer.invoke('set-config', cfg),
+  getWorkspace: () => ipcRenderer.invoke('workspace-get'),
+  projectAction: (action, payload) => ipcRenderer.invoke('project-action', action, payload),
+  runAction: (action, payload) => ipcRenderer.invoke('run-action', action, payload),
+  onWorkspaceChanged: (cb) => {
+    const handler = (e, state) => cb(state);
+    ipcRenderer.on('workspace-changed', handler);
+    return () => ipcRenderer.removeListener('workspace-changed', handler);
+  },
   confirm: (msg) => ipcRenderer.invoke('confirm', msg),
   // 保存 / 不保存 / 取消三选一。切文件、切标签时草稿还在就问这个，
   // 而不是像原先那样直接替用户保存。
