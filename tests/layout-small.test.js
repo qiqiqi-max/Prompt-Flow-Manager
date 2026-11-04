@@ -139,6 +139,9 @@ function scriptFor(c) {
     const runIssues = [];
     const origScale = state.config.fontScale;
     $('flow-run').querySelector('button[data-run-act="start"]').click();
+    $('run-name').value='Layout run';
+    $('run-save').click();
+    for(let i=0;i<100 && !$('flow-run').querySelector('button[data-run-act="skip"]');i++) await new Promise(resolve=>setTimeout(resolve,20));
     await new Promise(resolve => setTimeout(resolve, 150));
     for (const scale of FONT_SCALES) {
       applyFontScale(scale);

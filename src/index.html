@@ -54,6 +54,12 @@
     <main class="main">
       <!-- 左：文件树 -->
       <aside class="sidebar">
+        <div class="workspace-controls">
+          <label for="workspace-project" data-i18n="workspaceProject">项目</label>
+          <select id="workspace-project" data-i18n-aria="workspaceProject"></select>
+          <div id="workspace-error" class="workspace-error hidden" role="status" aria-live="polite"></div>
+          <div class="workspace-actions"><button class="btn-secondary" id="workspace-manage" data-i18n="workspaceManageButton" data-i18n-title="workspaceManage">管理项目</button><button class="btn-secondary" id="workspace-history" data-i18n="workspaceHistoryButton" data-i18n-title="workspaceHistory">运行历史</button></div>
+        </div>
         <div class="sidebar-header" data-i18n="sidebarFiles">文件</div>
         <!-- 收藏 / 常用。两栏都没有内容时整块隐藏（见 renderUsage），
              所以新用户的侧边栏和以前一样；有内容时高度封顶，树始终留着大半。 -->
@@ -379,6 +385,8 @@
   <!-- 占位符提取与填充（src/placeholders.js）。同样是双用模块：这里当 <script>
        声明全局，tests/placeholders.test.js 里 require 同一份文件。 -->
   <script src="placeholders.js"></script>
+  <script src="project-context.js"></script>
+  <script src="input-limits.js"></script>
   <!-- 模板包含引擎（src/includes.js）。双用模块：声明全局 INCLUDES -->
   <script src="includes.js"></script>
   <!-- 工作流图分析（src/flow-graph.js）：分层、成环、不可达。

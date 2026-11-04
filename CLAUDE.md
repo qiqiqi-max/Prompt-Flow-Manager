@@ -55,6 +55,7 @@ const DATA_ROOT = app.isPackaged ? app.getPath('userData') : __dirname;  // 用�
 - `preload.js`、`src/` 只存在于 asar 内 → 一律用 **CODE_ROOT**。
 - `prompts/`、`workflows/`、`templates/`、`.versions/`、`.trash/` 需要可写 → 一律用 **DATA_ROOT**。
 - 打包后首次运行由 `ensureSeedData()` 把种子内容从 asar 拷到 DATA_ROOT。
+- `projects.json` 与 `workflow-runs.json` 也位于 DATA_ROOT；不能写进 asar 或把开发时的私有上下文加入 Git。
 
 ## 关键约定
 
@@ -63,6 +64,12 @@ const DATA_ROOT = app.isPackaged ? app.getPath('userData') : __dirname;  // 用�
 `title` `stage` `projectType` `tags` `description`（用户编辑）+ `version` `updatedAt` `createdAt`（主进程自动维护）。
 
 工作流在 frontmatter 中用 `flow` 数组定义线性步骤，每步含 `id` `prompt` `label` `next`。
+
+项目与独立运行使用 schema 1 的独立 JSON 文件。`lib/workspace-service.js` 维护 revision、迁移和结算；渲染进程发送白名单单条操作，不上传整份历史覆盖。`config.flowRuns` 仅作旧数据迁移备份，正常操作不回写。`src/project-context.js` 是主窗口和快速面板的同一份上下文规则，运行快照不随当前项目切换。
+
+项目、运行与文件事务共用 `lib/write-queue.js`：先预留全部 key，再进入共享写闸门；独占导入使用 Locked 接口，禁止在持有共享闸门时等待新的队列 key。业务文件读取拒绝链接和未知 schema，损坏时保留证据并报错；写盘成功前不返回成功。
+
+完整备份在独占闸门内读取一致快照，释放后压缩；系统对话框位于闸门外。`lib/workspace-backup.js` 校验两个业务条目、预检合并容量、生成新 ID、映射工作流和嵌套 include；依赖检查仅使用包内内容。导入先完成原始字节清单校验，正文转换后再绑定版本说明哈希。两个业务文件与正文、设置、版本和回收站使用同一事务回滚，提交后才通知工作区刷新。
 
 ### 安全边界
 - 渲染进程 **无 Node 能力**：`contextIsolation: true`、`nodeIntegration: false`。

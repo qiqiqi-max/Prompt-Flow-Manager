@@ -140,7 +140,15 @@ async function runCases(lib, label, wire = (o) => o) {
   try {
     const file = path.join(root, 'usage.json');
     let writes = 0;
-    const writeFileAtomic = async (f, data) => { writes++; await fs.promises.writeFile(f, data, 'utf8'); };
+    // The queue mutant must exercise lost updates and the import gate, not an unrelated partial-JSON recovery race.
+    const writeFileAtomic = async (f, data) => {
+      const temporary = f + '.tmp-' + ++writes;
+      await fs.promises.writeFile(temporary, data, 'utf8');
+      for(let attempt=0;attempt<3;attempt++) {
+        try { await fs.promises.rename(temporary,f); return; }
+        catch(error) { if(!['EPERM','EBUSY','EACCES'].includes(error.code) || attempt===2) throw error; await sleep(40*(attempt+1)); }
+      }
+    };
     const gate = createWriteGate();
     let clock = NOW;
     const store = lib.createUsageStore(wire({ file, writeFileAtomic, queue: makeQueue(gate), appError, now: () => clock }));

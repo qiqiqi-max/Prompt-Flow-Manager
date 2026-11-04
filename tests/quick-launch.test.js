@@ -80,6 +80,10 @@ function runOnce(mode, extraEnv) {
 }
 
 const FULL_MUST = [
+  ...['project-name', 'project-description', 'project-stack', 'project-path', 'project-constraints', 'run-name', 'main-fill', 'inline', 'quick-fill'].map(route => new RegExp('PASS 长度保护 ' + route)),
+  ...['main-fill', 'inline', 'project-fields', 'run-name', 'quick-fill'].map(route => new RegExp('PASS 长度修正 ' + route)),
+  /PASS 长度反馈中文/,
+  /PASS 长度合法预填可立即提交 quick-fill/,
   /PASS 自检模式下用的是内存替身/,
   /PASS 配置开着时启动即注册了快捷键/,
   /PASS 开着时启动就预先建好了面板/,

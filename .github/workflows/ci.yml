@@ -130,6 +130,24 @@ jobs:
       - name: 导入期间写入暂停
         run: npm run test:write-gate
 
+      - name: 项目与运行业务存储
+        run: npm run test:workspace-stores
+
+      - name: 项目上下文隔离
+        run: npm run test:project-context
+
+      - name: 多 key 写入队列
+        run: npm run test:write-queue
+
+      - name: 工作区服务、文件生命周期与 IPC
+        run: npm run test:workspace-service
+
+      - name: 项目运行备份校验与映射
+        run: npm run test:workspace-backup
+
+      - name: 项目运行备份真实往返与回滚
+        run: npm run test:workspace-backup-integration
+
       - name: 单文件安全导出
         run: npm run test:export-file
 
@@ -217,6 +235,12 @@ jobs:
 
       - name: 工作流执行跨进程恢复与功能集成
         run: npm run test:flow-run-integration
+
+      - name: 项目与独立运行界面
+        run: npm run test:workspace-ui
+
+      - name: 所选项目与独立运行跨进程恢复
+        run: npm run test:workspace-restart
 
       - name: 标签页恢复
         run: npm run test:tabs

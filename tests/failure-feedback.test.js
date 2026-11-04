@@ -1,6 +1,8 @@
 // tests/failure-feedback.test.js
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
+const assert = require('assert/strict');
 
 let failures = 0;
 const ok = (cond, msg) => {
@@ -11,10 +13,15 @@ const ok = (cond, msg) => {
 const root = path.resolve(__dirname, '..');
 const main = fs.readFileSync(path.join(root, 'electron-main.js'), 'utf8');
 const renderer = fs.readFileSync(path.join(root, 'src/renderer.js'), 'utf8');
-const trashStart = main.indexOf("ipcMain.handle('trash'");
-const trashBlock = trashStart >= 0 ? main.slice(trashStart, main.indexOf("ipcMain.handle('list-trash'", trashStart)) : '';
-ok(!/try \{ st = await fsp\.stat\(full\); \} catch \{ return true; \}/.test(trashBlock), '删除时读取文件状态失败不会被当成成功');
-ok(/if \(err && err\.code === 'ENOENT'\) return true;/.test(trashBlock) && /throw appError\('E_TRASH_STAT', rel\)/.test(trashBlock), '删除只把文件已不存在视为成功，其他读取失败返回明确错误');
+const trashBlock = (main.match(/^async function trashEntryLocked\(rel\) \{[\s\S]*?^\}/m) || [''])[0];
+ok(!!trashBlock, '删除状态检查仍在真实删除入口中');
+async function checkTrashErrors(source) {
+  const context=vm.createContext({safeJoinWritable:rel=>rel,isLockedLocked:async()=>false,appError:(code,detail)=>new Error(code+'|'+detail),fsp:{stat:async()=>{throw Object.assign(new Error('missing'),{code:'ENOENT'});}}});
+  vm.runInContext(source,context);
+  assert.equal(await context.trashEntryLocked('prompts/a.md'),true);
+  context.fsp.stat=async()=>{throw Object.assign(new Error('denied'),{code:'EACCES'});};
+  await assert.rejects(context.trashEntryLocked('prompts/a.md'),/E_TRASH_STAT\|prompts\/a.md/);
+}
 
 const pickStart = renderer.indexOf('async function pickProjectType()');
 const pickBlock = pickStart >= 0 ? renderer.slice(pickStart, renderer.indexOf('async function newPrompt()', pickStart)) : '';
@@ -43,5 +50,10 @@ for (const label of ['保存展开状态失败', '保存标签状态失败', '�
   ok(!renderer.includes("console.error('" + label + ":'"), label + '时不只写控制台');
 }
 
-if (failures) process.exit(1);
-console.log('[test:failure-feedback] 通过');
+(async()=> {
+  try {await checkTrashErrors(trashBlock);ok(true,'删除只把文件已不存在视为成功，其他读取失败返回明确错误');}
+  catch(error) {ok(false,'删除只把文件已不存在视为成功，其他读取失败返回明确错误');console.error(error.message);}
+  let reverse=false;try {await checkTrashErrors(trashBlock.replace("if (error.code === 'ENOENT') return true;","return true;"));}catch{reverse=true;}
+  ok(reverse,'删除状态检查反向对照拒绝把权限失败当成成功');
+  if(failures) process.exitCode=1;else console.log('[test:failure-feedback] 通过');
+})();

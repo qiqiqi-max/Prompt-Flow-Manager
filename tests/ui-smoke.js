@@ -210,7 +210,7 @@ child.on('exit', (code) => {
     /\[selftest:ui\] PASS 同一次执行里填过的同名占位符在后续步骤预填/,
     /\[selftest:ui\] PASS 取消填写面板时不前进/,
     /\[selftest:ui\] PASS 退出执行后显示「继续执行」和「重新开始」/,
-    /\[selftest:ui\] PASS 执行进度按工作流写进 config/,
+    /\[selftest:ui\] PASS 执行进度写进独立运行存储/,
     /\[selftest:ui\] PASS 继续执行回到上次的步骤，已完成的仍打勾/,
     /\[selftest:ui\] PASS 汇合点等另一条分支：完成左支后转到右支/,
     /\[selftest:ui\] PASS 坏引用步骤给出提示且不能复制/,

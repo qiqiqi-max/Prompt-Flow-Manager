@@ -9,9 +9,10 @@ const FLOW_GRAPH = require('../src/flow-graph');
 const FRONTMATTER = require('../src/frontmatter');
 const PLACEHOLDERS = require('../src/placeholders');
 const INCLUDES = require('../src/includes');
+const PROJECT_CONTEXT = require('../src/project-context');
 const renderer = fs.readFileSync(path.join(__dirname, '../src/renderer.js'), 'utf8');
-const functions = ['flowRunContext', 'loadFlowRun', 'setFlowRun', 'flowRunStepIssue', 'flowRunAction',
-  'copyFlowRunStep', 'copyPromptBody', 'expandIncludes', 'readIncludeContent'];
+const functions = ['flowRunContext', 'selectedWorkspaceRun', 'workspaceScope', 'activeWorkspaceProject', 'flowRunStepIssue', 'flowRunAction',
+  'copyFlowRunStep', 'copyPromptBody', 'copyContent', 'expandIncludes', 'readIncludeContent'];
 const source = (renderer.match(/^let flowRunRevision = 0;$/m) || [''])[0] + '\n' + functions.map(name => {
   const found = renderer.match(new RegExp('^(?:async )?function ' + name + '\\([^)]*\\) \\{[\\s\\S]*?^\\}', 'm'));
   assert(found, 'missing renderer function: ' + name);
@@ -30,17 +31,21 @@ const deferred = () => {
 function setup() {
   const effects = { copied: [], usage: [], remembered: [] };
   const ctx = vm.createContext({
-    FLOW_RUN, FLOW_GRAPH, PLACEHOLDERS, INCLUDES,
-    state: { currentRel: workflow, currentContent: 'workflow', flowRunActive: workflow,
-      flowRuns: { [workflow]: FLOW_RUN.serialize(FLOW_RUN.start(graph)) }, metaByRel: new Map([[prompt, {}]]) },
+    FLOW_RUN, FLOW_GRAPH, PLACEHOLDERS, INCLUDES, PROJECT_CONTEXT,
+    workspaceHashes: new Map([['first-run','hash']]),
+    workflowContentHash: async()=> 'hash',
+    state: { previewFills:{}, currentRel: workflow, currentContent: 'workflow', flowRunActive: workflow,
+      workspace: {projects:{revision:0,activeProjectId:null,projects:[]},runs:{revision:1,selectedByWorkflow:{[workflow]:'first-run'},runs:[{id:'first-run',revision:1,workflowRel:workflow,availability:'available',contextSnapshot:{values:{}},graphSnapshot:steps,progress:FLOW_RUN.serialize(FLOW_RUN.start(graph))}]}}, metaByRel: new Map([[prompt, {}]]) },
     api: { readFile: async () => ({ content: 'body' }) },
     parseWorkflowFlow: () => steps, parseFrontmatter: FRONTMATTER.parse,
-    saveFlowRunsDebounced() {}, refreshFlowRun() {}, toast() {}, t: key => key, tErr: key => key,
+    openNewRun() { ctx.state.workspace.runs.runs[0].id='new-run'; ctx.state.workspace.runs.selectedByWorkflow[workflow]='new-run'; },
+    refreshFlowRun() {}, toast() {}, t: key => key, tErr: key => key,
     writeClipboard: async text => { effects.copied.push(text); },
     recordUsage: rel => effects.usage.push(rel),
-    rememberFillValues: values => effects.remembered.push(values),
+    rememberScopedFill: async values => { effects.remembered.push(values); return true; },
     promptFillPlaceholders: async () => ({ '[name]': 'value' })
   });
+  ctx.workspaceRunAction=async (act,payload) => { const entity=ctx.state.workspace.runs.runs[0]; entity.progress=FLOW_RUN[act](graph,entity.progress); entity.progress.values={...entity.progress.values,...payload.values}; entity.revision++; };
   vm.runInContext(source, ctx);
   return { ctx, effects };
 }
@@ -82,15 +87,16 @@ function setup() {
       release.resolve();
       await copying;
       assert.deepEqual(effects, { copied: [], usage: [], remembered: [] });
-      if (action === 'restart') assert.equal(ctx.state.flowRuns[workflow].current, 'a');
+      if (action === 'restart') assert.equal(ctx.state.workspace.runs.runs[0].progress.current, 'a');
     });
   }
   await test('two pending copies only let the newest request complete', async () => {
     const { ctx, effects } = setup();
     const reads = [deferred(), deferred()];
-    let index = 0;
-    ctx.api.readFile = () => reads[index++].promise;
+    let index = 0; const entered=deferred();
+    ctx.api.readFile = () => {entered.resolve(); return reads[index++].promise;};
     const oldCopy = ctx.copyFlowRunStep();
+    await entered.promise;
     const newCopy = ctx.copyFlowRunStep();
     reads[1].resolve({ content: 'new body' });
     await newCopy;
@@ -98,14 +104,34 @@ function setup() {
     await oldCopy;
     assert.deepEqual(effects.copied, ['new body']);
     assert.deepEqual(effects.usage, [prompt]);
-    assert.equal(ctx.state.flowRuns[workflow].current, 'b');
+    assert.equal(ctx.state.workspace.runs.runs[0].progress.current, 'b');
   });
   await test('unchanged execution copies and advances exactly once', async () => {
     const { ctx, effects } = setup();
     await ctx.copyFlowRunStep();
     assert.deepEqual(effects.copied, ['body']);
     assert.deepEqual(effects.usage, [prompt]);
-    assert.equal(ctx.state.flowRuns[workflow].current, 'b');
+    assert.equal(ctx.state.workspace.runs.runs[0].progress.current, 'b');
   });
+  await test('both clipboard methods failing never advances or remembers', async () => {
+    const {ctx,effects}=setup();
+    ctx.navigator={clipboard:{writeText:async()=>{throw new Error('denied');}}};
+    ctx.document={createElement:()=>({select(){}}),body:{appendChild(){},removeChild(){}},execCommand:()=>false};
+    vm.runInContext(renderer.match(/^async function writeClipboard\(text\) \{[\s\S]*?^\}/m)[0],ctx);
+    await ctx.copyFlowRunStep();
+    assert.equal(ctx.state.workspace.runs.runs[0].progress.current,'a');
+    assert.deepEqual(effects,{copied:[],usage:[],remembered:[]});
+  });
+  await test('clipboard success with store failure leaves progress unchanged and reports failure', async () => {
+    const {ctx,effects}=setup(); const messages=[];
+    ctx.toast=message=>messages.push(message);
+    ctx.workspaceRunAction=async()=>{throw new Error('E_WORKSPACE_WRITE');};
+    await ctx.copyFlowRunStep();
+    assert.deepEqual(effects.copied,['body']);
+    assert.equal(ctx.state.workspace.runs.runs[0].progress.current,'a');
+    assert(messages.includes('workspaceCopiedNotSaved'));
+  });
+  await test('changed workflow hash cannot copy before explicit resume',async()=> { const {ctx,effects}=setup(); ctx.workflowContentHash=async()=> 'changed'; await ctx.copyFlowRunStep(); assert.deepEqual(effects,{copied:[],usage:[],remembered:[]}); assert.equal(ctx.state.workspace.runs.runs[0].progress.current,'a'); });
+  await test('ordinary clipboard failure returns false with visible error and no memory or usage',async()=> { const {ctx,effects}=setup(); const messages=[]; ctx.toast=message=>messages.push(message); ctx.state.currentContent='[name]'; ctx.navigator={clipboard:{writeText:async()=>{throw new Error('denied');}}}; ctx.document={createElement:()=>({select(){}}),body:{appendChild(){},removeChild(){}},execCommand:()=>false}; vm.runInContext(renderer.match(/^async function writeClipboard\(text\) \{[\s\S]*?^\}/m)[0],ctx); assert.equal(await ctx.copyContent(),false); assert.deepEqual(effects,{copied:[],usage:[],remembered:[]}); assert(messages.includes('workspaceCopyFailed')); });
   process.exitCode = failures ? 1 : 0;
 })();

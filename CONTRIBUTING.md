@@ -175,6 +175,10 @@ npm run test:backup-preview # ZIP 导入前统计文件、版本、设置和重�
 npm run test:backup-manifest # 完整备份清单和 SHA-256 校验（裸 node）
 npm run test:import-transaction # 导入回滚：删除新建文件并恢复原文件（裸 node）
 npm run test:write-gate # 完整备份导入独占写入，其他写入排在导入后（裸 node）
+npm run test:workspace-stores # 项目与运行存储：容量、原子写入、损坏留档和链接拒绝（裸 node，自带逐场景反向对照）
+npm run test:project-context # 项目上下文：固定快照、字段别名、填充优先级与隔离（裸 node，自带逐场景反向对照）
+npm run test:write-queue # 多 key 同步预留、独占导入与失败释放（裸 node，自带有界死锁反向对照）
+npm run test:workspace-service # 工作区迁移、运行结算、文件事务和快速面板过期请求（裸 node，自带反向对照）
 npm run test:export-file # 单文件导出原子写入，失败时保留原文件（裸 node）
 npm run test:failure-feedback # 删除和新增工程类型的失败不会被当成成功（裸 node）
 npm run test:draft-store # 草稿按文件独立保存、清除和处理损坏文件（裸 node）
@@ -183,6 +187,10 @@ npm run test:workflow-index # 引用索引：谁在引用这个提示词、悬�
 npm run test:flow-graph # 工作流图：分层、成环、不可达步骤（裸 node，自带一组反向对照）
 npm run test:flow-run    # 工作流执行：分支选择、汇合点结算、进度持久化（裸 node，自带一组反向对照）
 npm run test:flow-run-copy # 读盘或填写期间切换执行状态，旧请求不复制、不推进（裸 node）
+npm run test:workspace-ui # 工作区 UI：项目隔离、独立运行、旧请求与关窗等待、快面板捕获令牌
+npm run test:workspace-restart # 两次真实启动：恢复所选项目、项目预填记忆、独立运行进度和运行预填值
+npm run test:workspace-backup # 工作区备份：配对校验、容量、ID和依赖映射（含反向对照）
+npm run test:workspace-backup-integration # 真实 Electron ZIP 往返、重名映射、并发快照与故障回滚（含反向对照）
 npm run test:flow-run-integration # 两次真实启动：执行进度恢复、占位符默认值、复制统计与批量删除
 npm run test:mcp          # 只读 MCP server：协议往返、只读边界、返回上限、prompts 斜杠命令（裸 node，自带反向对照）
 npm run test:cache-budget # 正文缓存的两道闸与占用记账（裸 node，自带一组反向对照）
@@ -284,6 +292,7 @@ postinstall，二进制改成惰性下载，所以干净环境里 `npm ci` 之�
 | `PFM_SELFTEST_EVAL=<脚本>` | 页面加载后执行一段自检脚本 | 必须配 `PFM_DATA_DIR` |
 | `PFM_SELFTEST_IMPORT_FAIL_AFTER_FILES=1` | 完整备份写入正文后注入失败 | 只在 `PFM_SELFTEST=1` 时生效 |
 | `PFM_SELFTEST_IMPORT_FAIL_AFTER_VERSIONS=1` | 完整备份写完版本快照和索引（含版本说明）后注入失败 | 只在 `PFM_SELFTEST=1` 时生效 |
+| `PFM_SELFTEST_WORKSPACE_WRITE_FAIL=1` | 让项目或运行存储写入失败 | 仅 `PFM_SELFTEST=1` 且设 `PFM_DATA_DIR` 时生效 |
 | `PFM_SELFTEST_CONFIG_WRITE_FAIL=1` | 让配置写入失败 | 只在 `PFM_SELFTEST=1` 时生效 |
 | `PFM_SELFTEST_ZOOM=<倍数>` | 自检前设置页面缩放，范围 0.5 到 3 | 只给布局测试使用 |
 | `PFM_SELFTEST_CLOSE_UNSAVED=1` | 自定义脚本执行后触发关窗，验证未保存草稿保护 | 必须配 `PFM_DATA_DIR` |
@@ -417,3 +426,5 @@ postinstall，二进制改成惰性下载，所以干净环境里 `npm ci` 之�
 
 `.markdown-body` 里的 `em` 是另一回事：那是正文标题相对正文字号的倍数
 （h1 1.6em 等），本来就该跟着正文走，不要改成 rem。
+
+工作区的 `config.flowRuns` 仅作旧数据迁移备份，迁移成功后不再回写。回退旧版应用不能同步新运行。

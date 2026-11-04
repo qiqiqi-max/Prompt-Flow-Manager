@@ -29,6 +29,8 @@ const helpers = `
     check(condition(), message);
   };
   const button = act => document.querySelector('#flow-run button[data-run-act="' + act + '"]');
+  const createRun = async name => { button('start').click(); await waitFor(()=>!!document.getElementById('run-save'),'new run dialog opens'); document.getElementById('run-name').value=name; document.getElementById('run-save').click(); };
+  const savedRun = async rel => { const ws=await window.promptFlowApi.getWorkspace(); return ws.runs.runs.find(run=>run.id===ws.runs.selectedByWorkflow[rel]); };
   const current = id => !!document.querySelector('#preview .flow-node[data-id="' + id + '"].run-current');
 `;
 
@@ -57,7 +59,7 @@ function run(body) {
     const first = await run(`
       await openFile(${JSON.stringify(workflow)});
       check(!!button('start'), 'workflow exposes start action');
-      button('start').click();
+      await createRun('Integration run');
       await waitFor(() => current('first'), 'start highlights first step');
       let copied = '';
       const originalWrite = navigator.clipboard.writeText;
@@ -74,7 +76,7 @@ function run(body) {
         check(usage.frequent.some(item => item.rel === ${JSON.stringify(prompt)} && item.count === 1), 'step counts prompt usage once');
         check(!usage.frequent.some(item => item.rel === ${JSON.stringify(workflow)}), 'step does not count workflow as prompt');
         await window.__pfmFlushPending();
-        const saved = ((await window.promptFlowApi.getConfig()).flowRuns || {})[${JSON.stringify(workflow)}];
+        const saved = (await savedRun(${JSON.stringify(workflow)})).progress;
         check(saved && saved.current === 'second' && JSON.stringify(saved.done) === '["first"]', 'flush persists current step');
         await openFile(${JSON.stringify(prompt)});
         state.previewFills[${JSON.stringify(prompt)}] = { '[项目]': 'inline' };
@@ -86,19 +88,19 @@ function run(body) {
       await window.promptFlowApi.createFile(movedWorkflow, (await window.promptFlowApi.readFile(${JSON.stringify(workflow)})).content);
       await refreshTree();
       await openFile(movedWorkflow);
-      button('start').click();
+      await createRun('Integration run');
       await waitFor(() => current('first'), 'separate workflow starts independently');
       await moveFileToDir(movedWorkflow, 'prompts/testing');
       await window.__pfmFlushPending();
-      check(!state.flowRuns[movedWorkflow], 'moving out of workflows clears in-memory run');
-      check(!(await window.promptFlowApi.getConfig()).flowRuns[movedWorkflow], 'moving out of workflows clears persisted run');
+      check(!selectedWorkspaceRun(movedWorkflow), 'moving out clears active selection');
+      check(state.workspace.runs.runs.some(run=>run.workflowRel===movedWorkflow && run.availability==='moved'), 'moving out retains disabled history');
       await window.promptFlowApi.createFile('workflows/multiple.md', [
         '---', 'title: Multiple entries', 'flow:', '  - id: a', '    next: c',
         '  - id: b', '    next: c', '  - id: c', '---', 'Multiple entries'
       ].join('\\n'));
       await refreshTree();
       await openFile('workflows/multiple.md');
-      button('start').click();
+      await createRun('Integration run');
       await waitFor(() => document.querySelectorAll('#flow-run button[data-run-act="choose"]').length === 2, 'multiple entries offer both starting steps');
       await window.__pfmFlushPending();
       console.log('[flow-integration] PASS phase complete');
@@ -122,11 +124,12 @@ function run(body) {
       const removed = await window.promptFlowApi.batchTrash([${JSON.stringify(workflow)}]);
       await closeTrashedTabs(removed.ok.map(item => item.rel));
       await window.__pfmFlushPending();
-      check(!state.flowRuns[${JSON.stringify(workflow)}], 'batch deletion clears in-memory run');
-      check(!(await window.promptFlowApi.getConfig()).flowRuns[${JSON.stringify(workflow)}], 'flush does not restore deleted run');
+      check(!selectedWorkspaceRun(${JSON.stringify(workflow)}), 'batch deletion clears selection');
+      check(state.workspace.runs.runs.some(run=>run.workflowRel===${JSON.stringify(workflow)} && run.availability==='missing'), 'flush retains disabled deleted history');
       await openFile('workflows/multiple.md');
       check(!!button('resume'), 'multiple-entry choice survives restart');
       button('resume').click();
+      await waitFor(()=>!!document.querySelector('#flow-run button[data-run-id="b"]'),'resume loads saved choices');
       document.querySelector('#flow-run button[data-run-id="b"]').click();
       await waitFor(() => current('b'), 'resumed multiple-entry workflow can select its start');
       console.log('[flow-integration] PASS phase complete');
