@@ -175,6 +175,9 @@ npm run test:backup-preview # ZIP 导入前统计文件、版本、设置和重�
 npm run test:backup-manifest # 完整备份清单和 SHA-256 校验（裸 node）
 npm run test:import-transaction # 导入回滚：删除新建文件并恢复原文件（裸 node）
 npm run test:write-gate # 完整备份导入独占写入，其他写入排在导入后（裸 node）
+npm run test:workspace-stores # 项目与运行存储：容量、原子写入、损坏留档和链接拒绝（裸 node，自带逐场景反向对照）
+npm run test:project-context # 项目上下文：固定快照、字段别名、填充优先级与隔离（裸 node，自带逐场景反向对照）
+npm run test:write-queue # 多 key 同步预留、独占导入与失败释放（裸 node，自带有界死锁反向对照）
 npm run test:export-file # 单文件导出原子写入，失败时保留原文件（裸 node）
 npm run test:failure-feedback # 删除和新增工程类型的失败不会被当成成功（裸 node）
 npm run test:draft-store # 草稿按文件独立保存、清除和处理损坏文件（裸 node）
