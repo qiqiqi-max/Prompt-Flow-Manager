@@ -13,6 +13,8 @@
   const view = {
     lang: 'zh',
     fillMemory: {},
+    contextSnapshot: null,
+    copyToken: null,
     mode: 'list',      // 'list' 搜索列表 | 'fill' 填占位符
     results: [],
     resultsFor: null,  // 当前 results 对应的查询词；和输入框不一致说明结果是旧的
@@ -181,6 +183,9 @@
     if (view.busy || view.mode !== 'list') return;
     view.busy = true;
     const mySeq = showSeq;
+    const capturedToken=view.copyToken;
+    const capturedContext=view.contextSnapshot;
+    const capturedMemory=view.fillMemory;
     try {
       await ensureFresh();
       const r = view.results[view.active];
@@ -200,10 +205,10 @@
       if (mySeq !== showSeq) return;
       const tokens = PLACEHOLDERS.extract(body);
       if (!tokens.length) {
-        await finishCopy(body, r.rel);
+        await finishCopy(body, r.rel, capturedToken);
         return;
       }
-      openFillForm(r, body, tokens);
+      openFillForm(r, body, tokens, capturedToken, capturedContext, capturedMemory);
     } catch (e) {
       setStatus(describeError(e), true);
     } finally {
@@ -214,11 +219,11 @@
   // 复制成功的唯一出口。主进程写剪贴板并隐藏面板（同样是那边的单一出口），
   // 这里不另写一份 navigator.clipboard：面板失焦就会被隐藏，而 navigator.clipboard
   // 在页面没有焦点时会直接拒绝。
-  async function finishCopy(text, rel) {
-    await qlApi.copy(text, rel);
+  async function finishCopy(text, rel, token) {
+    await qlApi.copy(text, rel, token);
   }
 
-  function openFillForm(r, body, tokens) {
+  function openFillForm(r, body, tokens, token, context, globalValues) {
     view.mode = 'fill';
     const box = $('ql-fill');
     box.textContent = '';
@@ -238,6 +243,7 @@
       label.textContent = it.hint || it.token;
       const input = document.createElement('textarea');
       input.rows = 2;
+      input.maxLength = 20000;
       input.id = 'ql-fill-' + i;
       input.dataset.token = it.token;
       input.placeholder = it.token;
@@ -245,8 +251,7 @@
       // 主窗口记住的值预填，和主窗口填充面板同一份记忆。
       // 这里只读不写：两个窗口各自防抖写同一个 fillMemory 键会互相覆盖（各自读的是
       // 旧快照），而主窗口那份是有上限和淘汰顺序的，交给它一处维护。
-      const memo = view.fillMemory[it.token];
-      input.value = typeof memo === 'string' && memo.trim() ? memo : (it.default != null ? it.default : '');
+      input.value = PROJECT_CONTEXT.resolve(it,{context,globalValues});
       row.appendChild(label);
       const resize = () => {
         input.style.height = 'auto';
@@ -300,7 +305,7 @@
       view.busy = true;
       try {
         // 没填的 token 原样保留，这条语义在 PLACEHOLDERS.fill 里，面板不另写一套
-        await finishCopy(PLACEHOLDERS.fill(body, values), r.rel);
+        await finishCopy(PLACEHOLDERS.fill(body, values), r.rel, token);
       } catch (e) {
         setStatus(describeError(e), true);
       } finally {
@@ -361,6 +366,8 @@
   // 搜索词保留并全选——连着找同一条提示词时不用重打，想搜别的直接打字就覆盖了。
   qlApi.onShow((info) => {
     showSeq++;
+    view.copyToken={showGeneration:info.showGeneration,workspaceRevision:info.workspaceRevision};
+    view.contextSnapshot=info.contextSnapshot || null;
     applyLook(info);
     view.fillMemory = info && info.fillMemory && typeof info.fillMemory === 'object' ? info.fillMemory : {};
     backToList();

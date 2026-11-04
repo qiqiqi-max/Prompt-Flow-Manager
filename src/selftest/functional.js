@@ -103,23 +103,36 @@
       check('工作流引用不误改相近路径和正文', refContent.includes(renamed + '.bak') && refContent.includes('正文保留 ' + renamed), refContent);
       await api.setConfig({ lockedFiles: [] });
 
-      // 6c. 工作流执行进度（config.flowRuns）跟着工作流改名走，删除时清掉。
-      // 和锁一样由主进程在 rename / trash 里改 config：渲染进程那边的 migrateFlowRun
-      // 只同步内存，不经过 UI 的改名（外部工具、IPC 直调）也必须正确。
+      // 6c. The authoritative run IDs/progress survive rename; deletion retains disabled history.
       {
         const runWf = 'workflows/自检执行进度.md';
         const runWf2 = 'workflows/自检执行进度改名.md';
-        await api.createFile(runWf, '---\ntitle: 自检执行进度\nflow:\n  - id: a\n    prompt: ' + renamed + '\n---\n');
-        const runRec = { v: 1, current: 'a', done: [], skipped: [], history: [], values: { '[x]': '1' }, updatedAt: 1 };
-        await api.setConfig({ flowRuns: { [runWf]: runRec, 'workflows/别的.md': runRec } });
-        await api.rename(runWf, runWf2);
-        let runs = (await api.getConfig()).flowRuns || {};
-        check('工作流改名后执行进度跟着走', !runs[runWf] && !!runs[runWf2] && runs[runWf2].current === 'a'
-          && !!runs['workflows/别的.md'], JSON.stringify(Object.keys(runs)));
+        const otherWf = 'workflows/别的.md';
+        const body = '---\ntitle: 自检执行进度\nflow:\n  - id: a\n    prompt: ' + renamed + '\n---\n';
+        await api.createFile(runWf,body);
+        await api.createFile(otherWf,body);
+        let workspace=await api.getWorkspace();
+        const created=await api.runAction('create',{revision:workspace.runs.revision,workflowRel:runWf,name:'主运行',projectId:null});
+        const runId=created.runId;
+        const other=await api.runAction('create',{revision:created.runs.revision,workflowRel:otherWf,name:'别的运行',projectId:null});
+        const otherId=other.runId;
+        const progress=JSON.stringify(other.runs.runs.find(run=>run.id===runId).progress);
+        await api.rename(runWf,runWf2);
+        workspace=await api.getWorkspace();
+        let run=workspace.runs.runs.find(candidate=>candidate.id===runId);
+        check('工作流改名后执行进度跟着走',run && run.workflowRel===runWf2 && JSON.stringify(run.progress)===progress
+          && !workspace.runs.selectedByWorkflow[runWf] && workspace.runs.selectedByWorkflow[runWf2]===runId
+          && workspace.runs.runs.some(candidate=>candidate.id===otherId && candidate.workflowRel===otherWf),JSON.stringify(workspace.runs));
         await api.trash(runWf2);
-        runs = (await api.getConfig()).flowRuns || {};
-        check('工作流删除后执行进度被清掉', !runs[runWf2] && !!runs['workflows/别的.md'], JSON.stringify(Object.keys(runs)));
-        await api.setConfig({ flowRuns: {} });
+        workspace=await api.getWorkspace();
+        run=workspace.runs.runs.find(candidate=>candidate.id===runId);
+        check('工作流删除后进度保留为禁用历史',run && run.availability==='missing' && JSON.stringify(run.progress)===progress
+          && !workspace.runs.selectedByWorkflow[runWf2] && workspace.runs.selectedByWorkflow[otherWf]===otherId
+          && workspace.runs.runs.some(candidate=>candidate.id===otherId && candidate.availability==='available'),JSON.stringify(workspace.runs));
+        await api.runAction('remove',{id:runId,revision:run.revision});
+        const otherRun=workspace.runs.runs.find(candidate=>candidate.id===otherId);
+        await api.runAction('remove',{id:otherId,revision:otherRun.revision});
+        await api.trash(otherWf);
       }
 
       // 6d. 配置键闸门：原型链上的键必须被拒，且不能落进 config.json。

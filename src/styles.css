@@ -908,3 +908,46 @@ mark {
   .editor-wrap { padding: 8px 12px; }
   .editor-actions { padding-top: 6px; }
 }
+
+/* Project controls stay within the sidebar so the main toolbar retains its space. */
+.workspace-controls { display: grid; grid-template-columns: auto minmax(0,1fr); align-items: center; gap: 6px; padding: 8px; border-bottom: 1px solid var(--border); }
+.workspace-controls label { font-size: 0.75rem; color: var(--text-muted); }
+.workspace-controls select, .workspace-run-select select { min-width: 0; width: 100%; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg-alt); color: var(--text); font-size: 0.8125rem; }
+.workspace-actions { grid-column: 1 / -1; }
+.workspace-actions, .workspace-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.workspace-actions > button { flex: 1; font-size: 0.75rem; }
+.workspace-wrap { width: min(560px, calc(100vw - 48px)); max-height: calc(100vh - 64px); overflow-y: auto; display: grid; gap: 12px; }
+.workspace-list { max-height: 45vh; overflow-y: auto; display: grid; gap: 12px; }
+.workspace-row > span { flex: 1 1 100%; overflow-wrap: anywhere; }
+.workspace-field { display: grid; gap: 4px; font-size: 0.8125rem; }
+.workspace-field input, .workspace-field textarea, .workspace-field select { width: 100%; box-sizing: border-box; font: inherit; color: var(--text); background: var(--bg-alt); border: 1px solid var(--border-strong); border-radius: 6px; padding: 8px; }
+.workspace-field textarea { resize: vertical; min-height: 48px; }
+.workspace-history-row { border-bottom: 1px solid var(--border); padding-bottom: 12px; display: grid; gap: 8px; overflow-wrap: anywhere; }
+
+.workspace-hint { font-size: 0.75rem; color: var(--text-muted); }
+.workspace-run-select { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; font-size: 0.8125rem; }
+.workspace-run-select select { max-width: 300px; }
+.workspace-controls :focus-visible, .workspace-wrap :focus-visible, .workspace-run-select :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+
+.workspace-error { grid-column: 1 / -1; font-size: 0.75rem; color: var(--danger-text); max-height: 96px; overflow-y: auto; overflow-wrap: anywhere; }
+.workspace-actions { gap: 6px; }
+.workspace-actions > button { padding: 4px 6px; min-width: 0; }
+@media (max-width: 560px) {
+  .workspace-controls { grid-template-columns: minmax(0,1fr); padding: 6px; gap: 4px; }
+  .workspace-controls > label { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); overflow: hidden; }
+  .workspace-controls select { padding: 4px 6px; }
+  .usage-panel { max-height: 30%; }
+}
+
+.ctx-menu.ctx-centered.workspace-menu { width: min(560px, calc(100vw - 48px)); min-width: 0; max-width: calc(100vw - 48px); }
+.workspace-wrap { width: 100%; box-sizing: border-box; }
+.workspace-field { min-width: 0; }
+
+.workspace-run-context { font-size: 0.75rem; color: var(--text-muted); overflow-wrap: anywhere; margin-bottom: 8px; }
+
+.workspace-history-detail { font-size: 0.8125rem; padding-top: 8px; }
+.workspace-detail-fields { display: grid; gap: 4px; margin: 0 0 12px; }
+.workspace-detail-fields dt { font-size: 0.75rem; color: var(--text-muted); }
+.workspace-detail-fields dd { margin: 0 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.workspace-history-steps { padding-left: 24px; display: grid; gap: 8px; }
+.workspace-history-detail h4 { margin: 12px 0 8px; font-size: 0.8125rem; }

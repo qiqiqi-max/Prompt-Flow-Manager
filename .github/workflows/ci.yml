@@ -230,6 +230,9 @@ jobs:
       - name: 工作流执行跨进程恢复与功能集成
         run: npm run test:flow-run-integration
 
+      - name: 项目与独立运行界面
+        run: npm run test:workspace-ui
+
       - name: 标签页恢复
         run: npm run test:tabs
 

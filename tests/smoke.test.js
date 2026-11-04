@@ -671,9 +671,9 @@ section('预览区占位符');
   // 复制逻辑抽成了 copyPromptBody（主界面和执行模式共用），写剪贴板只在函数末尾一处。
   // 所以这里查的是"填过的分支用填好的正文、且不进面板分支"，而不是紧跟着的 writeClipboard。
   const copyFn = (rendererSrc.match(/async function copyPromptBody\(content, opts\) \{([\s\S]*?)\n\}/) || [])[1] || '';
-  assert(/if \(inlineCount\) \{\s*const merged = PLACEHOLDERS\.withDefaults\(body, inline\);\s*text = PLACEHOLDERS\.fill\(body, merged\);[\s\S]*?\} else \{[\s\S]*?promptFillPlaceholders\(/.test(copyFn),
+  assert(/if \(inlineCount\) \{\s*const merged = Object\.fromEntries\([\s\S]*?PROJECT_CONTEXT\.resolve\([\s\S]*?;\s*text = PLACEHOLDERS\.fill\(body, merged\);[\s\S]*?\} else \{[\s\S]*?promptFillPlaceholders\(/.test(copyFn),
     '填过就不再弹面板，直接用填好的正文');
-  assert(/await writeClipboard\(text\);\s*toast\(message, 'success'\);\s*return \{ copied: true, values \};\s*$/.test(copyFn),
+  assert(/await writeClipboard\(text\);[\s\S]*?if\(remembered\) toast\(message, 'success'\);\s*return \{ copied: true, values \};\s*$/.test(copyFn),
     '复制成功只有函数末尾一个出口');
   assert((copyFn.match(/writeClipboard\(/g) || []).length === 1, 'copyPromptBody 里只写一次剪贴板');
 }
@@ -683,10 +683,10 @@ section('工作流执行模式');
 // 行为由 test:ui 覆盖，这里卡住接线：两个调用点都走 copyPromptBody。
 {
   const fnBody = (name) => (rendererSrc.match(new RegExp('async function ' + name + '\\([^)]*\\) \\{([\\s\\S]*?)\\n\\}')) || [])[1] || '';
-  assert(/copyPromptBody\(state\.currentContent, \{ inline \}\)/.test(fnBody('copyContent')), '主界面复制走 copyPromptBody');
-  assert(/copyPromptBody\(file\.content, \{ prefill: ctx\.run\.values, isCurrent \}\)/.test(fnBody('copyFlowRunStep')),
+  assert(/copyPromptBody\(content, \{ inline, scope, isCurrent:/.test(fnBody('copyContent')), '主界面复制走 copyPromptBody');
+  assert(/copyPromptBody\(file\.content,\{prefill:ctx\.run\.values,scope:[\s\S]*?isCurrent,remember:false\}\)/.test(fnBody('copyFlowRunStep')),
     '复制本步走 copyPromptBody，并把本次会话填过的值作为预填');
-  assert(/if \(!res\.copied\) return;[\s\S]*FLOW_RUN\.complete\(/.test(fnBody('copyFlowRunStep')),
+  assert(/if\(!result\.copied\) return;[\s\S]*workspaceRunAction\('complete'/.test(fnBody('copyFlowRunStep')),
     '复制本步取消时不前进，复制成功才记完成');
   // 两个入口自己都不碰剪贴板、不自己展开 include / 填占位符：碰了就是第二份复制逻辑。
   const own = ['copyContent', 'copyFlowRunStep'].filter(n => /writeClipboard\(|navigator\.clipboard|PLACEHOLDERS\.fill\(|INCLUDES\.resolveAsync\(/.test(fnBody(n)));
@@ -695,7 +695,7 @@ section('工作流执行模式');
   assert(!/'flowRuns'/.test(mainSrc.slice(mainSrc.indexOf('const KNOWN_CONFIG_KEYS'), mainSrc.indexOf('const KNOWN_CONFIG_KEYS') + 400)),
     'flowRuns 是只读迁移备份，不接受配置回写');
   const flushBody = (rendererSrc.match(/window\.__pfmFlushPending = async \(\) => \{([\s\S]*?)\n\};/) || [])[1] || '';
-  assert(/saveFlowRunsDebounced/.test(flushBody), '关窗前会把执行进度的防抖写入落盘');
+  assert(/workspacePending/.test(flushBody), '关窗前等待工作区权威写入落盘');
   const indexHtml = fs.readFileSync(path.join(root, 'src/index.html'), 'utf8');
   assert(indexHtml.indexOf('src="flow-graph.js"') !== -1 && indexHtml.indexOf('src="flow-graph.js"') < indexHtml.indexOf('src="flow-run.js"')
     && indexHtml.indexOf('src="flow-run.js"') < indexHtml.indexOf('src="renderer.js"'),
@@ -795,7 +795,7 @@ section('使用统计与收藏');
   // 真实复制、取消及次数由 test:flow-run-integration 验证。
   {
     const at = rendererSrc.indexOf('async function copyContent()');
-    const end = at > 0 ? rendererSrc.indexOf('\n}\n', at) : -1;
+    const end = at > 0 ? rendererSrc.indexOf('\n}', at) : -1;
     const body = end > at ? rendererSrc.slice(at, end) : '';
     const calls = (body.match(/recordUsage\(/g) || []).length;
     assert(calls === 1 && /if \(res\.copied\) recordUsage\(rel\);/.test(body),

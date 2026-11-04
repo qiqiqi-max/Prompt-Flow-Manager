@@ -144,7 +144,10 @@ async function runCases(lib, label, wire = (o) => o) {
     const writeFileAtomic = async (f, data) => {
       const temporary = f + '.tmp-' + ++writes;
       await fs.promises.writeFile(temporary, data, 'utf8');
-      await fs.promises.rename(temporary, f);
+      for(let attempt=0;attempt<3;attempt++) {
+        try { await fs.promises.rename(temporary,f); return; }
+        catch(error) { if(!['EPERM','EBUSY','EACCES'].includes(error.code) || attempt===2) throw error; await sleep(40*(attempt+1)); }
+      }
     };
     const gate = createWriteGate();
     let clock = NOW;

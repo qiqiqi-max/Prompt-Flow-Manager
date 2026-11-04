@@ -1020,6 +1020,9 @@
           check('打开工作流时流程图上方有「开始执行」', !!runBtn('start') && !runBtn('resume'),
             (document.getElementById('flow-run') || {}).textContent || '(没有执行面板)');
           await realClick(runBtn('start'));
+          document.getElementById('run-name').value='UI run';
+          await realClick(document.getElementById('run-save'));
+          await waitFor(()=>node('s') && node('s').classList.contains('run-current'));
           check('开始执行后入口步骤高亮为当前步骤', node('s') && node('s').classList.contains('run-current')
             && node('s').getAttribute('aria-current') === 'step', node('s') ? node('s').className : '(没有节点)');
           const bodyOk = await waitFor(() => (document.getElementById('flow-run-body') || {}).textContent
@@ -1051,13 +1054,15 @@
           await realClick(runBtn('exit'));
           check('退出执行后显示「继续执行」和「重新开始」', !!runBtn('resume') && !!runBtn('restart')
             && !document.querySelector('#preview .flow-node.run-current'), (document.getElementById('flow-run') || {}).textContent);
-          await saveFlowRunsDebounced.flush();
-          const saved = ((await window.promptFlowApi.getConfig()).flowRuns || {})[wfRel];
-          check('执行进度按工作流写进 config', !!saved && saved.current === 'left' && JSON.stringify(saved.done) === '["s"]'
+          await window.__pfmFlushPending();
+          const workspace = await window.promptFlowApi.getWorkspace();
+          const savedEntity = workspace.runs.runs.find(run=>run.id===workspace.runs.selectedByWorkflow[wfRel]);
+          const saved = savedEntity && savedEntity.progress;
+          check('执行进度写进独立运行存储', !!saved && saved.current === 'left' && JSON.stringify(saved.done) === '["s"]'
             && saved.values && saved.values[shared] === '共享值甲', JSON.stringify(saved));
 
           // 模拟重启：内存里的进度换成磁盘上读回来的那份，重新打开工作流
-          state.flowRuns = FLOW_RUN.cleanRuns((await window.promptFlowApi.getConfig()).flowRuns);
+          applyWorkspaceSnapshot(await window.promptFlowApi.getWorkspace());
           state.flowRunActive = null;
           await openFile('prompts/testing/自检执行汇合.md');
           await openFile(wfRel);

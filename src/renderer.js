@@ -102,7 +102,10 @@ const state = {
   usagePanelTab: null,        // 侧边栏收藏/常用区当前显示哪一栏；null = 自动挑有内容的那栏
   treeSelection: TREE_SELECTION.empty(), // 文件树多选：{ selected: Set<rel>, anchor }，见 syncTreeSelection
   batchRunning: false,        // 批量操作进行中（禁止重复触发，见 runBatch）
-  flowRuns: {},               // 工作流执行进度：工作流 rel -> 执行记录（落盘格式见 src/flow-run.js 文件头）
+  workspace: null,
+  workspaceError: '',
+  workspaceBusy: 0,
+  workspaceDialog: null,
   flowRunActive: null         // 此刻处于执行模式的工作流 rel（不落盘，退出执行只收起面板）
 };
 
@@ -1007,12 +1010,12 @@ function renderMetaBar() {
 
 // 弹层里的 Tab 陷阱。不拦的话按 Tab 会跑到弹层背后的侧边栏/工具栏上——
 // 弹层还开着，焦点却在看不见的地方走。手写顺序而不是查 tabindex：
-// 这些弹层的可聚焦元素就是输入框和按钮，DOM 顺序即视觉顺序。
+// 历史详情的原生 summary 也要能通过 Tab 到达，DOM 顺序即视觉顺序。
 {
   const menu = $('ctx-menu');
   menu.addEventListener('keydown', (e) => {
     if (e.key !== 'Tab') return;
-    const items = Array.from(menu.querySelectorAll('input, button, select, textarea'))
+    const items = Array.from(menu.querySelectorAll('input, button, select, textarea, summary'))
       .filter(el => !el.disabled && el.offsetParent !== null);
     if (!items.length) return;
     const current = items.indexOf(document.activeElement);
@@ -1118,9 +1121,11 @@ function enhancePreviewPlaceholders(container) {
   // token -> { options, default }：chip 上要标出"有选项 / 有默认值"，点开时也要用到。
   const metaOf = new Map(items.map(it => [it.token, it]));
   const values = state.previewFills[rel] || {};
+  const scope=workspaceScope();
   const wanted = new Map(tokens.map(tok => [tok, tok]));
   if (!tokens.length) return;
 
+  for (const [tok,key] of wanted) {
   const walker = document.createTreeWalker(preview, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
       const parent = node.parentElement;
@@ -1136,9 +1141,7 @@ function enhancePreviewPlaceholders(container) {
     // 每个 text node 只处理"原文里正好有这种 token 文本"的情况。
     // 用 token 原文比对而不是重新跑一遍正则：正则会把正文里普通的 [..] 也框进来，
     // 而那些恰好是 extract 特意排除掉的。
-    for (const [tok, key] of wanted) {
-      if (node.nodeValue && node.nodeValue.includes(key)) targets.push({ node, key, tok });
-    }
+    if (node.nodeValue && node.nodeValue.includes(key)) targets.push({ node, key, tok });
   }
   for (const { node, key, tok } of targets) {
     if (!node.parentNode) continue;   // 同一轮里可能被前一次替换掉（共享父节点时）
@@ -1154,8 +1157,10 @@ function enhancePreviewPlaceholders(container) {
         mark.tabIndex = 0;
         mark.setAttribute('role', 'button');
         if (!values[tok]) mark.title = t('fillInlineTitle');
-        const filled = values[tok];
         const meta = metaOf.get(tok) || {};
+        const filled = PROJECT_CONTEXT.resolve({...meta,default:null},{...scope,values});
+        const memory=scope.context !== null ? scope.context.values : scope.globalValues;
+        const explicit=Object.hasOwn(values,tok) || Object.hasOwn(memory,tok);
         // 有选项 / 有默认值的 chip 带上类名，样式上加一个角标（见 styles.css 的
         // mark.ph-opts / mark.ph-default）。角标文字走 data-badge + CSS attr()，
         // 不进 textContent：自检和"填过的 chip 显示值"都按 textContent 比对。
@@ -1168,7 +1173,7 @@ function enhancePreviewPlaceholders(container) {
           mark.classList.add('ph-filled');
           mark.textContent = filled;
           mark.title = tok;
-        } else if (hasDefault) {
+        } else if (hasDefault && !explicit) {
           // 没填但有默认值：显示默认值本身。复制时没改就按默认值填（见 copyContent），
           // 预览显示的就是复制出去的样子。title 里留着原文和"这是默认值"的说明。
           mark.textContent = meta.default;
@@ -1187,6 +1192,7 @@ function enhancePreviewPlaceholders(container) {
       if (part) frag.appendChild(document.createTextNode(part));
     });
     node.parentNode.replaceChild(frag, node);
+  }
   }
   renderFillHint();
 }
@@ -1224,13 +1230,14 @@ async function fillPlaceholderInline(token) {
   const values = state.previewFills[rel] || {};
   const meta = PLACEHOLDERS.extract(parseFrontmatter(state.currentContent).body)
     .find(it => it.token === token) || { token, hint: token, options: [], default: null };
-  const current = values[token] || meta.default || '';
+  const scope=workspaceScope();
+  const revision=flowRunRevision;
+  const current = PROJECT_CONTEXT.resolve(meta,{...scope,values});
   const next = await promptPlaceholderValue(meta, current);
+  if (revision!==flowRunRevision || state.currentRel!==rel) return false;
   if (next === null) return false;                 // 取消
   if (!state.previewFills[rel]) state.previewFills[rel] = {};
-  if (next === '') delete state.previewFills[rel][token];
-  else state.previewFills[rel][token] = next;
-  if (next) rememberFillValues({ [token]: next });
+  state.previewFills[rel][token] = next;
   // 重绘整个预览：同一 token 可能出现多次，逐个改 DOM 是重复状态。
   // 预览本来就是重渲染出来的，代价和一帧视图刷新相当。
   renderContent();
@@ -1424,58 +1431,234 @@ function drawFlowEdges() {
 //
 // 规则全在 src/flow-run.js（裸 node 可测，见 test:flow-run）：入口、候选、汇合点、
 // 回退、坏进度修复。这里只做两件事——把状态画出来，把按钮接到状态机上。
-//
-// 进度存在 config.flowRuns[<工作流 rel>]，按工作流区分，重启后能继续。
-// state.flowRunActive 是"此刻是否处于执行模式"，不落盘：退出执行只是收起面板，
-// 进度留着，下次打开显示「继续执行」。
-
-// 界面状态发生变化就使旧复制请求失效；同一步骤 ID 在重新开始后也属于新的一次执行。
+// Saved documents are authoritative; presenting history must never repair progress.
 let flowRunRevision = 0;
-const saveFlowRunsDebounced = debounce(async () => {
-  try { await api.setConfig({ flowRuns: state.flowRuns }); }
-  catch (e) { reportBackgroundSaveError(e); }
-}, 500);
+const workspacePending = new Set();
+const workspaceHashes = new Map();
+function activeWorkspaceProject() {
+  const doc = state.workspace && state.workspace.projects;
+  return doc ? doc.projects.find(project => project.id === doc.activeProjectId) || null : null;
+}
+function selectedWorkspaceRun(rel = state.currentRel) {
+  const doc = state.workspace && state.workspace.runs;
+  return doc ? doc.runs.find(run => run.id === doc.selectedByWorkflow[rel]) || null : null;
+}
+function workspaceScope() {
+  const project = activeWorkspaceProject();
+  return { projectId: project ? project.id : null, revision: project ? project.revision : null,
+    context: project ? PROJECT_CONTEXT.snapshot(project) : null,
+    globalValues: PROJECT_CONTEXT.cleanValues(state.fillMemory) };
+}
+function applyWorkspaceSnapshot(snapshot) {
+  if (!snapshot || !snapshot.projects || !snapshot.runs) return false;
+  const old = state.workspace;
+  const before = activeWorkspaceProject();
+  const oldRun = selectedWorkspaceRun();
+  state.workspace = { projects: !old || snapshot.projects.revision >= old.projects.revision ? snapshot.projects : old.projects,
+    runs: !old || snapshot.runs.revision >= old.runs.revision ? snapshot.runs : old.runs, warnings: snapshot.warnings || [] };
+  const after = activeWorkspaceProject();
+  const newRun = selectedWorkspaceRun();
+  const contextChanged=(before && before.id)!==(after && after.id) || (before && before.revision)!==(after && after.revision);
+  if ((before && before.id) !== (after && after.id) || (before && before.revision) !== (after && after.revision)) {
+    state.previewFills = {};
+    flowRunRevision++;
+  }
+  if ((oldRun && oldRun.id) !== (newRun && newRun.id) || (oldRun && oldRun.revision) !== (newRun && newRun.revision)) flowRunRevision++;
+  if (snapshot.runId && snapshot.workflowHash && state.workspace.runs === snapshot.runs) workspaceHashes.set(snapshot.runId, snapshot.workflowHash);
+  renderWorkspaceControls();
+  if(contextChanged && state.currentRel && !state.editMode) renderContent();
+  else refreshFlowRun();
+  return true;
+}
+async function refreshWorkspace() {
+  try { const snapshot=await api.getWorkspace(); state.workspaceError=''; return applyWorkspaceSnapshot(snapshot); }
+  catch(error) { state.workspaceError=describeError(error); renderWorkspaceControls(); throw error; }
+}
+function workspaceMutation(kind, action, payload) {
+  // Invalidate at initiation, before IPC selection can resolve or a pending read can copy.
+  flowRunRevision++;
+  state.workspaceBusy++;
+  renderWorkspaceControls();
+  const operation = (async () => {
+    try {
+      const snapshot = await (kind === 'project' ? api.projectAction(action, payload) : api.runAction(action, payload));
+      applyWorkspaceSnapshot(snapshot);
+      return snapshot;
+    } finally {
+      state.workspaceBusy--;
+      renderWorkspaceControls();
+      refreshFlowRun();
+    }
+  })();
+  workspacePending.add(operation);
+  operation.then(() => workspacePending.delete(operation), () => workspacePending.delete(operation));
+  return operation;
+}
+function workspaceProjectAction(action, payload) { return workspaceMutation('project', action, payload); }
+function workspaceRunAction(action, payload) { return workspaceMutation('run', action, payload); }
+function workspaceAvailabilityLabel(value) {
+  return t(({available:'workspaceAvailability_available',missing:'workspaceAvailability_missing',moved:'workspaceAvailability_moved',unresolved:'workspaceAvailability_unresolved'})[value]);
+}
+function workspaceLabel(entity) { return entity.name + ' · ' + entity.id.slice(-6); }
+function renderWorkspaceControls() {
+  const select = $('workspace-project');
+  if (!select) return;
+  const doc = state.workspace && state.workspace.projects;
+  select.innerHTML = `<option value="">${escapeHtml(t('workspaceGlobal'))}</option>` + (doc ? doc.projects.map(project =>
+    `<option value="${escapeHtml(project.id)}">${escapeHtml(workspaceLabel(project))}</option>`).join('') : '');
+  select.value = doc && doc.activeProjectId || '';
+  const disabled=!doc || !!state.workspaceBusy || !!state.workspaceError;
+  select.disabled = disabled;
+  $('workspace-manage').disabled = disabled;
+  $('workspace-history').disabled = disabled;
+  const error=$('workspace-error');
+  error.textContent=state.workspaceError ? t('workspaceRecovery') + t('sep') + state.workspaceError : '';
+  error.classList.toggle('hidden',!state.workspaceError);
+}
+function openProjectManager() {
+  hideCtxMenu();
+  state.workspaceDialog = { mode: 'projects' };
+  renderWorkspaceDialog();
+  showCenteredMenu();
+  $('project-new').focus();
+}
+function openRunHistory() {
+  hideCtxMenu();
+  state.workspaceDialog = { mode: 'history' };
+  renderWorkspaceDialog();
+  showCenteredMenu();
+  const first = $('ctx-menu').querySelector('button');
+  if (first) first.focus();
+}
+function workspaceDialogDraft() {
+  const draft = {};
+  $('ctx-menu').querySelectorAll('[data-workspace-field]').forEach(input => { draft[input.dataset.workspaceField] = input.value; });
+  return draft;
+}
+function workspaceHistoryDetails(run) {
+  const display=value=>escapeHtml(value || t('workspaceNoValue'));
+  const fields={name:'workspaceField_name',description:'workspaceField_description',stack:'workspaceField_stack',path:'workspaceField_path',constraints:'workspaceField_constraints'};
+  const valuesList=values=>`<dl class="workspace-detail-fields">${Object.entries(values).map(([token,value])=>`<dt>${escapeHtml((PLACEHOLDERS.extract(token)[0] || {}).hint || token)}</dt><dd>${display(value)}</dd>`).join('')}</dl>`;
+  const date=value=> value ? new Intl.DateTimeFormat(state.config.lang==='en'?'en':'zh-CN',{dateStyle:'medium',timeStyle:'short'}).format(new Date(value)) : t('workspaceNotCompleted');
+  const stepsList=(steps,progress)=> {
+    const byId=new Map(steps.map(step=>[step.id,step]));
+    return `<ol class="workspace-history-steps">${steps.map(step=> {
+      const status=!progress ? '' : progress.done.includes(step.id) ? t('workspaceStepDone') : progress.skipped.includes(step.id) ? t('workspaceStepSkipped') : progress.current===step.id ? t('workspaceStepCurrent') : t('workspaceStepPending');
+      return `<li data-history-step="${escapeHtml(step.id)}"><strong>${escapeHtml(step.label || step.id)}</strong>${status ? ` · ${escapeHtml(status)}` : ''}
+        ${step.prompt ? `<div class="workspace-hint">${escapeHtml(step.prompt)}</div>` : ''}
+        ${step.next.length ? `<div class="workspace-hint">${escapeHtml(t('workspaceNextSteps',{names:step.next.map(id=> (byId.get(id) || {}).label || id).join(', ')}))}</div>` : ''}</li>`;
+    }).join('')}</ol>`;
+  };
+  const byId=new Map(run.graphSnapshot.map(step=>[step.id,step]));
+  return `<dl class="workspace-detail-fields">${Object.entries(fields).map(([field,key])=>`<dt>${escapeHtml(t(key))}</dt><dd>${display(run.contextSnapshot[field])}</dd>`).join('')}
+    <dt>${escapeHtml(t('workspaceCreatedAt'))}</dt><dd>${escapeHtml(date(run.createdAt))}</dd><dt>${escapeHtml(t('workspaceCompletedAt'))}</dt><dd>${escapeHtml(date(run.completedAt))}</dd></dl>
+    ${Object.keys(run.contextSnapshot.values).length ? `<h4>${escapeHtml(t('workspaceInitialValues'))}</h4>${valuesList(run.contextSnapshot.values)}` : ''}
+    ${Object.keys(run.progress.values).length ? `<h4>${escapeHtml(t('workspaceRunValues'))}</h4>${valuesList(run.progress.values)}` : ''}
+    <h4>${escapeHtml(t('workspaceSavedSteps'))}</h4>${stepsList(run.graphSnapshot,run.progress)}
+    ${run.progress.history.length ? `<p class="workspace-hint">${escapeHtml(t('workspaceVisitedSteps',{names:run.progress.history.map(id=>(byId.get(id) || {}).label || id).join(' → ')}))}</p>` : ''}
+    ${JSON.stringify(run.originGraphSnapshot)!==JSON.stringify(run.graphSnapshot) ? `<h4>${escapeHtml(t('workspaceOriginalSteps'))}</h4>${stepsList(run.originGraphSnapshot,null)}` : ''}`;
+}
+function renderWorkspaceDialog() {
+  const dialog = state.workspaceDialog;
+  if (!dialog || !state.workspace) return;
+  const menu = $('ctx-menu');
+  menu.classList.add('workspace-menu');
+  const draft = workspaceDialogDraft();
+  const focusedId=document.activeElement && document.activeElement.id;
+  const expandedDetails=new Set(Array.from(menu.querySelectorAll('details[open][data-history-detail]')).map(detail=>detail.dataset.historyDetail));
+  const projects = state.workspace.projects.projects;
+  const projectOptions = `<option value="">${escapeHtml(t('workspaceGlobal'))}</option>` + projects.map(project =>
+    `<option value="${escapeHtml(project.id)}">${escapeHtml(workspaceLabel(project))}</option>`).join('');
+  let body = '';
+  let title = t('workspaceManage');
+  if (dialog.mode === 'projects') {
+    body = `<div class="workspace-list">${projects.map(project => `<div class="workspace-row"><span>${escapeHtml(workspaceLabel(project))}</span>
+      <button class="btn-secondary" data-project-edit="${project.id}">${escapeHtml(t('workspaceEdit'))}</button>
+      <button class="btn-secondary" data-project-duplicate="${project.id}">${escapeHtml(t('workspaceDuplicate'))}</button>
+      <button class="btn-danger" data-project-remove="${project.id}">${escapeHtml(t('delete'))}</button></div>`).join('') || escapeHtml(t('workspaceEmptyProjects'))}</div>
+      <button class="btn-primary" id="project-new">${escapeHtml(t('workspaceNewProject'))}</button>`;
+  } else if (dialog.mode === 'project-edit') {
+    title = dialog.id ? t('workspaceEdit') : t('workspaceNewProject');
+    const project = projects.find(candidate => candidate.id === dialog.id) || {};
+    body = ['name','description','stack','path','constraints'].map(field => `<label class="workspace-field" for="project-${field}"><span>${escapeHtml(t(({name:'workspaceField_name',description:'workspaceField_description',stack:'workspaceField_stack',path:'workspaceField_path',constraints:'workspaceField_constraints'})[field]))}</span>
+      ${field === 'name' ? `<input id="project-${field}" data-workspace-field="${field}" maxlength="200" required>` : `<textarea id="project-${field}" data-workspace-field="${field}" maxlength="20000" rows="2"></textarea>`}</label>`).join('')
+      + `<button class="btn-primary" id="project-save">${escapeHtml(t('save'))}</button>`;
+    menu.innerHTML = `<div class="ctx-prompt-wrap workspace-wrap"><div class="ctx-prompt-title">${escapeHtml(title)}</div>${body}<button class="btn-link" id="workspace-close">${escapeHtml(t('cancel'))}</button></div>`;
+    for (const field of ['name','description','stack','path','constraints']) $('project-' + field).value = Object.hasOwn(draft, field) ? draft[field] : project[field] || '';
+  } else if (dialog.mode === 'run-new') {
+    title = t('workspaceNewRun');
+    body = `<label class="workspace-field" for="run-name"><span>${escapeHtml(t('workspaceRunName'))}</span><input id="run-name" data-workspace-field="runName" maxlength="200" required></label>
+      <label class="workspace-field" for="run-project"><span>${escapeHtml(t('workspaceProject'))}</span><select id="run-project" data-workspace-field="runProject">${projectOptions}</select></label>
+      <button class="btn-primary" id="run-save">${escapeHtml(t('workspaceNewRun'))}</button>`;
+  } else {
+    title = t('workspaceHistory');
+    body = `<div id="workspace-history-list" class="workspace-list">${state.workspace.runs.runs.slice().sort((a,b)=>b.updatedAt-a.updatedAt).map(run => {
+      const status = FLOW_RUN.status(FLOW_GRAPH.analyze(run.graphSnapshot),run.progress);
+      return `<article class="workspace-history-row"><strong>${escapeHtml(workspaceLabel(run))}</strong><div class="workspace-hint">${escapeHtml(run.workflowRel)} · ${escapeHtml(workspaceAvailabilityLabel(run.availability))}</div>
+        <div class="workspace-hint">${escapeHtml(run.contextSnapshot.name || t('workspaceGlobal'))} · ${escapeHtml(t('flowRunProgress',{done:status.settled,total:status.total}))}</div>
+        <details data-history-detail="${run.id}"><summary>${escapeHtml(t('workspaceDetails'))}</summary><div class="workspace-history-detail"></div></details>
+        <div class="workspace-row"><button class="btn-secondary" data-history-select="${run.id}">${escapeHtml(t('workspaceViewRun'))}</button>
+        <button class="btn-secondary" data-history-detach="${run.id}" ${run.projectId ? '' : 'disabled'}>${escapeHtml(t('workspaceDetach'))}</button>
+        <button class="btn-danger" data-history-remove="${run.id}">${escapeHtml(t('delete'))}</button></div></article>`;
+    }).join('') || escapeHtml(t('workspaceEmptyRuns'))}</div>`;
+  }
+  if (dialog.mode !== 'project-edit') menu.innerHTML = `<div class="ctx-prompt-wrap workspace-wrap"><div class="ctx-prompt-title">${escapeHtml(title)}</div>${body}<button class="btn-link" id="workspace-close">${escapeHtml(t('close'))}</button></div>`;
+  if (dialog.mode === 'run-new') {
+    $('run-name').value = draft.runName || '';
+    $('run-project').value = Object.hasOwn(draft,'runProject') ? draft.runProject : state.workspace.projects.activeProjectId || '';
+  }
+  $('workspace-close').onclick = () => hideCtxMenu();
+  const perform = async (button, fn) => {
+    button.disabled = true;
+    try { await fn(); if (state.workspaceDialog) { renderWorkspaceDialog(); const next=menu.querySelector('button:not([disabled])'); if(next) next.focus(); } }
+    catch(error) { toast(describeError(error),'error'); button.disabled = false; }
+  };
+  if ($('project-new')) $('project-new').onclick = () => { state.workspaceDialog={mode:'project-edit'}; renderWorkspaceDialog(); $('project-name').focus(); };
+  if ($('project-save')) $('project-save').onclick = () => {
+    const fields=workspaceDialogDraft();
+    if (!fields.name.trim()) { $('project-name').focus(); return; }
+    const project=projects.find(candidate=>candidate.id===dialog.id);
+    perform($('project-save'),async()=> { await workspaceProjectAction(project?'update':'create', {...fields, ...(project?{id:project.id,revision:project.revision}:{revision:state.workspace.projects.revision})}); state.workspaceDialog={mode:'projects'}; });
+  };
+  if ($('run-save')) $('run-save').onclick = () => {
+    if (!$('run-name').value.trim()) { $('run-name').focus(); return; }
+    perform($('run-save'),async()=> { await workspaceRunAction('create',{revision:state.workspace.runs.revision,workflowRel:dialog.rel,name:$('run-name').value,projectId:$('run-project').value||null}); state.flowRunActive=dialog.rel; hideCtxMenu(); refreshFlowRun(true); });
+  };
+  menu.querySelectorAll('[data-project-edit]').forEach(button=> { button.onclick=()=> { state.workspaceDialog={mode:'project-edit',id:button.dataset.projectEdit}; renderWorkspaceDialog(); $('project-name').focus(); }; });
+  for (const [attribute, action] of [['projectDuplicate','duplicate'],['projectRemove','remove']]) menu.querySelectorAll('[data-project-' + (action==='duplicate'?'duplicate':'remove') + ']').forEach(button=> {
+    button.onclick=()=>perform(button,async()=> { const project=projects.find(candidate=>candidate.id===button.dataset[attribute]); if(action==='remove' && !await confirmDialog(t('workspaceRemoveProject',{name:project.name}))) return; await workspaceProjectAction(action,{id:project.id,revision:project.revision}); });
+  });
+  for (const [attribute,action] of [['historySelect','select'],['historyDetach','detach'],['historyRemove','remove']]) menu.querySelectorAll('[data-history-' + action + ']').forEach(button=> {
+    button.onclick=()=>perform(button,async()=> {
+      const run=state.workspace.runs.runs.find(candidate=>candidate.id===button.dataset[attribute]);
+      if(action==='remove' && !await confirmDialog(t('workspaceRemoveRun',{name:run.name}))) return;
+      await workspaceRunAction(action,{id:run.id,revision:action==='select'?state.workspace.runs.revision:run.revision});
+      if(action==='select' && state.metaByRel.has(run.workflowRel)) { hideCtxMenu(); await openFile(run.workflowRel); state.flowRunActive=null; refreshFlowRun(true); }
+    });
+  });
+  menu.querySelectorAll('[data-history-detail]').forEach(detail=> {
+    const render=()=> { if(detail.open) { const run=state.workspace.runs.runs.find(candidate=>candidate.id===detail.dataset.historyDetail); if(run) detail.querySelector('.workspace-history-detail').innerHTML=workspaceHistoryDetails(run); } };
+    detail.addEventListener('toggle',render);
+    if(expandedDetails.has(detail.dataset.historyDetail)) { detail.open=true; render(); }
+  });
+  if(focusedId && $(focusedId) && menu.contains($(focusedId))) $(focusedId).focus();
 
-// 当前打开的工作流的执行上下文。graph 每次重新分析：工作流可能刚被编辑过，
-// 拿旧的图去校验进度，删掉的步骤会一直留在进度里。
+}
+function openNewRun(rel = state.currentRel) {
+  hideCtxMenu(); state.workspaceDialog={mode:'run-new',rel}; renderWorkspaceDialog(); showCenteredMenu(); $('run-name').focus();
+}
 function flowRunContext() {
   const rel = state.currentRel;
   if (!rel || !rel.startsWith('workflows/')) return null;
-  const steps = parseWorkflowFlow(state.currentContent);
+  const entity = selectedWorkspaceRun(rel);
+  const steps = entity ? entity.graphSnapshot : parseWorkflowFlow(state.currentContent);
   const graph = FLOW_GRAPH.analyze(steps);
-  const run = loadFlowRun(rel, graph);
-  return { rel, steps, graph, run, active: state.flowRunActive === rel && !!run };
+  return { rel, steps, graph, entity, run: entity ? entity.progress : null, active: state.flowRunActive === rel && !!entity };
 }
-
-// 读出一个工作流的进度并按当前的图修一遍。修过（删掉的步骤、坏字段）就写回，
-// 否则坏数据每次打开都要重修，而且永远留在 config 里。
-function loadFlowRun(rel, graph) {
-  const raw = state.flowRuns[rel];
-  if (raw === undefined) return null;
-  const run = FLOW_RUN.restore(graph, raw);
-  if (!run) setFlowRun(rel, null);
-  else if (!FLOW_RUN.equal(run, raw)) setFlowRun(rel, run);
-  return run;
-}
-
-function setFlowRun(rel, run) {
+async function migrateFlowRun(oldRel, newRel) {
   flowRunRevision++;
-  const next = { ...state.flowRuns };
-  if (run) next[rel] = FLOW_RUN.serialize(run);
-  else delete next[rel];
-  state.flowRuns = FLOW_RUN.cleanRuns(next);
-  saveFlowRunsDebounced();
-}
-
-// 工作流改名 / 移动时进度跟着走，删除时清掉（同 migrateLock）。主进程的 rename /
-// trash 也会改 config，这里同步内存里那份——不改的话下一次防抖写盘会把旧键写回去。
-function migrateFlowRun(oldRel, newRel) {
   if (state.flowRunActive === oldRel) state.flowRunActive = newRel;
-  const next = newRel ? FLOW_RUN.renameRun(state.flowRuns, oldRel, newRel) : FLOW_RUN.dropRun(state.flowRuns, oldRel);
-  if (next === state.flowRuns) return;
-  flowRunRevision++;
-  state.flowRuns = next;
-  saveFlowRunsDebounced();
+  await refreshWorkspace();
 }
 
 // 步骤为什么不能复制。null = 能复制。
@@ -1513,6 +1696,7 @@ function refreshFlowRun(focus) {
 
 function flowRunButton(act, label, opts) {
   const o = opts || {};
+  o.disabled = o.disabled || !!state.workspaceBusy;
   return `<button class="${o.primary ? 'btn-primary' : 'btn-secondary'}" data-run-act="${escapeHtml(act)}"`
     + (o.id ? ` data-run-id="${escapeHtml(o.id)}"` : '') + (o.disabled ? ' disabled' : '')
     + `>${escapeHtml(label)}</button>`;
@@ -1520,14 +1704,18 @@ function flowRunButton(act, label, opts) {
 
 function renderFlowRunPanel(ctx) {
   const { graph, run } = ctx;
+  const records = state.workspace ? state.workspace.runs.runs.filter(entity=>entity.workflowRel===ctx.rel) : [];
+  const selection = records.length ? `<label class="workspace-run-select">${escapeHtml(t('workspaceRun'))}<select id="workspace-run" ${state.workspaceBusy?'disabled':''}>${records.map(entity=>`<option value="${entity.id}" ${ctx.entity && ctx.entity.id===entity.id?'selected':''}>${escapeHtml(workspaceLabel(entity))}</option>`).join('')}</select></label>` : '';
+  const prefix = selection + (ctx.entity ? `<div class="workspace-run-context" data-run-context>${escapeHtml(t('workspaceFrozenContext',{name:ctx.entity.contextSnapshot.name || t('workspaceGlobal')}))}</div>` : '');
+  if (ctx.entity && ctx.entity.availability !== 'available') return prefix + `<div class="flow-run-warn">${escapeHtml(workspaceAvailabilityLabel(ctx.entity.availability))}</div>` + flowRunButton('resume',t('flowRunResume')) + flowRunButton('restart',t('workspaceNewRun'));
   if (!ctx.active) {
     if (!run) {
-      return `<div class="flow-run-bar">${flowRunButton('start', t('flowRunStart'), { primary: true })}`
+      return prefix + `<div class="flow-run-bar">${flowRunButton('start', t('flowRunStart'), { primary: true })}`
         + `<span class="flow-run-hint">${escapeHtml(t('flowRunStartHint'))}</span></div>`;
     }
     const st = FLOW_RUN.status(graph, run);
-    return `<div class="flow-run-bar">${flowRunButton('resume', t('flowRunResume'), { primary: true })}`
-      + flowRunButton('restart', t('flowRunRestart'))
+    return prefix + `<div class="flow-run-bar">${flowRunButton('resume', t('flowRunResume'), { primary: true })}`
+      + flowRunButton('restart', t('workspaceNewRun'))
       + `<span class="flow-run-hint">${escapeHtml(t('flowRunProgress', { done: st.settled, total: st.total }))}</span></div>`;
   }
   const st = FLOW_RUN.status(graph, run);
@@ -1541,7 +1729,7 @@ function renderFlowRunPanel(ctx) {
       ? `<div class="flow-run-warn" role="alert">⚠ ${escapeHtml(issue)}${escapeHtml(t('sep'))}${escapeHtml(t('flowRunBrokenHint'))}</div>`
       : '';
     // 按钮排在正文预览前面：最小窗口下预览区很矮，按钮放在正文后面就会被挤出视口。
-    return `<div class="flow-run-head">${progress}<span class="flow-run-title">${escapeHtml(t('flowRunCurrent', { label: flowStepLabel(graph, run.current) }))}</span></div>`
+    return prefix + `<div class="flow-run-head">${progress}<span class="flow-run-title">${escapeHtml(t('flowRunCurrent', { label: flowStepLabel(graph, run.current) }))}</span></div>`
       + warn
       + `<div class="flow-run-actions">${flowRunButton('copy', t('flowRunCopy'), { primary: true, disabled: !!issue })}`
       + flowRunButton('skip', t('flowRunSkip')) + back + exit + '</div>'
@@ -1549,12 +1737,12 @@ function renderFlowRunPanel(ctx) {
   }
   if (st.mode === 'choose') {
     const choices = st.options.map(id => flowRunButton('choose', flowStepLabel(graph, id), { id })).join('');
-    return `<div class="flow-run-head">${progress}<span class="flow-run-title">${escapeHtml(t('flowRunChoose'))}</span></div>`
+    return prefix + `<div class="flow-run-head">${progress}<span class="flow-run-title">${escapeHtml(t('flowRunChoose'))}</span></div>`
       + `<div class="flow-run-actions flow-run-choices">${choices}</div>`
       + `<div class="flow-run-actions">${back}${exit}</div>`;
   }
-  return `<div class="flow-run-head">${progress}<span class="flow-run-title">${escapeHtml(t('flowRunFinished'))}</span></div>`
-    + `<div class="flow-run-actions">${flowRunButton('restart', t('flowRunRestart'), { primary: true })}${back}${exit}</div>`;
+  return prefix + `<div class="flow-run-head">${progress}<span class="flow-run-title">${escapeHtml(t('flowRunFinished'))}</span></div>`
+    + `<div class="flow-run-actions">${flowRunButton('restart', t('workspaceNewRun'), { primary: true })}${back}${exit}</div>`;
 }
 
 // 节点上的执行状态。只在执行模式里画：退出之后流程图回到普通的样子。
@@ -1604,8 +1792,8 @@ async function loadFlowRunBody(ctx) {
   }
   if (seq !== flowRunBodySeq || state.currentRel !== ctx.rel) return;
   const el = $('flow-run-body');
-  const now = state.flowRuns[ctx.rel];
-  if (!el || !now || now.current !== id) return;
+  const now = selectedWorkspaceRun(ctx.rel);
+  if (!el || !now || now.id !== ctx.entity.id || now.revision !== ctx.entity.revision || now.progress.current !== id) return;
   el.innerHTML = html;
   enhanceCodeBlocks(el);
 }
@@ -1614,63 +1802,57 @@ async function loadFlowRunBody(ctx) {
 // 面板预填本次执行会话里填过的值。复制成功才记完成并前进；取消时什么都不动。
 async function copyFlowRunStep() {
   const ctx = flowRunContext();
-  if (!ctx || !ctx.active || !ctx.run.current) return;
-  const id = ctx.run.current;
-  const step = ctx.graph.byId.get(id);
+  if (!ctx || !ctx.active || !ctx.run.current || ctx.entity.availability !== 'available' || state.workspaceBusy || state.workspaceError) return;
+  const step = ctx.graph.byId.get(ctx.run.current);
   const issue = flowRunStepIssue(step);
-  if (issue) { toast(issue, 'error'); return; }
+  if (issue) { toast(issue,'error'); return; }
   const revision = ++flowRunRevision;
   const content = state.currentContent;
   const isCurrent = () => {
-    const now = flowRunContext();
-    return revision === flowRunRevision && state.currentContent === content
-      && now && now.active && now.rel === ctx.rel && now.run.current === id;
+    const now=flowRunContext();
+    return revision===flowRunRevision && state.currentContent===content && now && now.active && now.rel===ctx.rel
+      && now.entity.id===ctx.entity.id && now.entity.revision===ctx.entity.revision;
   };
-  let res;
   try {
-    const file = await api.readFile(step.prompt);
-    if (!isCurrent()) return;
-    res = await copyPromptBody(file.content, { prefill: ctx.run.values, isCurrent });
-  } catch (e) {
-    toast(tErr('openFailed', e), 'error');
-    return;
-  }
-  if (!res.copied) return;
-  recordUsage(step.prompt);
-  // 复制期间（填写面板开着时）文件不会被切走，但工作流可能刚被外部改过：
-  // 按此刻的状态重新取一遍，当前步骤已经不是这一步就不再推进。
-  const now = flowRunContext();
-  if (!isCurrent()) return;
-  const run = FLOW_RUN.complete(now.graph, FLOW_RUN.mergeValues(now.run, res.values));
-  setFlowRun(now.rel, run);
-  refreshFlowRun(true);
+    const hash=await workflowContentHash(ctx.rel);
+    if(!isCurrent()) return;
+    if(hash!==workspaceHashes.get(ctx.entity.id)) throw new Error(t('workspaceResumeChanged'));
+    const file=await api.readFile(step.prompt);
+    if(!isCurrent()) return;
+    const result=await copyPromptBody(file.content,{prefill:ctx.run.values,scope:{context:ctx.entity.contextSnapshot,globalValues:{}},isCurrent,remember:false});
+    if(!result.copied) return;
+    recordUsage(step.prompt);
+    if(!isCurrent()) return;
+    try { await workspaceRunAction('complete',{id:ctx.entity.id,revision:ctx.entity.revision,workflowHash:workspaceHashes.get(ctx.entity.id),values:result.values}); }
+    catch(error) { toast(tErr('workspaceCopiedNotSaved',error),'error'); }
+    refreshFlowRun(true);
+  } catch(error) { toast(tErr('openFailed',error),'error'); }
 }
-
-async function flowRunAction(act, id) {
-  const ctx = flowRunContext();
-  if (!ctx) return;
-  const { rel, graph } = ctx;
-  if (act !== 'copy') flowRunRevision++;
-  if (act === 'start' || act === 'restart') {
-    setFlowRun(rel, FLOW_RUN.start(graph));
-    state.flowRunActive = rel;
-  } else if (act === 'resume') {
-    if (!ctx.run) setFlowRun(rel, FLOW_RUN.start(graph));
-    state.flowRunActive = rel;
-  } else if (act === 'exit') {
-    state.flowRunActive = null;
-  } else if (!ctx.active) {
-    return;
-  } else if (act === 'copy') {
-    await copyFlowRunStep();
-    return;
-  } else if (act === 'skip') {
-    setFlowRun(rel, FLOW_RUN.skip(graph, ctx.run));
-  } else if (act === 'back') {
-    setFlowRun(rel, FLOW_RUN.back(graph, ctx.run));
-  } else if (act === 'choose') {
-    setFlowRun(rel, FLOW_RUN.choose(graph, ctx.run, id));
-  }
+async function workflowContentHash(rel) {
+  const file=await api.readFile(rel);
+  const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(file.content));
+  return Array.from(new Uint8Array(bytes),byte=>byte.toString(16).padStart(2,'0')).join('');
+}
+async function flowRunAction(act,id) {
+  const ctx=flowRunContext();
+  if(!ctx || state.workspaceBusy) return;
+  if(act==='copy') return copyFlowRunStep();
+  flowRunRevision++;
+  if(act==='start' || act==='restart') { openNewRun(ctx.rel); return; }
+  if(act==='exit') { state.flowRunActive=null; refreshFlowRun(true); return; }
+  if(!ctx.entity) return;
+  try {
+    if(act==='resume') {
+      try { await workspaceRunAction('resume',{id:ctx.entity.id,revision:ctx.entity.revision}); }
+      catch(error) {
+        if(!String(error.message).includes('E_RUN_GRAPH_CHANGED')) throw error;
+        const workflowHash=await workflowContentHash(ctx.rel);
+        if(!await confirmDialog(t('workspaceGraphChanged'))) return;
+        await workspaceRunAction('resume',{id:ctx.entity.id,revision:ctx.entity.revision,workflowHash,confirmGraphUpdate:true});
+      }
+      state.flowRunActive=ctx.rel;
+    } else if(ctx.active) await workspaceRunAction(act,{id:ctx.entity.id,revision:ctx.entity.revision,...(act==='choose'?{stepId:id}:{})});
+  } catch(error) { toast(describeError(error),'error'); }
   refreshFlowRun(true);
 }
 
@@ -1680,6 +1862,11 @@ async function flowRunAction(act, id) {
     const btn = e.target.closest && e.target.closest('#flow-run button[data-run-act]');
     if (!btn || btn.disabled) return;
     flowRunAction(btn.dataset.runAct, btn.dataset.runId);
+  });
+  $('preview').addEventListener('change', async (e) => {
+    if(e.target.id !== 'workspace-run' || state.workspaceBusy) return;
+    try { await workspaceRunAction('select',{id:e.target.value,revision:state.workspace.runs.revision}); state.flowRunActive=null; refreshFlowRun(true); }
+    catch(error) { toast(describeError(error),'error'); }
   });
 }
 
@@ -2011,6 +2198,8 @@ async function reloadActiveFromDisk() {
 // 串行处理：两批推送交叉的话，后一批的 readFile 可能先回来，被前一批的旧结果盖掉。
 let externalChain = Promise.resolve();
 function onLibraryChanged(info) {
+  flowRunRevision++;
+  refreshWorkspace().catch(error=>toast(describeError(error),'error'));
   externalChain = externalChain.then(() => applyExternalChanges(info)).catch((e) => {
     console.error('处理外部改动失败:', e); // i18n-exempt: 开发日志
   });
@@ -2099,8 +2288,8 @@ async function writeClipboard(text) {
     ta.value = text;
     document.body.appendChild(ta);
     ta.select();
-    document.execCommand('copy');
-    document.body.removeChild(ta);
+    try { if(!document.execCommand('copy')) throw new Error(t('workspaceClipboardFailed')); }
+    finally { document.body.removeChild(ta); }
   }
 }
 
@@ -2144,6 +2333,7 @@ async function expandIncludes(body) {
 // 成功只有函数末尾一个出口，"复制成功"之后要追加的动作接在那里即可。
 async function copyPromptBody(content, opts) {
   const o = opts || {};
+  const scope=o.scope || workspaceScope();
   const body = await expandIncludes(parseFrontmatter(content).body);
   const canceled = () => o.isCurrent && !o.isCurrent();
   if (canceled()) return { copied: false, values: {} };
@@ -2157,26 +2347,27 @@ async function copyPromptBody(content, opts) {
     // 逐处填过，再让他面对一张列着同一批 token 的表，等于把同一件事做两遍。
     // 想改的话回预览里点那个 chip（点上就是改）。
     const inline = o.inline || {};
-    const inlineCount = tokens.filter(it => String(inline[it.token] == null ? '' : inline[it.token]).trim()).length;
+    const inlineCount = tokens.filter(it => Object.hasOwn(inline,it.token)).length;
     if (inlineCount) {
-      const merged = PLACEHOLDERS.withDefaults(body, inline);
+      const merged = Object.fromEntries(tokens.map(it=>[it.token,PROJECT_CONTEXT.resolve(it,{...scope,values:inline})]));
       text = PLACEHOLDERS.fill(body, merged);
       values = merged;
       const count = tokens.filter(it => String(merged[it.token] == null ? '' : merged[it.token]).trim()).length;
       const missing = tokens.length - count;
       message = missing ? t('fillDonePartial', { count, missing }) : t('fillDone', { count });
     } else {
-      const picked = await promptFillPlaceholders(tokens, { prefill: o.prefill });
+      const picked = await promptFillPlaceholders(tokens, { prefill: o.prefill, scope });
       if (picked === null || canceled()) return { copied: false, values: {} };   // 取消：不碰剪贴板
       text = PLACEHOLDERS.fill(body, picked);
       values = picked;
-      rememberFillValues(picked);
       const count = tokens.filter(it => String(picked[it.token] == null ? '' : picked[it.token]).trim()).length;
       if (count) message = t('fillDone', { count });
     }
   }
+  if(canceled()) return {copied:false,values:{}};
   await writeClipboard(text);
-  toast(message, 'success');
+  const remembered=o.remember===false || !Object.keys(values).length || await rememberScopedFill(values,scope);
+  if(remembered) toast(message, 'success');
   return { copied: true, values };
 }
 
@@ -2185,9 +2376,14 @@ async function copyContent() {
   if (!state.currentRel) return false;
   const rel = state.currentRel;
   const inline = state.previewFills[state.currentRel] || {};
-  const res = await copyPromptBody(state.currentContent, { inline });
-  if (res.copied) recordUsage(rel);
-  return res.copied;
+  const content=state.currentContent;
+  const revision=++flowRunRevision;
+  const scope=workspaceScope();
+  try {
+    const res = await copyPromptBody(content, { inline, scope, isCurrent:()=>revision===flowRunRevision && state.currentRel===rel && state.currentContent===content });
+    if (res.copied) recordUsage(rel);
+    return res.copied;
+  } catch(error) { toast(tErr('workspaceCopyFailed',error),'error'); return false; }
 }
 
 // 占位符填充面板。每个占位符一行输入框，标签是方括号里的文字。
@@ -2212,12 +2408,14 @@ async function copyContent() {
 // 就是会生效的，不在背后再套一次默认值。
 // 本次工作流执行填过的值优先于全局记忆和默认值。
 function promptFillPlaceholders(tokens, opts) {
-  const prefill = (opts && opts.prefill) || {};
+  state.workspaceDialog=null;
+  const prefill = opts && opts.prefill;
+  const scope = opts && opts.scope || workspaceScope();
+  $('ctx-menu').classList.remove('workspace-menu');
   return new Promise(resolve => {
     const menu = $('ctx-menu');
     const initial = tokens.map(it => {
-      const session = typeof prefill[it.token] === 'string' && prefill[it.token].trim() ? prefill[it.token] : '';
-      return session || (state.fillMemory && state.fillMemory[it.token]) || (it.default != null ? it.default : '');
+      return PROJECT_CONTEXT.resolve(it,{...scope,values:prefill});
     });
     const rows = tokens.map((it, i) => {
       // hint 为空（`[]` 之类）时退回显示 token 本身，
@@ -2301,7 +2499,7 @@ function placeholderFieldHtml(it, id, withToken) {
     : '';
   return select + `<textarea id="${escapeHtml(id)}" class="ctx-prompt-input fill-input" rows="1"`
     + (withToken ? ` data-token="${escapeHtml(it.token)}"` : '')
-    + ` placeholder="${escapeHtml(it.token)}"></textarea>`;
+    + ` maxlength="20000" placeholder="${escapeHtml(it.token)}"></textarea>`;
 }
 
 // 接上下拉框和 textarea 的双向同步。下拉框是 textarea 紧前面的兄弟元素。
@@ -2329,6 +2527,8 @@ function wirePlaceholderField(input, onEscape) {
 // 键位：Enter 确定（和原来的单行框一致，UI 自检里有这条路径），Shift+Enter 换行。
 // 这里只有一个框，不存在"Enter 应该是下一项"的问题，所以和面板的键位不同。
 function promptPlaceholderValue(meta, initial) {
+  state.workspaceDialog=null;
+  $('ctx-menu').classList.remove('workspace-menu');
   return new Promise(resolve => {
     const menu = $('ctx-menu');
     menu.innerHTML = `
@@ -2374,6 +2574,13 @@ const MAX_FILL_MEMORY = 200;
 // 代码：那是一次性的内容，记下来只会在下次预填一大段过期的日志，而且 200 条
 // 这样的值整体写进 config.json，每次 setConfig 都要序列化几百 KB。
 const MAX_FILL_MEMORY_VALUE = 2000;
+async function rememberScopedFill(values,scope) {
+  if(scope.projectId) {
+    try { await workspaceProjectAction('remember',{id:scope.projectId,revision:scope.revision,values}); }
+    catch(error) { toast(tErr('workspaceCopiedNotSaved',error),'error'); return false; }
+  } else rememberFillValues(values);
+  return true;
+}
 function rememberFillValues(values) {
   if (!state.fillMemory) state.fillMemory = {};
   let changed = false;
@@ -2501,6 +2708,14 @@ async function newFolder() {
 function openComposer() {
   const modal = $('composer-modal');
   if (!modal) return;
+  const project=activeWorkspaceProject();
+  if(project) {
+    $('comp-proj-name').value=project.name;
+    $('comp-proj-desc').value=project.description;
+    const supported={React:'prompts/snippets/stacks/frontend-react.md',Electron:'prompts/snippets/stacks/client-electron.md',FastAPI:'prompts/snippets/stacks/backend-fastapi.md'};
+    const chosen=new Set(project.stack.split(/[,;\n+]/).map(value=>supported[value.trim()]).filter(Boolean));
+    if(chosen.size) document.querySelectorAll('#comp-stacks input').forEach(input=> { input.checked=chosen.has(input.value); });
+  }
   modal.classList.remove('hidden');
   renderComposerExportTargets();
   updateComposerPreview();
@@ -2818,7 +3033,7 @@ async function renameCurrent() {
   try {
     await api.rename(oldRel, newRel);
     migrateLock(oldRel, newRel);
-    migrateFlowRun(oldRel, newRel);
+    await migrateFlowRun(oldRel, newRel);
     // 同步标签
     const tab = state.tabs.find(t => t.rel === oldRel);
     if (tab) tab.rel = newRel;
@@ -2857,7 +3072,7 @@ async function deleteCurrent() {
     const idx = state.tabs.findIndex(t => t.rel === delRel);
     if (idx !== -1) state.tabs.splice(idx, 1);
     state.lockedFiles.delete(delRel);
-    migrateFlowRun(delRel, null);
+    await migrateFlowRun(delRel, null);
     const next = state.tabs[idx] || state.tabs[idx - 1] || null;
     if (next) {
       await switchTab(next.rel);
@@ -2918,7 +3133,7 @@ if (newRel === srcRel) { toast(t('alreadyInDir'), 'error'); return; }
   try {
     await api.rename(srcRel, newRel);
     migrateLock(srcRel, newRel);
-    migrateFlowRun(srcRel, newRel);
+    await migrateFlowRun(srcRel, newRel);
     // 迁移标签
     const tab = state.tabs.find(t => t.rel === srcRel);
     if (tab) tab.rel = newRel;
@@ -3253,7 +3468,7 @@ async function closeTrashedTabs(removed) {
   const set = new Set(removed);
   for (const rel of removed) {
     state.lockedFiles.delete(rel);
-    migrateFlowRun(rel, null);
+    await migrateFlowRun(rel, null);
   }
   const activeIdx = state.tabs.findIndex(tb => tb.rel === state.activeTab);
   const activeRemoved = state.activeTab != null && set.has(state.activeTab);
@@ -3379,7 +3594,9 @@ document.addEventListener('mousedown', (e) => {
 });
 
 function hideCtxMenu() {
+  state.workspaceDialog=null;
   const menu = $('ctx-menu');
+  menu.classList.remove('workspace-menu');
   menu.classList.add('hidden');
   menu.classList.remove('ctx-centered');
   // 角色属性跟着弹层的生命期走：留着它，下一次右键菜单会被屏幕阅读器读成对话框。
@@ -3851,7 +4068,9 @@ async function importSingle() {
 }
 async function importZip() {
   try {
+    flowRunRevision++;
     const res = await api.importZip();
+    await refreshWorkspace();
     if (res.canceled) return;
     if (res.ok) {
       const failed = Array.isArray(res.failed) ? res.failed : [];
@@ -3987,6 +4206,8 @@ async function setLang(lang) {
     renderContent();
   }
   renderQuickLaunchSettings();
+  renderWorkspaceControls();
+  if(state.workspaceDialog && !$('ctx-menu').classList.contains('hidden')) renderWorkspaceDialog();
   // 历史抽屉开着时重绘：列表里的"当前内容"行、说明提示和"第 N 个"都是动态文案。
   // 只在列表视图时重绘，正在看 diff 的话不把用户踢回列表。
   if (!$('history-drawer').classList.contains('hidden') && !$('version-list').classList.contains('hidden')) {
@@ -4194,7 +4415,7 @@ async function init() {
   }
   // 执行进度同理要卡类型：cleanRuns 只留 workflows/ 下的键和对象值，步骤级的修复
   // 留到打开那个工作流时按当时的图做（见 loadFlowRun）。
-  state.flowRuns = FLOW_RUN.cleanRuns(state.config.flowRuns);
+  try { await refreshWorkspace(); } catch(error) { toast(describeError(error),'error'); }
   // 加载标签页（config 里只存 rel，正文等首次切过去时再读）。
   // loaded:false 是关键标记——openFile/switchTab 靠它判断要不要补读，
   // 少了它正文会一直是空串，保存时反而把文件清空。
@@ -4221,15 +4442,6 @@ async function init() {
   // 恢复上次打开的标签（过滤掉已不存在的文件）
   const allRels = new Set(state.metaList.map(m => m.rel));
   state.tabs = state.tabs.filter(t => allRels.has(t.rel));
-  // 工作流在应用外被删 / 改名时，它的进度没人清：按库里还在的工作流过滤一遍。
-  // 和 config 里原来的键数比，cleanRuns 丢掉的坏键也算改动，一起写回。
-  {
-    const kept = {};
-    for (const k of Object.keys(state.flowRuns)) if (allRels.has(k)) kept[k] = state.flowRuns[k];
-    const rawCount = state.config.flowRuns && typeof state.config.flowRuns === 'object' ? Object.keys(state.config.flowRuns).length : 0;
-    state.flowRuns = kept;
-    if (Object.keys(kept).length !== rawCount) saveFlowRunsDebounced();
-  }
   if (state.activeTab && !allRels.has(state.activeTab)) state.activeTab = null;
   if (state.tabs.length) {
     const target = state.activeTab && allRels.has(state.activeTab) ? state.activeTab : state.tabs[0].rel;
@@ -4398,6 +4610,12 @@ async function init() {
   $('btn-settings-close').onclick = () => $('settings-drawer').classList.add('hidden');
 
   // 项目装配器事件绑定
+  $('workspace-manage').onclick = openProjectManager;
+  $('workspace-history').onclick = openRunHistory;
+  $('workspace-project').onchange = async (e) => {
+    try { await workspaceProjectAction('select',{id:e.target.value||null,revision:state.workspace.projects.revision}); if(state.currentRel) renderContent(); }
+    catch(error) { toast(describeError(error),'error'); renderWorkspaceControls(); }
+  };
   $('btn-composer').onclick = openComposer;
   if ($('empty-composer')) $('empty-composer').onclick = openComposer;
   $('btn-composer-close').onclick = closeComposer;
@@ -4470,6 +4688,10 @@ async function init() {
   checkQuickLaunchAtStartup();
   // 外部改动。挂在首次 refreshTree 和恢复标签之后：在那之前的改动，
   // 首次读树、读正文时已经是最新的了。
+  api.onWorkspaceChanged(info=> {
+    flowRunRevision++;
+    if(!state.workspace || info.projectsRevision>state.workspace.projects.revision || info.runsRevision>state.workspace.runs.revision) refreshWorkspace().catch(error=>toast(describeError(error),'error'));
+  });
   api.onLibraryChanged((info) => { onLibraryChanged(info); });
   api.onUsageChanged(() => { refreshUsage(); });
 
@@ -4600,11 +4822,11 @@ window.__pfmFlushPending = async () => {
     saveRecentDebounced,
     saveLockedDebounced,
     saveSidebarWidthDebounced,
-    saveFillMemoryDebounced,
-    saveFlowRunsDebounced
+    saveFillMemoryDebounced
   ];
   // allSettled 而不是 all：单个失败（磁盘满/配置被占）不该让其余四个不落盘。
   await Promise.allSettled(all.map(d => d.flush()));
+  while (workspacePending.size) await Promise.allSettled([...workspacePending]);
   return true;
 };
 

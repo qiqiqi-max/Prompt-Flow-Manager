@@ -187,6 +187,7 @@ npm run test:workflow-index # 引用索引：谁在引用这个提示词、悬�
 npm run test:flow-graph # 工作流图：分层、成环、不可达步骤（裸 node，自带一组反向对照）
 npm run test:flow-run    # 工作流执行：分支选择、汇合点结算、进度持久化（裸 node，自带一组反向对照）
 npm run test:flow-run-copy # 读盘或填写期间切换执行状态，旧请求不复制、不推进（裸 node）
+npm run test:workspace-ui # 工作区 UI：项目隔离、独立运行、旧请求与关窗等待、快面板捕获令牌
 npm run test:flow-run-integration # 两次真实启动：执行进度恢复、占位符默认值、复制统计与批量删除
 npm run test:mcp          # 只读 MCP server：协议往返、只读边界、返回上限、prompts 斜杠命令（裸 node，自带反向对照）
 npm run test:cache-budget # 正文缓存的两道闸与占用记账（裸 node，自带一组反向对照）
