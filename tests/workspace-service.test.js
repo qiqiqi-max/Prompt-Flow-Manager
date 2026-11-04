@@ -60,3 +60,44 @@ test('complete without a current step [reverse control]', async () => { const so
 const emptyHistory = async f => { const state = await create(f); f.workflows.get(rel).steps = []; let browsed; await assert.doesNotReject(async () => { browsed = await f.service.runAction('select', { id: state.runId, revision: state.runs.revision }); }); assert.deepEqual(selected(browsed), selected(state)); assert.equal(browsed.workflowHash, 'hash1'); };
 test('saved history remains browsable when current workflow is empty', () => exercise(factory(), emptyHistory));
 test('empty workflow history [reverse control]', async () => { const source = fs.readFileSync(sourceFile, 'utf8'); const from = 'try { workflow = await readWorkflow(rel); }'; assert.ok(source.includes(from)); await assert.rejects(exercise(load(source.replace(from, 'try { workflow = await workflowAt(rel); }')), emptyHistory), error => error instanceof assert.AssertionError); });
+const unresolvedLifecycle = operation => async f => {
+  await create(f);
+  const data = await f.gate.exclusive(() => f.service.exportDataLocked());
+  const importedRel = 'workflows/import.md';
+  const imported = await f.gate.exclusive(() => f.service.importDataLocked(data, { [rel]: importedRel }));
+  const run = imported.runs.runs[1];
+  assert.equal(run.availability, 'unresolved');
+  f.workflows.set(importedRel, { steps: clone(steps), hash: 'hash1' });
+  await f.service.runAction('select', { id: run.id, revision: imported.runs.revision });
+  const target = operation === 'rename' ? 'workflows/renamed-import.md' : 'prompts/moved-import.md';
+  f.workflows.set(target, { steps: clone(steps), hash: 'hash1' });
+  await f.queue.run(['workspace'], () => operation === 'remove'
+    ? f.service.removeWorkflowLocked(importedRel)
+    : f.service.relocateWorkflowLocked(importedRel, target));
+  const state = await f.service.getState();
+  const changed = state.runs.runs.find(candidate => candidate.id === run.id);
+  await assert.rejects(f.service.runAction('resume', { id: run.id, revision: changed.revision, confirmGraphUpdate: true, workflowHash: 'hash1' }), /E_RUN_UNAVAILABLE/);
+  assert.equal(changed.availability, 'unresolved');
+  assert.equal(changed.revision, run.revision + 1);
+  assert.ok(changed.updatedAt > run.updatedAt);
+  assert.equal(changed.workflowRel, operation === 'rename' ? target : importedRel);
+  assert.deepEqual(changed.graphSnapshot, run.graphSnapshot);
+  assert.deepEqual(changed.originGraphSnapshot, run.originGraphSnapshot);
+  assert.deepEqual(changed.contextSnapshot, run.contextSnapshot);
+  assert.deepEqual(changed.progress, run.progress);
+  assert.equal(state.runs.selectedByWorkflow[importedRel], undefined);
+  if (operation === 'rename') assert.equal(state.runs.selectedByWorkflow[target], run.id);
+  assert.deepEqual((await f.service.getState()).runs, state.runs);
+};
+for (const operation of ['remove', 'move-out', 'rename']) {
+  test('unresolved lifecycle ' + operation + ' keeps dependency checks mandatory', () => exercise(factory(), unresolvedLifecycle(operation)));
+  test('unresolved lifecycle ' + operation + ' [reverse control]', async () => {
+    const source = fs.readFileSync(sourceFile, 'utf8');
+    const from = operation === 'rename' ? 'if (inside) { run.workflowRel = newRel; }'
+      : "if (run.availability !== 'unresolved') run.availability = '" + (operation === 'remove' ? 'missing' : 'moved') + "';";
+    const to = operation === 'rename' ? "if (inside) { run.workflowRel = newRel; run.availability = 'available'; }"
+      : "run.availability = '" + (operation === 'remove' ? 'missing' : 'moved') + "';";
+    assert.ok(source.includes(from));
+    await assert.rejects(exercise(load(source.replace(from, to)), unresolvedLifecycle(operation)), error => error instanceof assert.AssertionError && error.message === 'Missing expected rejection.');
+  });
+}
