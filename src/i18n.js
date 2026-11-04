@@ -7,6 +7,7 @@
 // 占位符用 {name} 形式，由 t(key, { name }) 替换。
 const I18N = {
   zh: {
+    inputTooLong: '内容过长：{length} / {max} 字符，请缩短后再继续。',
     workspaceNoValue: '未填写',
     workspaceNotCompleted: '尚未完成',
     workspaceCreatedAt: '创建时间',
@@ -604,6 +605,7 @@ const I18N = {
     close: '关闭',
   },
   en: {
+    inputTooLong: 'Too long: {length} / {max} characters. Shorten the input to continue.',
     workspaceNoValue: 'Not specified',
     workspaceNotCompleted: 'Not completed',
     workspaceCreatedAt: 'Created',

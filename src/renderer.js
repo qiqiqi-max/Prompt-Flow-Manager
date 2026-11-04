@@ -1581,13 +1581,13 @@ function renderWorkspaceDialog() {
     title = dialog.id ? t('workspaceEdit') : t('workspaceNewProject');
     const project = projects.find(candidate => candidate.id === dialog.id) || {};
     body = ['name','description','stack','path','constraints'].map(field => `<label class="workspace-field" for="project-${field}"><span>${escapeHtml(t(({name:'workspaceField_name',description:'workspaceField_description',stack:'workspaceField_stack',path:'workspaceField_path',constraints:'workspaceField_constraints'})[field]))}</span>
-      ${field === 'name' ? `<input id="project-${field}" data-workspace-field="${field}" maxlength="200" required>` : `<textarea id="project-${field}" data-workspace-field="${field}" maxlength="20000" rows="2"></textarea>`}</label>`).join('')
+      ${field === 'name' ? `<input id="project-${field}" data-workspace-field="${field}" data-max-length="200" required>` : `<textarea id="project-${field}" data-workspace-field="${field}" data-max-length="20000" rows="2"></textarea>`}</label>`).join('')
       + `<button class="btn-primary" id="project-save">${escapeHtml(t('save'))}</button>`;
     menu.innerHTML = `<div class="ctx-prompt-wrap workspace-wrap"><div class="ctx-prompt-title">${escapeHtml(title)}</div>${body}<button class="btn-link" id="workspace-close">${escapeHtml(t('cancel'))}</button></div>`;
     for (const field of ['name','description','stack','path','constraints']) $('project-' + field).value = Object.hasOwn(draft, field) ? draft[field] : project[field] || '';
   } else if (dialog.mode === 'run-new') {
     title = t('workspaceNewRun');
-    body = `<label class="workspace-field" for="run-name"><span>${escapeHtml(t('workspaceRunName'))}</span><input id="run-name" data-workspace-field="runName" maxlength="200" required></label>
+    body = `<label class="workspace-field" for="run-name"><span>${escapeHtml(t('workspaceRunName'))}</span><input id="run-name" data-workspace-field="runName" data-max-length="200" required></label>
       <label class="workspace-field" for="run-project"><span>${escapeHtml(t('workspaceProject'))}</span><select id="run-project" data-workspace-field="runProject">${projectOptions}</select></label>
       <button class="btn-primary" id="run-save">${escapeHtml(t('workspaceNewRun'))}</button>`;
   } else {
@@ -1607,6 +1607,8 @@ function renderWorkspaceDialog() {
     $('run-name').value = draft.runName || '';
     $('run-project').value = Object.hasOwn(draft,'runProject') ? draft.runProject : state.workspace.projects.activeProjectId || '';
   }
+  const validateLength = INPUT_LIMITS.bind(Array.from(menu.querySelectorAll('[data-max-length]')),
+    [$('project-save'), $('run-save')].filter(Boolean), t, () => !!state.workspaceBusy);
   $('workspace-close').onclick = () => hideCtxMenu();
   const perform = async (button, fn) => {
     button.disabled = true;
@@ -1615,12 +1617,14 @@ function renderWorkspaceDialog() {
   };
   if ($('project-new')) $('project-new').onclick = () => { state.workspaceDialog={mode:'project-edit'}; renderWorkspaceDialog(); $('project-name').focus(); };
   if ($('project-save')) $('project-save').onclick = () => {
+    if (!validateLength(true)) return;
     const fields=workspaceDialogDraft();
     if (!fields.name.trim()) { $('project-name').focus(); return; }
     const project=projects.find(candidate=>candidate.id===dialog.id);
     perform($('project-save'),async()=> { await workspaceProjectAction(project?'update':'create', {...fields, ...(project?{id:project.id,revision:project.revision}:{revision:state.workspace.projects.revision})}); state.workspaceDialog={mode:'projects'}; });
   };
   if ($('run-save')) $('run-save').onclick = () => {
+    if (!validateLength(true)) return;
     if (!$('run-name').value.trim()) { $('run-name').focus(); return; }
     perform($('run-save'),async()=> { await workspaceRunAction('create',{revision:state.workspace.runs.revision,workflowRel:dialog.rel,name:$('run-name').value,projectId:$('run-project').value||null}); state.flowRunActive=dialog.rel; hideCtxMenu(); refreshFlowRun(true); });
   };
@@ -2452,15 +2456,17 @@ function promptFillPlaceholders(tokens, opts) {
       for (const inp of inputs) values[inp.dataset.token] = inp.value;
       return values;
     };
-    $('fill-ok').onclick = () => done(collect());
-    $('fill-raw').onclick = () => done({});
+    const validateLength = INPUT_LIMITS.bind(inputs, [$('fill-ok'), $('fill-raw')], t);
+    const submit = values => { if (validateLength(true)) done(values); };
+    $('fill-ok').onclick = () => submit(collect());
+    $('fill-raw').onclick = () => submit({});
     inputs.forEach((inp, i) => {
       wirePlaceholderField(inp, () => done(null));
       inp.onkeydown = (e) => {
         if (e.isComposing) return;   // 输入法选词时的 Enter 是确认候选，不是我们的键
         // 提交用 Ctrl+Enter 而不是 Enter：这里通常有好几个输入框，
         // 裸 Enter 更像"下一项"，拿它提交会让人填到一半就被送出去。
-        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); done(collect()); return; }
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(collect()); return; }
         // Shift+Enter 不拦，走 textarea 默认的换行。
         if (e.key === 'Enter' && !e.shiftKey) {
           e.preventDefault();
@@ -2499,7 +2505,7 @@ function placeholderFieldHtml(it, id, withToken) {
     : '';
   return select + `<textarea id="${escapeHtml(id)}" class="ctx-prompt-input fill-input" rows="1"`
     + (withToken ? ` data-token="${escapeHtml(it.token)}"` : '')
-    + ` maxlength="20000" placeholder="${escapeHtml(it.token)}"></textarea>`;
+    + ` data-max-length="20000" placeholder="${escapeHtml(it.token)}"></textarea>`;
 }
 
 // 接上下拉框和 textarea 的双向同步。下拉框是 textarea 紧前面的兄弟元素。
@@ -2514,7 +2520,7 @@ function wirePlaceholderField(input, onEscape) {
   // 选了"自定义"不清空 textarea：用户可能只是想在当前值上改几个字。
   // 也不把焦点挪回 textarea：键盘用户在关着的下拉框上按方向键会连续触发 change，
   // 每次都抢走焦点就没法往下翻了。
-  select.onchange = () => { if (select.value) input.value = select.value; };
+  select.onchange = () => { if (select.value) { input.value = select.value; input.dispatchEvent(new Event('input', { bubbles: true })); } };
   select.onkeydown = (e) => { if (e.key === 'Escape') onEscape(); };
   input.addEventListener('input', sync);
   sync();
@@ -2555,11 +2561,13 @@ function promptPlaceholderValue(meta, initial) {
     wirePlaceholderField(inp, () => done(null));
     inp.focus();
     inp.select();
-    $('ctx-ok').onclick = () => done(inp.value.trim());
+    const validateLength = INPUT_LIMITS.bind([inp], [$('ctx-ok')], t);
+    const submit = () => { if (validateLength(true)) done(inp.value.trim()); };
+    $('ctx-ok').onclick = submit;
     $('ctx-cancel').onclick = () => done(null);
     inp.onkeydown = (e) => {
       if (e.isComposing) return;   // 输入法选词时的 Enter 是确认候选
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); done(inp.value.trim()); }
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
       if (e.key === 'Escape') done(null);
     };
   });

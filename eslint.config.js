@@ -36,7 +36,8 @@ const rendererGlobals = {
   TREE_SELECTION: 'readonly',
   // src/flow-run.js 声明的常量（工作流执行模式的状态机）
   FLOW_RUN: 'readonly',
-  PROJECT_CONTEXT: 'readonly'
+  PROJECT_CONTEXT: 'readonly',
+  INPUT_LIMITS: 'readonly'
 };
 
 // src/selftest/*.js 是由主进程读成文本、丢进页面上下文执行的，所以 renderer.js
@@ -224,7 +225,7 @@ module.exports = [
   {
     // 双用模块：浏览器里当 <script>，主进程里被 require。
     // 两套 global 都要给，否则结尾那句 typeof module !== 'undefined' 会报 no-undef。
-    files: ['src/i18n.js', 'src/frontmatter.js', 'src/placeholders.js', 'src/project-context.js', 'src/includes.js', 'src/composer-meta.js', 'src/rule-targets.js', 'src/workflow-refs.js', 'src/flow-graph.js', 'src/tree-selection.js', 'src/flow-run.js'],
+    files: ['src/input-limits.js', 'src/i18n.js', 'src/frontmatter.js', 'src/placeholders.js', 'src/project-context.js', 'src/includes.js', 'src/composer-meta.js', 'src/rule-targets.js', 'src/workflow-refs.js', 'src/flow-graph.js', 'src/tree-selection.js', 'src/flow-run.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',

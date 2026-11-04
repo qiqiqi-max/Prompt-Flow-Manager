@@ -208,6 +208,8 @@
         await finishCopy(body, r.rel, capturedToken);
         return;
       }
+      // Reading has finished; the form's input validator needs the idle state.
+      view.busy = false;
       openFillForm(r, body, tokens, capturedToken, capturedContext, capturedMemory);
     } catch (e) {
       setStatus(describeError(e), true);
@@ -243,7 +245,7 @@
       label.textContent = it.hint || it.token;
       const input = document.createElement('textarea');
       input.rows = 2;
-      input.maxLength = 20000;
+      input.dataset.maxLength = '20000';
       input.id = 'ql-fill-' + i;
       input.dataset.token = it.token;
       input.placeholder = it.token;
@@ -270,7 +272,7 @@
         const sync = () => { select.value = it.options.includes(input.value) ? input.value : ''; };
         sync();
         select.addEventListener('change', () => {
-          if (select.value) input.value = select.value;
+          if (select.value) { input.value = select.value; input.dispatchEvent(new Event('input', { bubbles: true })); }
           resize();
           input.focus();
         });
@@ -300,8 +302,9 @@
       for (const inp of inputs) values[inp.dataset.token] = inp.value;
       return values;
     };
+    const validateLength = INPUT_LIMITS.bind(inputs, [ok, raw], t, () => view.busy);
     const submit = async (values) => {
-      if (view.busy) return;
+      if (view.busy || !validateLength(true)) return;
       view.busy = true;
       try {
         // 没填的 token 原样保留，这条语义在 PLACEHOLDERS.fill 里，面板不另写一套

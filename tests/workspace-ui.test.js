@@ -5,6 +5,7 @@ const assert = require('assert/strict');
 const FRONTMATTER = require('../src/frontmatter');
 const PLACEHOLDERS = require('../src/placeholders');
 const PROJECT_CONTEXT = require('../src/project-context');
+const INPUT_LIMITS = require('../src/input-limits');
 const INCLUDES = require('../src/includes');
 const renderer = fs.readFileSync(require.resolve('../src/renderer.js'),'utf8');
 const quick = fs.readFileSync(require.resolve('../src/quick-launch.js'),'utf8');
@@ -42,14 +43,14 @@ async function pendingClose(source=renderer) {
  assert.equal(ctx.state.workspace.projects.revision,3);
 }
 function element(tag='div') {
- const node={tagName:tag.toUpperCase(),children:[],events:{},value:'',dataset:{},style:{},scrollHeight:40,classList:{add(){},remove(){},toggle(){}},setAttribute(){},focus(){},select(){},scrollIntoView(){},appendChild(child){this.children.push(child);},addEventListener(name,fn){this.events[name]=fn;},querySelectorAll(selector){return this.children.flatMap(child=>[child,...child.querySelectorAll(selector)]).filter(child=>selector==='.ql-item' ? child.className==='ql-item' : false);}};
+ const node={tagName:tag.toUpperCase(),children:[],events:{},value:'',dataset:{},style:{},scrollHeight:40,ownerDocument:{createElement:element},classList:{add(){},remove(){},toggle(){}},setAttribute(){},focus(){},select(){},scrollIntoView(){},appendChild(child){child.parentElement=this;this.children.push(child);},insertAdjacentElement(_position,child){const siblings=this.parentElement.children;child.parentElement=this.parentElement;siblings.splice(siblings.indexOf(this)+1,0,child);},addEventListener(name,fn){const previous=this.events[name];this.events[name]=previous?event=>{previous(event);fn(event);}:fn;},querySelectorAll(selector){return this.children.flatMap(child=>[child,...child.querySelectorAll(selector)]).filter(child=>selector==='.ql-item' ? child.className==='ql-item' : false);}};
  Object.defineProperty(node,'textContent',{get(){return this.text||'';},set(value){this.text=value;this.children=[];}});return node;
 }
 async function capturedQuickToken(source=quick) {
  const ids=new Map();const get=id=> {if(!ids.has(id)) ids.set(id,element(id==='ql-input'?'input':'div'));return ids.get(id);};
  let show;let latest;const calls=[];const accepted=[];
  const qlApi={onShow(fn){show=fn;},hide(){},search:async()=>[{rel:'prompts/a.md',name:'A'}],readFile:async()=>({content:'[Project name]'}),copy:async(text,rel,token)=>{calls.push(token);if(!token)token=latest;if(token.showGeneration!==latest.showGeneration)throw new Error('stale');accepted.push(text);}};
- const ctx=vm.createContext({window:{quickLaunchApi:qlApi},document:{getElementById:get,createElement:element,querySelectorAll:()=>[],documentElement:{style:{setProperty(){}}},body:{},addEventListener(){}},I18N:{zh:{},en:{}},FRONTMATTER,PLACEHOLDERS,PROJECT_CONTEXT,INCLUDES,setTimeout,clearTimeout,requestAnimationFrame:fn=>fn()});
+ const ctx=vm.createContext({window:{quickLaunchApi:qlApi},document:{getElementById:get,createElement:element,querySelectorAll:()=>[],documentElement:{style:{setProperty(){}}},body:{},addEventListener(){}},I18N:{zh:{},en:{}},FRONTMATTER,PLACEHOLDERS,PROJECT_CONTEXT,INPUT_LIMITS,INCLUDES,setTimeout,clearTimeout,requestAnimationFrame:fn=>fn()});
  vm.runInContext(source,ctx);
  get('ql-input').value='A';latest={showGeneration:1,workspaceRevision:{projectsRevision:1,runsRevision:1}};
  show({...latest,contextSnapshot:{name:'Project A',values:{}},fillMemory:{}});

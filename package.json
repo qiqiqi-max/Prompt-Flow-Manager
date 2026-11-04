@@ -71,7 +71,7 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "test:quick": "npm run lint && npm test && npm run test:debounce && npm run test:logger && npm run test:sandbox && npm run test:update && npm run test:contrast && npm run test:placeholders && npm run test:frontmatter && npm run test:project-types && npm run test:rule-export && npm run test:composer-meta && npm run test:version-store && npm run test:trash-store && npm run test:usage-store && npm run test:file-move && npm run test:workflow-refs && npm run test:backup-import && npm run test:backup-config && npm run test:backup-preview && npm run test:backup-manifest && npm run test:import-transaction && npm run test:write-gate && npm run test:workspace-stores && npm run test:project-context && npm run test:write-queue && npm run test:workspace-service && npm run test:export-file && npm run test:failure-feedback && npm run test:draft-store && npm run test:includes && npm run test:config-file && npm run test:workflow-index && npm run test:flow-graph && npm run test:flow-run && npm run test:flow-run-copy && npm run test:mcp && npm run test:cache-budget && npm run test:cli && npm run test:tree-selection && npm run test:tag-rewrite && npm run test:batch-ops && npm run test:library-watch && npm run test:quick-launch-logic",
-    "test:all": "npm run test:quick && npm run test:ui && npm run test:workspace-ui && npm run test:flow-run-integration && npm run test:fn && npm run test:import-rollback && npm run test:ui-failure && npm run test:tabs && npm run test:close && npm run test:close-unsaved && npm run test:draft-recovery && npm run test:save-conflict && npm run test:external-change && npm run test:layout-small && npm run test:render && npm run test:heal && npm run test:quick-launch && npm run test:reverse && npm run test:reverse-split",
+    "test:all": "npm run test:quick && npm run test:ui && npm run test:workspace-ui && npm run test:workspace-restart && npm run test:flow-run-integration && npm run test:fn && npm run test:import-rollback && npm run test:ui-failure && npm run test:tabs && npm run test:close && npm run test:close-unsaved && npm run test:draft-recovery && npm run test:save-conflict && npm run test:external-change && npm run test:layout-small && npm run test:render && npm run test:heal && npm run test:quick-launch && npm run test:reverse && npm run test:reverse-split",
     "bench": "node tests/search-bench.js",
     "sync-vendor": "node scripts/sync-vendor.js",
     "prebuild": "install-electron && node scripts/sync-vendor.js",
@@ -79,7 +79,8 @@
     "predist": "install-electron && node scripts/sync-vendor.js",
     "dist": "electron-builder --win portable",
     "test:flow-run-integration": "node tests/flow-run-integration.test.js",
-    "test:workspace-ui": "node tests/workspace-ui.test.js && node tests/workspace-integration.test.js"
+    "test:workspace-ui": "node tests/workspace-ui.test.js && node tests/workspace-integration.test.js",
+    "test:workspace-restart": "node tests/workspace-restart.test.js"
   },
   "keywords": [
     "prompt",

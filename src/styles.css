@@ -951,3 +951,6 @@ mark {
 .workspace-detail-fields dd { margin: 0 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .workspace-history-steps { padding-left: 24px; display: grid; gap: 8px; }
 .workspace-history-detail h4 { margin: 12px 0 8px; font-size: 0.8125rem; }
+
+.input-length-error { color: var(--danger); font-size: 0.8125rem; overflow-wrap: anywhere; }
+[aria-invalid="true"] { border-color: var(--danger); }
