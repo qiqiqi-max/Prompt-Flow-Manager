@@ -49,6 +49,18 @@ test('remaps only actual flow prompt and active include text, retaining unknown 
   assert.equal(api.remapImportedContent(bodies[2][1].replaceAll('\n', '\r\n'), relMap()), bodies[2][1].replace('{{include: templates/leaf.md}}', '{{include: templates/leaf-1.md}}').replaceAll('\n', '\r\n'), 'nested CRLF content rewrite');
 });
 
+test('Windows prompt paths execute imported collision copies', () => {
+  const api = subject();
+  const graph = require('../src/flow-graph');
+  for (const reference of ['prompts\\testing\\portable.md', "'prompts\\testing\\portable.md'"]) {
+    const original = bodies[0][1].replaceAll('    prompt: prompts/testing/portable.md', '    prompt: ' + reference);
+    const transformed = api.remapImportedContent(original, relMap());
+    assert.deepEqual(graph.parseSteps(transformed).map(step => step.prompt),
+      ['prompts/testing/portable-1.md', 'prompts/testing/portable-1.md'], 'Windows references point at imported copies');
+    assert.ok(transformed.includes('Workflow prose prompts/testing/portable.md'), 'Windows mapping preserves prose');
+  }
+});
+
 test('nested unpackaged includes stay unresolved and list the original missing path', () => {
   const api = subject(); const map = relMap(); map.delete(leaf);
   const imported = api.prepareImport(documents('local', 0), portable(), map, freshId());
@@ -154,13 +166,14 @@ const legacyCase = 'old backups with neither document remain compatible and empt
 const zipCase = 'ZIP exact workspace opt-in admits 16 MiB documents without admitting unknown JSON or raising Markdown limits';
 const overlimitCase = 'ZIP workspace limit and 64 MiB combined limit reject a business backup, never partially import it';
 const controls = [
+  ['Windows prompt normalization', 'Windows prompt paths execute imported collision copies', 'lib/workspace-backup.js', "rel.replace(/\\\\/g, '/')", 'rel', 'Windows references point at imported copies'],
   ['new IDs', remapCase, 'lib/workspace-backup.js', 'project.id = freshId();', 'project.id = original.id;', 'remapped state'],
   ['binding IDs', remapCase, 'lib/workspace-backup.js', 'run.projectId = projectIds.get(run.projectId) || null;', 'run.projectId = null;', 'remapped state'],
   ['original graph', remapCase, 'lib/workspace-backup.js', "for (const key of ['originGraphSnapshot', 'graphSnapshot'])", "for (const key of ['graphSnapshot'])", 'remapped state'],
   ['saved graph', remapCase, 'lib/workspace-backup.js', "for (const key of ['originGraphSnapshot', 'graphSnapshot'])", "for (const key of ['originGraphSnapshot'])", 'remapped state'],
   ['incoming selection', remapCase, 'lib/workspace-backup.js', 'after.runs.selectedByWorkflow[target] = runIds.get(id);', 'void 0;', 'remapped state'],
   ['local selection', remapCase, 'lib/workspace-backup.js', 'const projectIds = new Map();', 'after.projects.activeProjectId = null; const projectIds = new Map();', 'remapped state'],
-  ['workflow rewrite', contentCase, 'lib/workspace-backup.js', 'WORKFLOW_REFS.mapPromptLines(content, rel => mapped(relMap, rel) || null).content', 'content', 'precise flow and active include rewrite'],
+  ['workflow rewrite', contentCase, 'lib/workspace-backup.js', "WORKFLOW_REFS.mapPromptLines(content, rel => mapped(relMap, rel.replace(/\\\\/g, '/')) || null).content", 'content', 'precise flow and active include rewrite'],
   ['include masking', contentCase, 'lib/workspace-backup.js', 'INCLUDES.extract(body).reverse()', "INCLUDES.extract(body.replaceAll('`', ' ')).reverse()", 'precise flow and active include rewrite'],
   ['prompt include', contentCase, 'lib/workspace-backup.js', 'function remapImportedContent(content, relMap) {', "function remapImportedContent(content, relMap) { if (content.includes('PACKAGE-PROMPT')) return content;", 'prompt frontmatter remains metadata'],
   ['CRLF include', contentCase, 'lib/workspace-backup.js', 'function remapImportedContent(content, relMap) {', "function remapImportedContent(content, relMap) { if (content.includes('\\r\\n')) return content;", 'nested CRLF content rewrite'],
