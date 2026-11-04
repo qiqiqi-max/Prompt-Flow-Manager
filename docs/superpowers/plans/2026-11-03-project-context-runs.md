@@ -93,17 +93,17 @@
 - [x] Implement two exact ZIP entries, manifest participation, counts/privacy text in preview, short exclusive export snapshot after dialog, strict import validation and capacity preflight, project/run ID and all actual flow/include path remaps, blocked missing dependencies, transaction snapshots and refresh on rollback.
 - [x] Verify exported and imported runs cannot silently resolve missing package dependencies to existing local files; originalGraphSnapshot and graphSnapshot both remapped. Preserve normal prose/frontmatter; reuse existing workflow reference text rewriting and add precise include rewriting rather than global replace.
 - [x] Update README storage/migration/context/history/backup instructions and limitations; CHANGELOG; contributor test inventory. Version bump only if required by existing release flow; no new dependency.
-- [ ] Run focused GREEN/reverse controls and npm run test:all, npm run dist, npm run test:packaged. Use existing known local sandbox fallback transparently; do not report strict sandbox as locally passing. Commit and report exact tested commit/tree, artifact path/hash and unresolved risks.
+- [x] Run focused GREEN/reverse controls and npm run test:all, npm run dist, npm run test:packaged. Use existing known local sandbox fallback transparently; do not report strict sandbox as locally passing. Commit and report exact tested commit/tree, artifact path/hash and unresolved risks.
 
 ## Completion
 
-- [ ] Each task has fresh spec/quality review and resolved important findings.
-- [ ] Whole branch review against the accepted design, fix wave if needed, rerun affected checks.
-- [ ] Push feature branch and open reviewable PR using existing GitHub authorization; never force-push or directly push main. Do not automatically merge this new feature without matching current authorization.
+- [x] Each task has fresh spec/quality review and resolved important findings.
+- [x] Whole branch review against the accepted design, fix wave if needed, rerun affected checks.
+- [x] Push feature branch and open reviewable PR using existing GitHub authorization; never force-push or directly push main. Do not automatically merge this new feature without matching current authorization.
 - [ ] Report implemented functionality, test/package evidence, PR and executable location concisely.
 
 
 
 ## Recovery verification (2026-11-04)
 
-Task 3 input protection and two-process restoration committed as 9900d14; targeted RED/GREEN controls, quick-launch, workspace UI, lint and npm test passed. Scoped fix review pending. Task 4 backup code committed as 8007e43; focused quick and real backup integration/reverse controls pass. Full regression, independent review and package validation are in progress.
+Task 3 input protection and two-process restoration committed as 9900d14; targeted RED/GREEN controls, quick-launch, workspace UI, lint and npm test passed. Scoped fix review accepted. Task 4 backup code committed as 8007e43; focused quick and real backup integration/reverse controls pass. Full regression and independent review passed; follow-up Windows path and obsolete-empty-legacy fixes passed focused regressions and scoped reviews. Final executable built from a733a91 and packaged checks passed. PR #16 opened; CI tracked in the verification record.
