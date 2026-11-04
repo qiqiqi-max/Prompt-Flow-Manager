@@ -101,3 +101,24 @@ for (const operation of ['remove', 'move-out', 'rename']) {
     await assert.rejects(exercise(load(source.replace(from, to)), unresolvedLifecycle(operation)), error => error instanceof assert.AssertionError && error.message === 'Missing expected rejection.');
   });
 }
+
+const emptyLegacyConfig = {
+  flowRuns: Object.fromEntries(['workflows/obsolete.md', rel].map(file => [file, { v: 1, current: 'a', done: [], skipped: [], history: [], values: { '[old]': 'retained' }, updatedAt: 1 }]))
+};
+async function obsoleteLegacy(f) {
+  f.workflows.set('workflows/obsolete.md', { steps: [], hash: 'empty' });
+  let migrated;
+  await assert.doesNotReject(async () => { migrated = await f.service.initialize(); }, 'obsolete empty flow must not block migration');
+  assert.equal(migrated.runs.legacyImported, true);
+  assert.deepEqual(migrated.runs.runs.map(run => run.workflowRel), [rel]);
+  assert.equal(migrated.runs.runs[0].progress.values['[old]'], 'retained');
+  assert.equal((await project(f)).projects.projects.length, 1);
+  await assert.rejects(create(f, { workflowRel: 'workflows/obsolete.md' }), /E_RUN_EMPTY_GRAPH/);
+}
+test('obsolete empty legacy workflow permits valid migration and project use', () => exercise(factory(), obsoleteLegacy, emptyLegacyConfig));
+test('obsolete empty legacy workflow [reverse control]', async () => {
+  const source = fs.readFileSync(sourceFile, 'utf8');
+  const from = "if (error.code === 'E_RUN_EMPTY_GRAPH' || /^E_RUN_EMPTY_GRAPH(?:\\||$)/.test(error.message)) continue;";
+  assert.ok(source.includes(from));
+  await assert.rejects(exercise(load(source.replace(from, 'void 0;')), obsoleteLegacy, emptyLegacyConfig), error => error instanceof assert.AssertionError && error.message.includes('obsolete empty flow must not block migration'));
+});
