@@ -142,6 +142,12 @@ jobs:
       - name: 工作区服务、文件生命周期与 IPC
         run: npm run test:workspace-service
 
+      - name: 项目运行备份校验与映射
+        run: npm run test:workspace-backup
+
+      - name: 项目运行备份真实往返与回滚
+        run: npm run test:workspace-backup-integration
+
       - name: 单文件安全导出
         run: npm run test:export-file
 

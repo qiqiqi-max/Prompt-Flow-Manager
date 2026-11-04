@@ -23,8 +23,9 @@ for (const stream of [process.stdout, process.stderr]) {
 const archiver = require('archiver'); // 仅用于压缩导出
 const {
   readZipMarkdownEntries, sanitizeTitle, uniqueRel, backupRelForEntry, backupVersionForEntry, backupTrashForEntry,
-  PORTABLE_CONFIG_ENTRY, BACKUP_MANIFEST_ENTRY
+  PORTABLE_CONFIG_ENTRY, BACKUP_MANIFEST_ENTRY, MAX_IMPORT_ENTRY_BYTES, MAX_IMPORT_TOTAL_BYTES, MAX_IMPORT_ENTRIES
 } = require('./lib/zip-import');
+const workspaceBackup = require('./lib/workspace-backup');
 const backupConfig = require('./lib/backup-config');
 const { summarizeBackupEntries } = require('./lib/backup-preview');
 const { sha256, buildManifest, verifyManifest } = require('./lib/backup-manifest');
@@ -922,7 +923,7 @@ async function createFileAt(rel, content) {
   return { content: toWrite, meta: parseFrontmatter(toWrite).meta };
 }
 
-ipcMain.handle('create-file', (e, rel, content) => createFileAt(rel, content));
+ipcMain.handle('create-file', (e, rel, content) => queueWrite('ver:' + String(rel), () => createFileAt(rel, content)));
 ipcMain.handle('read-draft', async (e, rel) => draftStore.read(rel));
 ipcMain.handle('save-draft', async (e, rel, content, baseContent) => queueWrite('draft:' + String(rel), () => (
   draftStore.save(rel, content, baseContent)
@@ -1593,9 +1594,15 @@ ipcMain.handle('export-zip', async () => {
     filters: [{ name: 'ZIP', extensions: ['zip'] }]
   });
   if (res.canceled || !res.filePath) return { ok: false };
-  const portableConfig = backupConfig.exportPortable(await loadConfig());
-  const backupFiles = await collectBackupFiles(portableConfig);
+  const backupFiles = await writeGate.exclusive(async () => {
+    const workspace = await workspaceService.exportDataLocked();
+    const portableConfig = backupConfig.exportPortable(await loadConfig());
+    return collectBackupFiles(portableConfig, workspace);
+  });
   const manifest = buildManifest(backupFiles, { appVersion: app.getVersion() });
+  const manifestBytes = Buffer.from(JSON.stringify(manifest, null, 2));
+  if (backupFiles.reduce((sum, file) => sum + file.size, manifestBytes.length) > MAX_IMPORT_TOTAL_BYTES) throw appError('E_ZIP_TOTAL_TOO_BIG', MAX_IMPORT_TOTAL_BYTES);
+  if (backupFiles.length + 1 > MAX_IMPORT_ENTRIES) throw appError('E_ZIP_TOO_MANY_ENTRIES', MAX_IMPORT_ENTRIES);
   // 关键：必须监听输出流的 error。原先只挂了 archive 的 error，于是
   // 目标不可写（路径无权限/磁盘满/被占用）时 close 仍会触发 → resolve →
   // 返回 {ok:true}，用户被告知"备份成功"而磁盘上根本没有文件；
@@ -1611,7 +1618,7 @@ ipcMain.handle('export-zip', async () => {
     archive.on('error', (err) => done(reject, appError('E_EXPORT_ARCHIVE', err.message)));
     archive.pipe(out);
     for (const file of backupFiles) archive.append(file.data, { name: file.path });
-    archive.append(JSON.stringify(manifest, null, 2), { name: BACKUP_MANIFEST_ENTRY });
+    archive.append(manifestBytes, { name: BACKUP_MANIFEST_ENTRY });
     archive.finalize().catch((err) => done(reject, appError('E_EXPORT_ARCHIVE', err.message)));
   }).catch(async (err) => {
     // 失败时别留下半截 zip 让用户误当成可用备份
@@ -1621,8 +1628,15 @@ ipcMain.handle('export-zip', async () => {
   return { ok: true, path: res.filePath };
 });
 
-async function collectBackupFiles(portableConfig) {
+async function collectBackupFiles(portableConfig, workspace) {
   const files = [];
+  let total = 0;
+  function append(rel, data, limit = MAX_IMPORT_ENTRY_BYTES) {
+    if (data.length > limit) throw appError('E_ZIP_ENTRY_TOO_BIG', rel);
+    total += data.length;
+    if (total > MAX_IMPORT_TOTAL_BYTES) throw appError('E_ZIP_TOTAL_TOO_BIG', MAX_IMPORT_TOTAL_BYTES);
+    files.push({ path: rel, data, size: data.length, sha256: sha256(data) });
+  }
   async function walk(dir, prefix, accept) {
     let entries;
     try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
@@ -1633,7 +1647,7 @@ async function collectBackupFiles(portableConfig) {
       if (entry.isDirectory()) await walk(full, rel, accept);
       else if (entry.isFile() && accept(rel)) {
         const data = await fsp.readFile(full);
-        files.push({ path: rel, data, size: data.length, sha256: sha256(data) });
+        append(rel, data);
       }
     }
   }
@@ -1641,7 +1655,11 @@ async function collectBackupFiles(portableConfig) {
   await walk(VERSIONS_DIR, '.versions', rel => !!backupVersionForEntry(rel));
   await walk(TRASH_DIR, '.trash', rel => !!backupTrashForEntry(rel));
   const configData = Buffer.from(JSON.stringify({ schema: 1, config: portableConfig }, null, 2), 'utf8');
-  files.push({ path: PORTABLE_CONFIG_ENTRY, data: configData, size: configData.length, sha256: sha256(configData) });
+  append(PORTABLE_CONFIG_ENTRY, configData);
+  workspaceBackup.validatePortable(workspace);
+  for (const [rel, document] of [[workspaceBackup.PROJECTS_ENTRY, workspace.projects], [workspaceBackup.RUNS_ENTRY, workspace.runs]]) {
+    append(rel, Buffer.from(JSON.stringify(document, null, 2) + '\n'), 16 * 1024 * 1024);
+  }
   return files.sort((a, b) => a.path.localeCompare(b.path));
 }
 
@@ -1759,11 +1777,11 @@ ipcMain.handle('import-single', async () => {
   if (res.canceled || !res.filePaths || !res.filePaths[0]) return { ok: false };
   const srcPath = res.filePaths[0];
   const content = await fsp.readFile(srcPath, 'utf8');
-  const rel = await importMarkdown(path.basename(srcPath), content);
+  const rel = await writeGate.shared(() => importMarkdown(path.basename(srcPath), content));
   return { ok: true, rel };
 });
 
-ipcMain.handle('import-zip', async () => writeGate.exclusive(async () => {
+ipcMain.handle('import-zip', async () => {
   const res = await dialog.showOpenDialog(win, {
     title: mt('dlgImportZip'),
     filters: [{ name: 'ZIP', extensions: ['zip'] }],
@@ -1775,7 +1793,8 @@ ipcMain.handle('import-zip', async () => writeGate.exclusive(async () => {
     includeVersionIndexes: true,
     includePortableConfig: true,
     includeTrash: true,
-    includeManifest: true
+    includeManifest: true,
+    includeWorkspace: true
   });
   const manifestEntry = entries.find(entry => entry.path === BACKUP_MANIFEST_ENTRY);
   let manifest = null;
@@ -1790,7 +1809,9 @@ ipcMain.handle('import-zip', async () => writeGate.exclusive(async () => {
     const problems = [...verification.missing, ...verification.changed, ...verification.extra].slice(0, 5).join(', ');
     throw appError('E_BACKUP_MANIFEST_MISMATCH', problems);
   }
+  const portableWorkspace = workspaceBackup.readPortableEntries(backupEntries, skipped);
   const summary = summarizeBackupEntries(backupEntries, rel => fs.existsSync(safeJoin(rel)));
+  if (portableWorkspace && summary.mode !== 'backup') throw appError('E_WORKSPACE_INVALID', 'backup content paths');
   const detailKey = summary.mode === 'backup' ? 'importBackupPreviewDetail' : 'importZipPreviewDetail';
   const conflictText = summary.conflictCount
     ? '\n\n' + mt('importBackupConflicts', {
@@ -1809,22 +1830,37 @@ ipcMain.handle('import-zip', async () => writeGate.exclusive(async () => {
       files: summary.files,
       versions: summary.versions,
       trash: summary.trash,
+      projects: summary.projects,
+      runs: summary.runs,
       settings: summary.settings ? mt('yes') : mt('no')
-    }) + conflictText
+    }) + (portableWorkspace ? '\n\n' + mt('importWorkspacePrivacy') : '') + conflictText
   });
   if (answer.response !== 1) return { ok: false, canceled: true, summary };
+  return writeGate.exclusive(async () => {
   const configEntry = backupEntries.find(entry => entry.path === PORTABLE_CONFIG_ENTRY);
   const trashEntries = backupEntries.filter(entry => backupTrashForEntry(entry.path));
-  const contentEntries = backupEntries.filter(entry => entry !== configEntry && !backupVersionForEntry(entry.path) && !backupTrashForEntry(entry.path));
+  const contentEntries = backupEntries.filter(entry => entry !== configEntry && !workspaceBackup.isWorkspaceEntry(entry.path) && !backupVersionForEntry(entry.path) && !backupTrashForEntry(entry.path));
   const versionEntries = backupEntries.filter(entry => backupVersionForEntry(entry.path));
   // 本应用导出的 ZIP 以 prompts/workflows/templates 为顶层目录，
   // 完整备份要保留工作流和模板位置；其他 ZIP 仍按 frontmatter 导入为提示词。
-  const isAppBackup = contentEntries.length > 0 && contentEntries.every(entry => backupRelForEntry(entry.path));
+  const isAppBackup = (contentEntries.length > 0 || !!portableWorkspace) && contentEntries.every(entry => backupRelForEntry(entry.path));
   const transaction = isAppBackup ? createImportTransaction() : null;
-  const atomicBackup = isAppBackup && !!manifest;
+  const atomicBackup = isAppBackup && (!!manifest || !!portableWorkspace);
+  // Decide every destination and validate merged count/encoded size before creating any content.
+  const plannedRels = new Map(); const reservedPaths = new Set();
+  if (isAppBackup) for (const entry of contentEntries) {
+    const original = backupRelForEntry(entry.path);
+    if (plannedRels.has(original)) throw appError('E_WORKSPACE_INVALID', 'duplicate content path');
+    const key = rel => process.platform === 'win32' ? rel.toLowerCase() : rel;
+    const rel = uniqueRel(original, candidate => reservedPaths.has(key(candidate)) || fs.existsSync(safeJoin(candidate)));
+    plannedRels.set(original, rel); reservedPaths.add(key(rel));
+  }
+  const preparedWorkspace = portableWorkspace ? await workspaceService.prepareImportLocked(portableWorkspace, plannedRels) : null;
   if (transaction) {
     await transaction.snapshot(CONFIG_PATH);
     await transaction.snapshot(path.join(TRASH_DIR, 'index.json'));
+    await transaction.snapshot(PROJECTS_PATH);
+    await transaction.snapshot(RUNS_PATH);
   }
   const imported = [];
   const restoredRels = new Map();
@@ -1834,6 +1870,9 @@ ipcMain.handle('import-zip', async () => writeGate.exclusive(async () => {
     if (!atomicBackup) return;
     const rollback = await transaction.rollback();
     for (const rel of imported) dropFromCache(safeJoin(rel));
+    workspaceService.invalidate();
+    try { await workspaceService.refreshLocked(); } catch (error) { logger.error('[import] ' + error.message); }
+    if (win && !win.isDestroyed()) win.webContents.send('library-changed', { changes: imported.map(rel => ({ rel, type: 'removed' })).slice(0, LIBRARY_CHANGE_MAX), truncated: imported.length > LIBRARY_CHANGE_MAX });
     if (!rollback.ok) {
       logger.error('[import] 完整备份回滚不完整: ' + rollback.errors.join('; '));
       throw appError('E_IMPORT_ROLLBACK_PARTIAL', rollback.errors.slice(0, 3).join('; '));
@@ -1843,12 +1882,15 @@ ipcMain.handle('import-zip', async () => writeGate.exclusive(async () => {
   for (const entry of contentEntries) {
     try {
       const backupRel = isAppBackup ? backupRelForEntry(entry.path) : null;
-      const rel = backupRel
-        ? await importMarkdownAt(backupRel, entry.content, (createdRel) => {
-          const full = safeJoin(createdRel);
-          if (transaction) transaction.trackFile(full);
-        })
-        : await importMarkdown(entry.name, entry.content);
+      let rel;
+      if (backupRel) {
+        rel = plannedRels.get(backupRel);
+        const full = safeJoin(rel);
+        let dir = path.dirname(full);
+        while (dir !== DATA_ROOT && !fs.existsSync(dir)) { await transaction.trackDir(dir); dir = path.dirname(dir); }
+        await createFileAt(rel, entry.content);
+        transaction.trackFile(full);
+      } else rel = await importMarkdown(entry.name, entry.content);
       imported.push(rel);
       if (backupRel) restoredRels.set(backupRel, rel);
     } catch (err) {
@@ -1858,7 +1900,24 @@ ipcMain.handle('import-zip', async () => writeGate.exclusive(async () => {
   let restoredVersions = 0;
   let restoredSettings = false;
   let restoredTrash = 0;
+  let restoredProjects = 0;
+  let restoredRuns = 0;
   if (isAppBackup) {
+    // Use the complete map and rewrite only the copies created by this transaction.
+    for (const [original, rel] of restoredRels) {
+      try {
+        const full = safeJoin(rel); const content = await fsp.readFile(full, 'utf8');
+        const transformed = workspaceBackup.remapImportedContent(content, restoredRels);
+        if (transformed !== content) { await writeFileAtomic(full, transformed); dropFromCache(full); }
+      } catch (err) { await failImport(original, err); }
+    }
+    if (portableWorkspace) {
+      try {
+        await workspaceService.importDataLocked(portableWorkspace, restoredRels, { prepared: preparedWorkspace, silent: true });
+        restoredProjects = portableWorkspace.projects.projects.length;
+        restoredRuns = portableWorkspace.runs.runs.length;
+      } catch (err) { await failImport(workspaceBackup.PROJECTS_ENTRY, err); }
+    }
     for (const entry of versionEntries) {
       const info = backupVersionForEntry(entry.path);
       const targetRel = restoredRels.get(info.rel);
@@ -1882,7 +1941,7 @@ ipcMain.handle('import-zip', async () => writeGate.exclusive(async () => {
           if (index.current) {
             const bodyEntry = contentEntries.find(c => backupRelForEntry(c.path) === info.rel);
             const written = bodyEntry ? await readPrevContent(safeJoin(targetRel)) : null;
-            if (written != null && contentHash(bodyEntry.content) === index.current.sha256) {
+            if (written != null && bodyEntry.sha256 === index.current.sha256) {
               index.current = { note: index.current.note, sha256: contentHash(written) };
             } else {
               delete index.current;
@@ -1975,6 +2034,9 @@ ipcMain.handle('import-zip', async () => writeGate.exclusive(async () => {
       await failImport('.trash', err);
     }
   }
+  if (portableWorkspace) {
+    try { await workspaceService.refreshLocked(); } catch (err) { await failImport(workspaceBackup.RUNS_ENTRY, err); }
+  }
   // 不静默成功：调用方能看到真实导入数量与失败明细
   return {
     ok: true,
@@ -1983,10 +2045,13 @@ ipcMain.handle('import-zip', async () => writeGate.exclusive(async () => {
     restoredVersions,
     restoredSettings,
     restoredTrash,
+    restoredProjects,
+    restoredRuns,
     rels: imported,
     failed: failedList
   };
-}));
+  });
+});
 
 ipcMain.handle('get-stages', () => ({ stages: STAGES, labels: STAGE_LABELS }));
 

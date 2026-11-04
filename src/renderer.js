@@ -1550,7 +1550,7 @@ function workspaceHistoryDetails(run) {
     }).join('')}</ol>`;
   };
   const byId=new Map(run.graphSnapshot.map(step=>[step.id,step]));
-  return `<dl class="workspace-detail-fields">${Object.entries(fields).map(([field,key])=>`<dt>${escapeHtml(t(key))}</dt><dd>${display(run.contextSnapshot[field])}</dd>`).join('')}
+  return `${(run.missingDependencies || []).length ? `<p class="workspace-hint">${escapeHtml(t('workspaceMissingDependencies',{paths:run.missingDependencies.join(', ')}))}</p>` : ''}<dl class="workspace-detail-fields">${Object.entries(fields).map(([field,key])=>`<dt>${escapeHtml(t(key))}</dt><dd>${display(run.contextSnapshot[field])}</dd>`).join('')}
     <dt>${escapeHtml(t('workspaceCreatedAt'))}</dt><dd>${escapeHtml(date(run.createdAt))}</dd><dt>${escapeHtml(t('workspaceCompletedAt'))}</dt><dd>${escapeHtml(date(run.completedAt))}</dd></dl>
     ${Object.keys(run.contextSnapshot.values).length ? `<h4>${escapeHtml(t('workspaceInitialValues'))}</h4>${valuesList(run.contextSnapshot.values)}` : ''}
     ${Object.keys(run.progress.values).length ? `<h4>${escapeHtml(t('workspaceRunValues'))}</h4>${valuesList(run.progress.values)}` : ''}

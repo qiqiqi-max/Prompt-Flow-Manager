@@ -8,6 +8,10 @@ dist/
 .versions/
 .trash/
 config.json
+projects.json
+workflow-runs.json
+projects.json.corrupt-*
+workflow-runs.json.corrupt-*
 # 使用统计与收藏（本机数据，和 config.json 放在同一目录）
 usage.json
 *.log
